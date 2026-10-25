@@ -7,7 +7,7 @@ export function usageWithinBudget(usage: Usage, budget: BudgetSpec): boolean {
 export function verifyUsage(receipt: UsageReceipt, signerDid: string, taskId: string, budget: BudgetSpec): boolean { try { validateSchema('usage-receipt', receipt); return verifySigned(receipt, signerDid) && receipt.payload.taskId === taskId && usageWithinBudget(receipt.payload, budget); } catch { return false; } }
 export class QuotaMeter {
   readonly controller = new AbortController();
-  #usage: Usage; #budget: BudgetSpec; #started: number; #timer: ReturnType<typeof setTimeout>; #amendments = new Set<string>();
+  #reportedWallTime = 0; #usage: Usage; #budget: BudgetSpec; #started: number; #timer: ReturnType<typeof setTimeout>; #amendments = new Set<string>();
   get budget(): BudgetSpec { return structuredClone(this.#budget); }
   constructor(readonly taskId: string, budget: BudgetSpec, readonly ownerDid: string, readonly clock: () => number = Date.now) {
     this.#budget = structuredClone(budget); this.#started = clock();
@@ -19,8 +19,15 @@ export class QuotaMeter {
   record(inputTokens = 0, outputTokens = 0, toolCalls = 0): void {
     if (![inputTokens, outputTokens, toolCalls].every(n => Number.isSafeInteger(n) && n >= 0)) { this.halt('invalid usage'); throw new Error('INVALID_USAGE'); }
     if (this.#usage.halted) throw new Error('BUDGET_EXCEEDED: halted');
-    this.#usage.inputTokens += inputTokens; this.#usage.outputTokens += outputTokens; this.#usage.totalTokens = this.#usage.inputTokens + this.#usage.outputTokens; this.#usage.toolCalls += toolCalls; this.#usage.wallTimeMs = Math.max(0, this.clock() - this.#started);
+    this.#usage.inputTokens += inputTokens; this.#usage.outputTokens += outputTokens; this.#usage.totalTokens = this.#usage.inputTokens + this.#usage.outputTokens; this.#usage.toolCalls += toolCalls; this.#usage.wallTimeMs = Math.max(this.#usage.wallTimeMs, 0, this.clock() - this.#started);
     if (!usageWithinBudget(this.#usage, this.#budget)) { this.halt('quota'); throw new Error('BUDGET_EXCEEDED'); }
+  }
+  recordMetrics(delta: Partial<{ inputTokens: number; outputTokens: number; totalTokens: number; toolCalls: number; wallTimeMs: number }>): void {
+    const i = delta.inputTokens ?? 0, o = delta.outputTokens ?? 0;
+    if (Object.values(delta).some(n => !Number.isSafeInteger(n) || n! < 0) || (delta.totalTokens !== undefined && delta.totalTokens !== i + o)) { this.halt('invalid usage'); throw new Error('INVALID_USAGE'); }
+    if (delta.wallTimeMs !== undefined) this.#reportedWallTime += delta.wallTimeMs;
+    this.#usage.wallTimeMs = Math.max(this.#usage.wallTimeMs, this.#reportedWallTime);
+    this.record(i, o, delta.toolCalls ?? 0);
   }
   amendmentTarget(budget: BudgetSpec) { return { taskId: this.taskId, previousBudgetDigest: digest(this.#budget), budget }; }
   amend(budget: BudgetSpec, approval: ApprovalReceipt): void {

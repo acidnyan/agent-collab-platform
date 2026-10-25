@@ -6,17 +6,17 @@ import { runSandbox } from '@acp/sandbox';
 import { ApprovalGate } from './policy.js';
 import { verifyUsage } from './quota.js';
 export interface ContentArtifact { type: 'Artifact'; taskId: string; name: string; digest: string; data: Json }
-export interface Attestation { type: 'ExecutionAttestation'; taskId: string; contractDigest: string; artifactDigest: string }
+export interface Attestation { type: 'ExecutionAttestation'; taskId: string; contractDigest: string; artifactDigest: string; effectiveIsolationLevel?: string }
 export interface Delivery { artifact: Signed<ContentArtifact>; usage: UsageReceipt; attestation: Signed<Attestation> }
-export function createDelivery(taskId: string, contractDigest: string, data: Json, usage: UsageReceipt, worker: KeyPair): Delivery {
+export function createDelivery(taskId: string, contractDigest: string, data: Json, usage: UsageReceipt, worker: KeyPair, execution?: { effectiveIsolationLevel: string }): Delivery {
   const artifact = signPayload({ type: 'Artifact' as const, taskId, name: 'report.json', digest: digest(data), data }, worker);
-  return { artifact, usage, attestation: signPayload({ type: 'ExecutionAttestation', taskId, contractDigest, artifactDigest: artifact.payload.digest }, worker) };
+  return { artifact, usage, attestation: signPayload({ type: 'ExecutionAttestation', taskId, contractDigest, artifactDigest: artifact.payload.digest, ...(execution ?? {}) }, worker) };
 }
 export interface VerificationResult { accepted: boolean; event: 'VERIFY_ACCEPT' | 'VERIFY_REJECT'; stages: string[]; reason?: string }
 export class VerificationEngine {
   private checks = new Map<string, string>();
   registerIsolatedCheck(target: string, code: string): void { this.checks.set(target, code); }
-  async verify(contract: TaskContract, envelope: SignedEnvelope, gate: ApprovalGate, approval?: ApprovalReceipt): Promise<VerificationResult> {
+  async verify(contract: TaskContract, envelope: SignedEnvelope, gate: ApprovalGate, approval?: ApprovalReceipt | (() => Promise<ApprovalReceipt>)): Promise<VerificationResult> {
     const stages: string[] = [];
     try {
       if (!verifyContract(contract)) throw new Error('INVALID_CONTRACT');
@@ -34,7 +34,7 @@ export class VerificationEngine {
         if (result !== (check.expectedExitCode ?? 0)) throw new Error('DETERMINISTIC_CHECK_FAILED');
       }
       stages.push('schema_isolated_check');
-      gate.require(m.taskId, 'final_verification', d, approval);
+      gate.require(m.taskId, 'final_verification', d, typeof approval === 'function' ? await approval() : approval);
       stages.push('owner_approval'); return { accepted: true, event: 'VERIFY_ACCEPT', stages };
     } catch (e) { return { accepted: false, event: 'VERIFY_REJECT', stages, reason: String(e) }; }
   }

@@ -7,7 +7,7 @@ import type { Json } from '@acp/core';
 export interface SandboxOptions { code: string; input?: Json; timeoutMs: number; onTool: (name: string, args: Record<string, unknown>) => Promise<unknown>; onUsage?: (inputTokens: number, outputTokens: number) => void; signal?: AbortSignal }
 // This trusted wrapper is the only code with access to Node APIs. VM values cross
 // the process boundary as JSON, never as host functions, objects or credentials.
-const wrapper = String.raw`
+export const sandboxWrapper = String.raw`
 const vm = require('node:vm');
 const fs = require('node:fs');
 const config = JSON.parse(fs.readFileSync('task.json', 'utf8'));
@@ -36,7 +36,7 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 604800000) throw new Error('INVALID_TIMEOUT');
   const directory = await mkdtemp(join(tmpdir(), 'acp-task-'));
   try {
-    await writeFile(join(directory, 'runner.cjs'), wrapper, { mode: 0o600 });
+    await writeFile(join(directory, 'runner.cjs'), sandboxWrapper, { mode: 0o600 });
     await writeFile(join(directory, 'task.json'), JSON.stringify({ code: options.code, input: options.input ?? null, timeoutMs: options.timeoutMs }), { mode: 0o600 });
     return await new Promise<Json>((resolve, reject) => {
       const child = spawn(process.execPath, ['--experimental-permission', '--allow-fs-read=' + directory, '--allow-fs-write=' + directory, '--no-addons', '--disable-proto=throw', '--max-old-space-size=64', join(directory, 'runner.cjs')], { cwd: directory, env: sanitizedEnvironment(directory), stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
@@ -69,3 +69,5 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
     });
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
+
+export * from './container.js';

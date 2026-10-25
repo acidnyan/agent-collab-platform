@@ -4,3 +4,4 @@ export * from './schema.js';
 export * from './capability.js';
 export * from './receipts.js';
 export * from './contract.js';
+export * from './discovery.js';

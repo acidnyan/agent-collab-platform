@@ -3,55 +3,104 @@ import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { verifyEnvelope } from '@acp/core';
 import type { SignedEnvelope } from '@acp/core';
-export class InMemoryRelay {
-  private queues = new Map<string, SignedEnvelope[]>(); private seen = new Set<string>();
-  constructor(readonly tamper?: (e: SignedEnvelope) => SignedEnvelope) {}
-  send(envelope: SignedEnvelope): void {
-    if (!verifyEnvelope(envelope)) throw new Error('INVALID_ENVELOPE');
-    if (this.seen.has(envelope.payload.envelopeId)) throw new Error('REPLAYED_ENVELOPE');
-    const queue = this.queues.get(envelope.payload.recipientDid) ?? [];
-    if (queue.length >= 1000 || this.seen.size >= 100000) throw new Error('RELAY_CAPACITY');
-    this.seen.add(envelope.payload.envelopeId);
-    const wire = structuredClone(envelope); queue.push(this.tamper ? this.tamper(wire) : wire); this.queues.set(envelope.payload.recipientDid, queue);
-  }
-  receive(recipientDid: string): SignedEnvelope | undefined {
-    const envelope = this.queues.get(recipientDid)?.shift();
-    if (envelope && !verifyEnvelope(envelope, recipientDid)) throw new Error('RELAY_TAMPERING_DETECTED');
-    return envelope;
-  }
-}
-export async function startLocalRelay(options: { port?: number; tamper?: (e: SignedEnvelope) => SignedEnvelope } = {}) {
-  const relay = new InMemoryRelay(options.tamper);
+import { InMemoryRelay, createRelayFetchHandler } from './fetch.js';
+export * from './fetch.js';
+export { createSignedAgentCard, verifySignedAgentCard, toA2AAgentCard, createInviteToken, parseAndVerifyInviteToken } from '@acp/core';
+export async function startLocalRelay(options: { port?: number; host?: string; tamper?: (e: SignedEnvelope) => SignedEnvelope } = {}) {
+  const relay = new InMemoryRelay(options.tamper), handler = createRelayFetchHandler({ relay });
   const server = createServer(async (request, response) => {
+    const controller = new AbortController(); response.once('close', () => controller.abort());
     try {
-      const url = new URL(request.url ?? '/', 'http://localhost');
-      if (request.method === 'POST' && url.pathname === '/envelopes') {
-        const chunks: Buffer[] = []; let size = 0;
-        for await (const chunk of request) { size += (chunk as Buffer).length; if (size > 1048576) throw new Error('BODY_TOO_LARGE'); chunks.push(chunk as Buffer); }
-        relay.send(JSON.parse(Buffer.concat(chunks).toString()) as SignedEnvelope); response.writeHead(202).end();
-      } else if (request.method === 'GET' && url.pathname === '/envelopes') {
-        const value = relay.receive(url.searchParams.get('recipient') ?? ''); response.writeHead(value ? 200 : 204, { 'content-type': 'application/json' }).end(value ? JSON.stringify(value) : undefined);
-      } else response.writeHead(404).end();
-    } catch (e) { response.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: String(e) })); }
+      const chunks: Buffer[] = []; let size = 0;
+      for await (const chunk of request) { size += (chunk as Buffer).length; if (size > 1048576) throw new Error('BODY_TOO_LARGE'); chunks.push(chunk as Buffer); }
+      const result = await handler(new Request(new URL(request.url ?? '/', 'http://localhost'), { method: request.method, headers: { 'content-type': 'application/json' }, ...(chunks.length ? { body: Buffer.concat(chunks) } : {}), signal: controller.signal }));
+      response.writeHead(result.status, Object.fromEntries(result.headers));
+      if (!result.body) { response.end(); return; }
+      const reader = result.body.getReader();
+      try { while (!response.destroyed) { const { value, done } = await reader.read(); if (done) break; response.write(value); } }
+      finally { await reader.cancel(); response.end(); }
+    } catch (e) { if (!response.headersSent) response.writeHead(400, { 'content-type': 'application/json' }); if (!response.destroyed) response.end(JSON.stringify({ error: String(e) })); }
   });
-  server.requestTimeout = 5000;
+  server.requestTimeout = 10000;
   const wsServer = new WebSocketServer({ server, path: '/ws', maxPayload: 1048576 });
-  wsServer.on('connection', socket => socket.on('message', raw => {
-    try {
-      const request = JSON.parse(raw.toString()) as { method: 'send' | 'receive'; envelope?: SignedEnvelope; recipientDid?: string };
-      if (request.method === 'send' && request.envelope) { relay.send(request.envelope); socket.send(JSON.stringify({ ok: true })); }
-      else if (request.method === 'receive' && request.recipientDid) socket.send(JSON.stringify({ envelope: relay.receive(request.recipientDid) ?? null }));
-      else throw new Error('INVALID_REQUEST');
-    } catch (e) { socket.send(JSON.stringify({ error: String(e) })); }
-  }));
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, '127.0.0.1', resolve); });
+  wsServer.on('connection', socket => {
+    let unsubscribe = () => {};
+    socket.once('close', () => unsubscribe());
+    socket.on('message', raw => {
+      try {
+        const request = JSON.parse(raw.toString()) as { method: 'send' | 'receive' | 'subscribe'; envelope?: SignedEnvelope; recipientDid?: string };
+        if (request.method === 'send' && request.envelope) { relay.send(request.envelope); socket.send(JSON.stringify({ ok: true })); }
+        else if (request.method === 'receive' && request.recipientDid) socket.send(JSON.stringify({ envelope: relay.receive(request.recipientDid) ?? null }));
+        else if (request.method === 'subscribe' && request.recipientDid) {
+          unsubscribe(); const did = request.recipientDid;
+          const flush = () => { let envelope; while (socket.readyState === WebSocket.OPEN && (envelope = relay.receive(did))) socket.send(JSON.stringify({ envelope })); };
+          unsubscribe = relay.subscribe(did, flush); flush();
+        } else throw new Error('INVALID_REQUEST');
+      } catch (e) { socket.send(JSON.stringify({ error: String(e) })); }
+    });
+  });
+  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(options.port ?? 0, options.host ?? '127.0.0.1', resolve); });
   const address = server.address(); if (!address || typeof address === 'string') throw new Error('RELAY_BIND');
-  return { url: 'http://127.0.0.1:' + address.port, wsUrl: 'ws://127.0.0.1:' + address.port + '/ws', close: async () => { for (const client of wsServer.clients) client.terminate(); await new Promise<void>(resolve => wsServer.close(() => resolve())); server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())); } };
+  const hostname = address.address.includes(':') ? '[' + address.address + ']' : address.address;
+  return { relay, url: 'http://' + hostname + ':' + address.port, wsUrl: 'ws://' + hostname + ':' + address.port + '/ws', close: async () => { for (const client of wsServer.clients) client.terminate(); await new Promise<void>(resolve => wsServer.close(() => resolve())); server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())); } };
 }
-export class HttpRelayClient {
-  constructor(readonly url: string) {}
-  async send(envelope: SignedEnvelope): Promise<void> { const result = await fetch(this.url + '/envelopes', { method: 'POST', body: JSON.stringify(envelope), headers: { 'content-type': 'application/json' } }); if (!result.ok) throw new Error('RELAY_REJECTED: ' + await result.text()); }
-  async receive(recipientDid: string): Promise<SignedEnvelope | undefined> { const r = await fetch(this.url + '/envelopes?recipient=' + encodeURIComponent(recipientDid)); if (r.status === 204) return; if (!r.ok) throw new Error('RELAY_REJECTED'); const e = await r.json() as SignedEnvelope; if (!verifyEnvelope(e, recipientDid)) throw new Error('RELAY_TAMPERING_DETECTED'); return e; }
+export interface RelayTransport {
+  send(envelope: SignedEnvelope): void | Promise<void>;
+  receive(recipientDid: string, waitMs?: number, signal?: AbortSignal): SignedEnvelope | undefined | Promise<SignedEnvelope | undefined>;
+  register?(card: import('@acp/core').SignedAgentCard): void | Promise<void>;
+  discover?(): import('@acp/core').SignedAgentCard[] | Promise<import('@acp/core').SignedAgentCard[]>;
+}
+export class HttpRelayClient implements RelayTransport {
+  private buffered = new Map<string, SignedEnvelope[]>();
+  constructor(readonly url: string, readonly fetcher: typeof fetch = fetch) {}
+  async send(envelope: SignedEnvelope): Promise<void> { const result = await this.fetcher(this.url + '/envelopes', { method: 'POST', body: JSON.stringify(envelope), headers: { 'content-type': 'application/json' } }); if (!result.ok) throw new Error('RELAY_REJECTED: ' + await result.text()); }
+  async register(card: import('@acp/core').SignedAgentCard): Promise<void> { const r = await this.fetcher(this.url + '/agents', { method: 'POST', body: JSON.stringify(card), headers: { 'content-type': 'application/json' } }); if (!r.ok) throw new Error('RELAY_REGISTRATION_REJECTED'); }
+  async discover(): Promise<import('@acp/core').SignedAgentCard[]> { const r = await this.fetcher(this.url + '/agents'); if (!r.ok) throw new Error('DISCOVERY_FAILED'); const cards = await r.json() as import('@acp/core').SignedAgentCard[]; const { verifySignedAgentCard } = await import('@acp/core'); if (!Array.isArray(cards) || cards.some(c => !verifySignedAgentCard(c))) throw new Error('INVALID_AGENT_CARD'); return cards; }
+  async receive(recipientDid: string, waitMs?: number, signal?: AbortSignal): Promise<SignedEnvelope | undefined> {
+    const queue = this.buffered.get(recipientDid) ?? []; if (queue.length) return queue.shift();
+    const r = await this.fetcher(this.url + '/envelopes?recipient=' + encodeURIComponent(recipientDid) + (waitMs === undefined ? '' : '&waitMs=' + waitMs), { signal });
+    if (r.status === 204) return; if (!r.ok) throw new Error('RELAY_REJECTED');
+    const body = await r.json() as SignedEnvelope | { envelopes: SignedEnvelope[] };
+    const values = 'envelopes' in body ? body.envelopes : [body];
+    if (!Array.isArray(values) || values.some(e => !verifyEnvelope(e, recipientDid))) throw new Error('RELAY_TAMPERING_DETECTED');
+    this.buffered.set(recipientDid, values); return values.shift();
+  }
+}
+/** Persistent SSE transport with a bounded per-recipient inbox. */
+export class SseRelayClient extends HttpRelayClient {
+  private streams = new Map<string, { controller: AbortController; queue: SignedEnvelope[]; notify: Set<() => void>; error?: unknown; pump?: Promise<void> }>();
+  override async receive(recipientDid: string, waitMs = 30000, signal?: AbortSignal): Promise<SignedEnvelope | undefined> {
+    signal?.throwIfAborted();
+    let state = this.streams.get(recipientDid);
+    if (!state) {
+      state = { controller: new AbortController(), queue: [], notify: new Set() }; this.streams.set(recipientDid, state);
+      const current = state;
+      current.pump = (async () => {
+        try { for await (const e of this.stream(recipientDid, current.controller.signal)) {
+          if (current.queue.length >= 1000) throw new Error('SSE_CAPACITY'); current.queue.push(e); for (const notify of [...current.notify]) notify();
+        } if (!current.controller.signal.aborted) throw new Error('SSE_CLOSED'); }
+        catch (error) { current.error = error; for (const notify of [...current.notify]) notify(); }
+      })();
+    }
+    if (state.queue.length) return state.queue.shift(); if (state.error) throw state.error;
+    const current = state;
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); current.notify.delete(wake); signal?.removeEventListener('abort', abort); };
+      const wake = () => { cleanup(); resolve(); }, abort = () => { cleanup(); reject(new Error('SSE_ABORTED')); };
+      const timer = setTimeout(wake, Math.max(0, Math.min(waitMs, 30000))); current.notify.add(wake); signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) abort();
+    });
+    if (current.error) throw current.error; return current.queue.shift();
+  }
+  async close(): Promise<void> {
+    const states = [...this.streams.values()]; this.streams.clear(); for (const state of states) state.controller.abort(); await Promise.all(states.map(s => s.pump));
+  }
+  async *stream(recipientDid: string, signal?: AbortSignal): AsyncGenerator<SignedEnvelope> {
+    const r = await this.fetcher(this.url + '/stream?recipient=' + encodeURIComponent(recipientDid), { signal });
+    if (!r.ok || !r.body) throw new Error('SSE_FAILED'); const reader = r.body.getReader(), decoder = new TextDecoder(); let buffer = '';
+    try { while (true) { const { value, done } = await reader.read(); if (done) break; buffer += decoder.decode(value, { stream: true }); let index;
+      while ((index = buffer.indexOf('\n\n')) >= 0) { const frame = buffer.slice(0, index); buffer = buffer.slice(index + 2); for (const line of frame.split('\n')) if (line.startsWith('data: ')) { const e = JSON.parse(line.slice(6)) as SignedEnvelope; if (!verifyEnvelope(e, recipientDid)) throw new Error('RELAY_TAMPERING_DETECTED'); yield e; } }
+    } } finally { await reader.cancel(); }
+  }
 }
 export class WebSocketRelayClient {
   private socket: WebSocket; private pending = false;

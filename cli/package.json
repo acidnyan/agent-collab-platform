@@ -17,7 +17,10 @@
     "@acp/core": "workspace:*",
     "@acp/ledger": "workspace:*",
     "@acp/runtime": "workspace:*",
-    "@acp/two-owner-demo": "workspace:*"
+    "@acp/two-owner-demo": "workspace:*",
+    "@acp/relay": "workspace:*",
+    "@acp/adapters": "workspace:*",
+    "@acp/sandbox": "workspace:*"
   },
   "engines": {
     "node": ">=22 <23"
