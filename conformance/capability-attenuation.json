@@ -1,0 +1,130 @@
+{
+  "description": "Apply patch to parent bounds. Child issuer must equal parent audience and parentHash must reference signed parent.",
+  "parent": {
+    "resource": "mcp://alice/docs/*",
+    "allowedTools": [
+      "docs/read"
+    ],
+    "argConstraints": {
+      "docs/read": {
+        "type": "object",
+        "required": [
+          "uri"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "uri": {
+            "type": "string",
+            "pattern": "^mcp://alice/docs/"
+          }
+        }
+      }
+    },
+    "maxCalls": 3,
+    "notBefore": "2026-01-01T00:00:00Z",
+    "expiresAt": "2099-01-01T00:00:00Z",
+    "maxDepth": 2,
+    "taskId": "task_conformance01"
+  },
+  "cases": [
+    {
+      "name": "identical_permissions",
+      "patch": {
+        "maxDepth": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "narrow_resource",
+      "patch": {
+        "resource": "mcp://alice/docs/public/*",
+        "maxDepth": 0
+      },
+      "valid": true
+    },
+    {
+      "name": "fewer_calls",
+      "patch": {
+        "maxCalls": 1,
+        "maxDepth": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "shorter_expiry",
+      "patch": {
+        "expiresAt": "2098-01-01T00:00:00Z",
+        "maxDepth": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "tool_added",
+      "patch": {
+        "allowedTools": [
+          "docs/read",
+          "docs/delete"
+        ],
+        "maxDepth": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "schema_removed",
+      "patch": {
+        "argConstraints": {
+          "docs/read": {}
+        },
+        "maxDepth": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "more_calls",
+      "patch": {
+        "maxCalls": 4,
+        "maxDepth": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "later_expiry",
+      "patch": {
+        "expiresAt": "2100-01-01T00:00:00Z",
+        "maxDepth": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "depth_unchanged",
+      "patch": {
+        "maxDepth": 2
+      },
+      "valid": false
+    },
+    {
+      "name": "different_task",
+      "patch": {
+        "taskId": "task_other000",
+        "maxDepth": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "resource_widened",
+      "patch": {
+        "resource": "mcp://alice/*",
+        "maxDepth": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "earlier_notBefore",
+      "patch": {
+        "notBefore": "2025-01-01T00:00:00Z",
+        "maxDepth": 1
+      },
+      "valid": false
+    }
+  ]
+}

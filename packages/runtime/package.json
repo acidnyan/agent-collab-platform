@@ -1,0 +1,26 @@
+{
+  "name": "@acp/runtime",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@acp/core": "workspace:*",
+    "@acp/ledger": "workspace:*",
+    "@acp/sandbox": "workspace:*",
+    "@a2a-js/sdk": "^0.3.10",
+    "@modelcontextprotocol/sdk": "^1.20.0"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  }
+}
