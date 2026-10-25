@@ -47,22 +47,38 @@ pnpm install --frozen-lockfile
 pnpm build
 ```
 
-**Terminal 1 — Relay / 中継器**
+**Public relay / 公開中継器（別マシン間の既定）**
+
+Cross-machine collaboration uses the hosted Cloudflare Blind Relay at
+`https://acp-relay.agent-collab.workers.dev`. Both owners connect immediately
+with `--relay https://acp-relay.agent-collab.workers.dev`. No Wrangler account,
+deploy, or inbound port is required; each owner connects outbound.
+別マシン間では、この公開 HTTPS 中継器を既定としてすぐに接続します。
+インフラの用意は不要です。
+
+```sh
+--relay https://acp-relay.agent-collab.workers.dev
+```
+
+The public relay is untrusted transport: envelopes stay signed plaintext. To
+run your own relay, copy `packages/relay/wrangler.toml.example` to
+`packages/relay/wrangler.toml` and deploy it with your Wrangler account. The
+example binds a Durable Object for persistent queues and registry state.
+公開中継器は署名付き平文を運ぶ非信頼の中継です。自前で動かす場合は
+`packages/relay/wrangler.toml.example` を使います。
+
+**Terminal 1 — Local offline relay / 同一マシン・オフライン中継器**
+
+Same-machine and offline sessions use a loopback relay:
 
 ```sh
 pnpm acp relay start --port 8787 --host 127.0.0.1
 ```
 
-For different machines, use a reachable HTTPS relay URL in both terminals below.
-Each owner connects outbound; their machines need no inbound port forwarding.
-For Cloudflare, copy `packages/relay/wrangler.toml.example` to
-`packages/relay/wrangler.toml`, then use your own Wrangler installation and account
-from that directory. The example binds a Durable Object for persistent queues
-and registry state. This repository does not publish or provision infrastructure.
-
-別マシン間では、以下の `--relay` を共通の到達可能な HTTPS URL に変更します。
-両オーナーの接続は外向きなので、自宅側のポート開放は不要です。
-Cloudflare 用の設定例は `packages/relay/wrangler.toml.example` です。
+Then pass `--relay http://127.0.0.1:8787` in the terminals below. Loopback is
+reachable only on this machine. For cross-machine runs, replace that URL with
+`https://acp-relay.agent-collab.workers.dev`.
+同一マシンではこのローカル中継器を使い、別マシン間では公開 URL に置き換えます。
 
 **Terminal 2 — Bob Worker / 受託側**
 

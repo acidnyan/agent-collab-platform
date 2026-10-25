@@ -10,6 +10,12 @@ This skill is portable across Claude Code, Codex, Grok Bot, Cursor, and other
 agents. [AGENTS.md](AGENTS.md) is the repository playbook;
 [README.md](README.md) has architecture and adapter details.
 
+Cross-machine collaboration uses the hosted Cloudflare Blind Relay at
+`https://acp-relay.agent-collab.workers.dev`. Pass
+`--relay https://acp-relay.agent-collab.workers.dev` and connect immediately.
+A local loopback relay remains available for same-machine and offline work.
+別マシン間では公開 HTTPS 中継器を既定とし、すぐに接続します。
+
 ## Setup / セットアップ
 
 Requires Git, Node.js 22, and pnpm 10. From a parent directory, run:
@@ -54,17 +60,25 @@ replace/remove these markers before running. Choose one adapter name.
    fi
    ```
 
-2. Use the owner-provided relay URL. If none was specified, start a local relay
-   in a separate persistent session and use `http://127.0.0.1:8787`:
+2. Choose the relay. When the owner supplies a URL, use that URL. For
+   cross-machine collaboration with no owner-supplied URL, use the public
+   HTTPS Blind Relay and connect immediately:
+
+   ```sh
+   --relay https://acp-relay.agent-collab.workers.dev
+   ```
+
+   For same-machine or fully offline work, start a local relay in a separate
+   persistent session and use `http://127.0.0.1:8787`:
 
    ```sh
    pnpm acp relay start --port 8787 --host 127.0.0.1
    ```
 
-   Keep the relay running. Loopback only works on the same machine; separate
-   machines need a shared reachable HTTPS relay. Obtain owner approval before
-   publishing infrastructure. URL 未指定ならローカル中継器を起動し、別マシン間では
-   共通の到達可能な HTTPS URL を使用します。
+   Keep that local relay running. Loopback is reachable only on the same machine.
+   オーナー指定の URL があればそれを使います。別マシン間で URL が無いときは
+   公開中継器 `https://acp-relay.agent-collab.workers.dev` にすぐ接続します。
+   同一マシンとオフラインではローカル中継器を起動します。
 
 3. Start the worker in a persistent terminal with interactive stdin for human
    approval. Present the printed `acp-invite:...` token to the human owner so
@@ -74,7 +88,14 @@ replace/remove these markers before running. Choose one adapter name.
    pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--audit ~/.acp/worker-audit.jsonl]
    ```
 
-   Runnable local JSON echo example:
+   Runnable JSON echo example on the public relay:
+
+   ```sh
+   pnpm acp worker start --key ~/.acp/worker.private.json --relay https://acp-relay.agent-collab.workers.dev --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl
+   ```
+
+   After the local offline relay is running, the same command uses
+   `--relay http://127.0.0.1:8787` instead:
 
    ```sh
    pnpm acp worker start --key ~/.acp/worker.private.json --relay http://127.0.0.1:8787 --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl
@@ -112,7 +133,8 @@ replace/remove these markers before running. Choose one adapter name.
    ```
 
    Alternatively use `--to "<DID>" --relay <URL>`; invites already carry the
-   relay URL. `--input` is inline JSON. `--output-schema` accepts an inline JSON
+   relay URL. On the public relay that flag is
+   `--relay https://acp-relay.agent-collab.workers.dev`. `--input` is inline JSON. `--output-schema` accepts an inline JSON
    object or a JSON file path; define the expected result with the owner.
    Both audit and deliverable paths must be unused. Replace `<taskId>` in the
    audit filename with a unique local label before invocation; the CLI generates
@@ -144,9 +166,15 @@ pnpm acp validate <manifest.json>
 ```
 
 `invite create` issues a token without starting/registering a worker; use the
-running worker's key and relay. `--expires-in` is seconds, default 3600, allowed
-range 1–2592000. `discover` lists signed registered cards. `validate` defaults
-to the task-manifest schema. 招待発行だけでは待機は始まりません。
+running worker's key and relay. For the public relay:
+
+```sh
+pnpm acp discover --relay https://acp-relay.agent-collab.workers.dev
+```
+
+`--expires-in` is seconds, default 3600, allowed range 1–2592000. `discover`
+lists signed registered cards. `validate` defaults to the task-manifest schema.
+招待発行だけでは待機は始まりません。
 検索は登録済みカードを列挙し、validate はマニフェストを検証します。
 
 ## Strict security and safety rules / 安全上の鉄則
