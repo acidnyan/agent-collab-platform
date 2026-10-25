@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp-spec.local/schemas/v0.1/audit-entry.schema.json",
+  "title": "audit-entry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "body",
+    "entryHash",
+    "actorSignature",
+    "counterSignature"
+  ],
+  "properties": {
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskId",
+        "seq",
+        "prevEntryHash",
+        "actorDid",
+        "receiverDid",
+        "eventType",
+        "payload"
+      ],
+      "properties": {
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prevEntryHash": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "actorDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "receiverDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "eventType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "payload": {}
+      }
+    },
+    "entryHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "actorSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signerDid",
+        "canonicalization",
+        "payloadDigest",
+        "signedAt",
+        "signature"
+      ],
+      "properties": {
+        "signerDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "canonicalization": {
+          "const": "RFC8785-JCS"
+        },
+        "payloadDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "signedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^ed25519:[A-Za-z0-9_-]{86}$"
+        }
+      }
+    },
+    "counterSignature": {
+      "$ref": "https://acp-spec.local/schemas/v0.1/ack-receipt.schema.json"
+    }
+  }
+}

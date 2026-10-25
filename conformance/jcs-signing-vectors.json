@@ -1,0 +1,45 @@
+{
+  "description": "Synthetic all-zero Ed25519 test seed; never use as an owner key. Signature covers {payload,signerDid,canonicalization,payloadDigest,signedAt}.",
+  "seedHex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "cases": [
+    {
+      "input": {
+        "z": [
+          1e+30,
+          4.5,
+          0.002,
+          1e-27
+        ],
+        "a": "€\r\n日本語😀",
+        "nested": {
+          "b": true,
+          "a": null
+        }
+      },
+      "canonical": "{\"a\":\"€\\r\\n日本語😀\",\"nested\":{\"a\":null,\"b\":true},\"z\":[1e+30,4.5,0.002,1e-27]}",
+      "digest": "sha256:7f26540e5aa1276750b581607725c7151a228af053b39569ff244c54963dcea4",
+      "signed": {
+        "payload": {
+          "z": [
+            1e+30,
+            4.5,
+            0.002,
+            1e-27
+          ],
+          "a": "€\r\n日本語😀",
+          "nested": {
+            "b": true,
+            "a": null
+          }
+        },
+        "signature": {
+          "signerDid": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+          "canonicalization": "RFC8785-JCS",
+          "payloadDigest": "sha256:7f26540e5aa1276750b581607725c7151a228af053b39569ff244c54963dcea4",
+          "signedAt": "2026-10-25T00:00:00.000Z",
+          "signature": "ed25519:YVmhsyKd-GIkcd6amFzftxNzuRvQ35XnMeTRzJJCkJP6cDXX7jJWsrnMRlf93jPR_i0LYakz4w_yUNPwDAiMAA"
+        }
+      }
+    }
+  ]
+}

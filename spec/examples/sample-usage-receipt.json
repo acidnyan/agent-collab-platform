@@ -1,0 +1,19 @@
+{
+  "payload": {
+    "type": "UsageReceipt",
+    "taskId": "task_examples01",
+    "inputTokens": 1,
+    "outputTokens": 2,
+    "totalTokens": 3,
+    "toolCalls": 1,
+    "wallTimeMs": 100,
+    "halted": false
+  },
+  "signature": {
+    "signerDid": "did:key:z6MkpbX9WrS8mmVFD4ThkenxbkMs9V7AoT3nNL8xkoSt8PDk",
+    "canonicalization": "RFC8785-JCS",
+    "payloadDigest": "sha256:59e87563bb5154d6d519963e7170dcb2a0f2142c6e9f492198f9002363a2a527",
+    "signedAt": "2026-10-25T12:38:16.758Z",
+    "signature": "ed25519:todnWGs08sdcR6YF2WuK-nkOO9GrEnEovz2DjKvOEflmA6zajkeAJIfJf67aSKyPpvk-6b57jv73Ei81yz9OBQ"
+  }
+}

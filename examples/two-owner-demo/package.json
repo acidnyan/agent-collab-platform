@@ -1,0 +1,27 @@
+{
+  "name": "@acp/two-owner-demo",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./dist/run-demo.d.ts",
+      "import": "./dist/run-demo.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx run-demo.ts"
+  },
+  "dependencies": {
+    "@acp/core": "workspace:*",
+    "@acp/ledger": "workspace:*",
+    "@acp/runtime": "workspace:*",
+    "@acp/sandbox": "workspace:*",
+    "@acp/relay": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  }
+}

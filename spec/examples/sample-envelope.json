@@ -1,0 +1,21 @@
+{
+  "payload": {
+    "taskId": "task_examples01",
+    "recipientDid": "did:key:z6MkpbX9WrS8mmVFD4ThkenxbkMs9V7AoT3nNL8xkoSt8PDk",
+    "seq": 0,
+    "eventType": "PROPOSE",
+    "payload": {
+      "example": true
+    },
+    "type": "SignedEnvelope",
+    "envelopeId": "34f9ff59-8733-4c56-bbcd-7ef4652ddee4",
+    "senderDid": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp"
+  },
+  "signature": {
+    "signerDid": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+    "canonicalization": "RFC8785-JCS",
+    "payloadDigest": "sha256:ad74f97481424661c948b8d78681c38978371b0029b770ba997b7da8376f808f",
+    "signedAt": "2026-10-25T12:38:16.779Z",
+    "signature": "ed25519:6nXHW86NJ8XtqUsKvobM_hhr6YM1nHsSq4JWV8cC9FXkZWdAmmyA1BLoZW-EtPka-FAkFpQzYGsfn2YSqcfWAg"
+  }
+}

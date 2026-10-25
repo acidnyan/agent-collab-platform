@@ -1,0 +1,18 @@
+{
+  "payload": {
+    "type": "ApprovalReceipt",
+    "receiptId": "98a2c3e1-a27e-4329-bde2-b262579303bc",
+    "taskId": "task_examples01",
+    "gate": "contract_acceptance",
+    "targetDigest": "sha256:4c94dfff1758d15da9c3e100c88f89503ee72c3a7f7f7691ade54326fbbe606f",
+    "decision": "APPROVED",
+    "approvedAt": "2026-10-25T12:38:16.778Z"
+  },
+  "signature": {
+    "signerDid": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+    "canonicalization": "RFC8785-JCS",
+    "payloadDigest": "sha256:a9200b7d97cc50eda122f837bca839403e08e04d2060fdb8e94fd49ac908e1ca",
+    "signedAt": "2026-10-25T12:38:16.778Z",
+    "signature": "ed25519:18xWvETRZ2GgDucQ0OjkuRyYjKxtaYVyA16iiw1Ky8XcMHJCkBanK0SnErwv3ixOjHl39Uo2A91kk9c7o427CA"
+  }
+}

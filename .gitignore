@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+codex-m1.log
+coverage/
+*.tsbuildinfo
+.pnpm-store/
+.env
+.env.*
+*.private.json

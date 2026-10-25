@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp-spec.local/schemas/v0.1/envelope.schema.json",
+  "title": "envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payload",
+    "signature"
+  ],
+  "properties": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "envelopeId",
+        "taskId",
+        "seq",
+        "eventType",
+        "senderDid",
+        "recipientDid",
+        "payload"
+      ],
+      "properties": {
+        "type": {
+          "const": "SignedEnvelope"
+        },
+        "envelopeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eventType": {
+          "type": "string",
+          "minLength": 1
+        },
+        "senderDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "recipientDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "payload": {}
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signerDid",
+        "canonicalization",
+        "payloadDigest",
+        "signedAt",
+        "signature"
+      ],
+      "properties": {
+        "signerDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "canonicalization": {
+          "const": "RFC8785-JCS"
+        },
+        "payloadDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "signedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^ed25519:[A-Za-z0-9_-]{86}$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "ackReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload",
+        "signature"
+      ],
+      "properties": {
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "taskId",
+            "entryHash",
+            "actorDid",
+            "receiverDid"
+          ],
+          "properties": {
+            "type": {
+              "const": "AckReceipt"
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "entryHash": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "actorDid": {
+              "type": "string",
+              "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+            },
+            "receiverDid": {
+              "type": "string",
+              "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+            }
+          }
+        },
+        "signature": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "signerDid",
+            "canonicalization",
+            "payloadDigest",
+            "signedAt",
+            "signature"
+          ],
+          "properties": {
+            "signerDid": {
+              "type": "string",
+              "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+            },
+            "canonicalization": {
+              "const": "RFC8785-JCS"
+            },
+            "payloadDigest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "signedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "signature": {
+              "type": "string",
+              "pattern": "^ed25519:[A-Za-z0-9_-]{86}$"
+            }
+          }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signerDid",
+        "canonicalization",
+        "payloadDigest",
+        "signedAt",
+        "signature"
+      ],
+      "properties": {
+        "signerDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "canonicalization": {
+          "const": "RFC8785-JCS"
+        },
+        "payloadDigest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "signedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^ed25519:[A-Za-z0-9_-]{86}$"
+        }
+      }
+    }
+  }
+}

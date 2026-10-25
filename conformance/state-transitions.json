@@ -1,0 +1,366 @@
+{
+  "initialEvent": "PROPOSE",
+  "initialState": "PROPOSED",
+  "cases": [
+    {
+      "from": "PROPOSED",
+      "event": "ACCEPT",
+      "to": "ACCEPTED"
+    },
+    {
+      "from": "PROPOSED",
+      "event": "START",
+      "to": null
+    },
+    {
+      "from": "PROPOSED",
+      "event": "DELIVER",
+      "to": null
+    },
+    {
+      "from": "PROPOSED",
+      "event": "VERIFY_ACCEPT",
+      "to": null
+    },
+    {
+      "from": "PROPOSED",
+      "event": "VERIFY_REJECT",
+      "to": null
+    },
+    {
+      "from": "PROPOSED",
+      "event": "SETTLE",
+      "to": null
+    },
+    {
+      "from": "PROPOSED",
+      "event": "CANCEL",
+      "to": "CANCELLED"
+    },
+    {
+      "from": "PROPOSED",
+      "event": "DISPUTE",
+      "to": null
+    },
+    {
+      "from": "ACCEPTED",
+      "event": "ACCEPT",
+      "to": null
+    },
+    {
+      "from": "ACCEPTED",
+      "event": "START",
+      "to": "IN_PROGRESS"
+    },
+    {
+      "from": "ACCEPTED",
+      "event": "DELIVER",
+      "to": null
+    },
+    {
+      "from": "ACCEPTED",
+      "event": "VERIFY_ACCEPT",
+      "to": null
+    },
+    {
+      "from": "ACCEPTED",
+      "event": "VERIFY_REJECT",
+      "to": null
+    },
+    {
+      "from": "ACCEPTED",
+      "event": "SETTLE",
+      "to": null
+    },
+    {
+      "from": "ACCEPTED",
+      "event": "CANCEL",
+      "to": "CANCELLED"
+    },
+    {
+      "from": "ACCEPTED",
+      "event": "DISPUTE",
+      "to": null
+    },
+    {
+      "from": "IN_PROGRESS",
+      "event": "ACCEPT",
+      "to": null
+    },
+    {
+      "from": "IN_PROGRESS",
+      "event": "START",
+      "to": null
+    },
+    {
+      "from": "IN_PROGRESS",
+      "event": "DELIVER",
+      "to": "DELIVERED"
+    },
+    {
+      "from": "IN_PROGRESS",
+      "event": "VERIFY_ACCEPT",
+      "to": null
+    },
+    {
+      "from": "IN_PROGRESS",
+      "event": "VERIFY_REJECT",
+      "to": null
+    },
+    {
+      "from": "IN_PROGRESS",
+      "event": "SETTLE",
+      "to": null
+    },
+    {
+      "from": "IN_PROGRESS",
+      "event": "CANCEL",
+      "to": "CANCELLED"
+    },
+    {
+      "from": "IN_PROGRESS",
+      "event": "DISPUTE",
+      "to": null
+    },
+    {
+      "from": "DELIVERED",
+      "event": "ACCEPT",
+      "to": null
+    },
+    {
+      "from": "DELIVERED",
+      "event": "START",
+      "to": null
+    },
+    {
+      "from": "DELIVERED",
+      "event": "DELIVER",
+      "to": null
+    },
+    {
+      "from": "DELIVERED",
+      "event": "VERIFY_ACCEPT",
+      "to": "VERIFY_ACCEPT"
+    },
+    {
+      "from": "DELIVERED",
+      "event": "VERIFY_REJECT",
+      "to": "VERIFY_REJECT"
+    },
+    {
+      "from": "DELIVERED",
+      "event": "SETTLE",
+      "to": null
+    },
+    {
+      "from": "DELIVERED",
+      "event": "CANCEL",
+      "to": null
+    },
+    {
+      "from": "DELIVERED",
+      "event": "DISPUTE",
+      "to": "DISPUTED"
+    },
+    {
+      "from": "VERIFY_ACCEPT",
+      "event": "ACCEPT",
+      "to": null
+    },
+    {
+      "from": "VERIFY_ACCEPT",
+      "event": "START",
+      "to": null
+    },
+    {
+      "from": "VERIFY_ACCEPT",
+      "event": "DELIVER",
+      "to": null
+    },
+    {
+      "from": "VERIFY_ACCEPT",
+      "event": "VERIFY_ACCEPT",
+      "to": null
+    },
+    {
+      "from": "VERIFY_ACCEPT",
+      "event": "VERIFY_REJECT",
+      "to": null
+    },
+    {
+      "from": "VERIFY_ACCEPT",
+      "event": "SETTLE",
+      "to": "SETTLED"
+    },
+    {
+      "from": "VERIFY_ACCEPT",
+      "event": "CANCEL",
+      "to": null
+    },
+    {
+      "from": "VERIFY_ACCEPT",
+      "event": "DISPUTE",
+      "to": null
+    },
+    {
+      "from": "VERIFY_REJECT",
+      "event": "ACCEPT",
+      "to": null
+    },
+    {
+      "from": "VERIFY_REJECT",
+      "event": "START",
+      "to": null
+    },
+    {
+      "from": "VERIFY_REJECT",
+      "event": "DELIVER",
+      "to": null
+    },
+    {
+      "from": "VERIFY_REJECT",
+      "event": "VERIFY_ACCEPT",
+      "to": null
+    },
+    {
+      "from": "VERIFY_REJECT",
+      "event": "VERIFY_REJECT",
+      "to": null
+    },
+    {
+      "from": "VERIFY_REJECT",
+      "event": "SETTLE",
+      "to": null
+    },
+    {
+      "from": "VERIFY_REJECT",
+      "event": "CANCEL",
+      "to": "CANCELLED"
+    },
+    {
+      "from": "VERIFY_REJECT",
+      "event": "DISPUTE",
+      "to": "DISPUTED"
+    },
+    {
+      "from": "DISPUTED",
+      "event": "ACCEPT",
+      "to": null
+    },
+    {
+      "from": "DISPUTED",
+      "event": "START",
+      "to": null
+    },
+    {
+      "from": "DISPUTED",
+      "event": "DELIVER",
+      "to": null
+    },
+    {
+      "from": "DISPUTED",
+      "event": "VERIFY_ACCEPT",
+      "to": null
+    },
+    {
+      "from": "DISPUTED",
+      "event": "VERIFY_REJECT",
+      "to": null
+    },
+    {
+      "from": "DISPUTED",
+      "event": "SETTLE",
+      "to": "SETTLED"
+    },
+    {
+      "from": "DISPUTED",
+      "event": "CANCEL",
+      "to": null
+    },
+    {
+      "from": "DISPUTED",
+      "event": "DISPUTE",
+      "to": null
+    },
+    {
+      "from": "SETTLED",
+      "event": "ACCEPT",
+      "to": null
+    },
+    {
+      "from": "SETTLED",
+      "event": "START",
+      "to": null
+    },
+    {
+      "from": "SETTLED",
+      "event": "DELIVER",
+      "to": null
+    },
+    {
+      "from": "SETTLED",
+      "event": "VERIFY_ACCEPT",
+      "to": null
+    },
+    {
+      "from": "SETTLED",
+      "event": "VERIFY_REJECT",
+      "to": null
+    },
+    {
+      "from": "SETTLED",
+      "event": "SETTLE",
+      "to": null
+    },
+    {
+      "from": "SETTLED",
+      "event": "CANCEL",
+      "to": null
+    },
+    {
+      "from": "SETTLED",
+      "event": "DISPUTE",
+      "to": null
+    },
+    {
+      "from": "CANCELLED",
+      "event": "ACCEPT",
+      "to": null
+    },
+    {
+      "from": "CANCELLED",
+      "event": "START",
+      "to": null
+    },
+    {
+      "from": "CANCELLED",
+      "event": "DELIVER",
+      "to": null
+    },
+    {
+      "from": "CANCELLED",
+      "event": "VERIFY_ACCEPT",
+      "to": null
+    },
+    {
+      "from": "CANCELLED",
+      "event": "VERIFY_REJECT",
+      "to": null
+    },
+    {
+      "from": "CANCELLED",
+      "event": "SETTLE",
+      "to": null
+    },
+    {
+      "from": "CANCELLED",
+      "event": "CANCEL",
+      "to": null
+    },
+    {
+      "from": "CANCELLED",
+      "event": "DISPUTE",
+      "to": null
+    }
+  ]
+}

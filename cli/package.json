@@ -1,0 +1,28 @@
+{
+  "name": "@acp/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@acp/core": "workspace:*",
+    "@acp/ledger": "workspace:*",
+    "@acp/runtime": "workspace:*",
+    "@acp/two-owner-demo": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "bin": {
+    "acp": "./dist/index.js"
+  }
+}

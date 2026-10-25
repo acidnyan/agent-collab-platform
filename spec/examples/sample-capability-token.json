@@ -1,0 +1,39 @@
+{
+  "payload": {
+    "audience": "did:key:z6MkpbX9WrS8mmVFD4ThkenxbkMs9V7AoT3nNL8xkoSt8PDk",
+    "taskId": "task_examples01",
+    "resource": "mcp://alice/docs/*",
+    "allowedTools": [
+      "docs/read"
+    ],
+    "argConstraints": {
+      "docs/read": {
+        "type": "object",
+        "required": [
+          "uri"
+        ],
+        "properties": {
+          "uri": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "maxCalls": 2,
+    "notBefore": "2026-10-25T00:00:00.000Z",
+    "expiresAt": "2099-01-01T00:00:00Z",
+    "maxDepth": 1,
+    "type": "CapabilityToken",
+    "id": "c1e68f52-c733-4e75-8e47-6f2743180906",
+    "issuer": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+    "parentHash": null
+  },
+  "signature": {
+    "signerDid": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+    "canonicalization": "RFC8785-JCS",
+    "payloadDigest": "sha256:0fe841b3acc533ae5358137d2a29cc08b7160e9b389c273c06d3d8258486c880",
+    "signedAt": "2026-10-25T12:38:16.684Z",
+    "signature": "ed25519:OG7UKgVydSX0V65mR6DavieUefKixgVpo-mLvItNxO01IrNu7osSk86UbZ6aGZZ-fyxPFyjOIRR50HmLRAZGBg"
+  }
+}

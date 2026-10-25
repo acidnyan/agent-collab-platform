@@ -1,0 +1,37 @@
+{
+  "body": {
+    "taskId": "task_examples01",
+    "seq": 0,
+    "prevEntryHash": null,
+    "actorDid": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+    "receiverDid": "did:key:z6MkpbX9WrS8mmVFD4ThkenxbkMs9V7AoT3nNL8xkoSt8PDk",
+    "eventType": "PROPOSE",
+    "payload": {
+      "example": true
+    }
+  },
+  "entryHash": "sha256:810857bf190cfaab9c138e27991465ad0dc3b75557c657c142d1023b5ac44b97",
+  "actorSignature": {
+    "signerDid": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+    "canonicalization": "RFC8785-JCS",
+    "payloadDigest": "sha256:810857bf190cfaab9c138e27991465ad0dc3b75557c657c142d1023b5ac44b97",
+    "signedAt": "2026-10-25T12:38:16.783Z",
+    "signature": "ed25519:NbosieroqvPFFoVkPtti1ZAmDX-aeQXzzKFkICbCKFP2D0hm3fj1_82iTaDU_443nVtxDQ8kOPbb_qQhmM5NDQ"
+  },
+  "counterSignature": {
+    "payload": {
+      "type": "AckReceipt",
+      "taskId": "task_examples01",
+      "entryHash": "sha256:810857bf190cfaab9c138e27991465ad0dc3b75557c657c142d1023b5ac44b97",
+      "actorDid": "did:key:z6MkiTBz1ymuepAQ4HEHYSF1H8quG5GLVVQR3djdX3mDooWp",
+      "receiverDid": "did:key:z6MkpbX9WrS8mmVFD4ThkenxbkMs9V7AoT3nNL8xkoSt8PDk"
+    },
+    "signature": {
+      "signerDid": "did:key:z6MkpbX9WrS8mmVFD4ThkenxbkMs9V7AoT3nNL8xkoSt8PDk",
+      "canonicalization": "RFC8785-JCS",
+      "payloadDigest": "sha256:89e8e531e602b493b6819dec4ea86ea512f09b36e16677c8e0a7fc7d9de6b491",
+      "signedAt": "2026-10-25T12:38:16.784Z",
+      "signature": "ed25519:JvzvJpdV0nAFer2Q7XiiRcVwwBNPnGP1BlJjVwqyUydLN-kJyfcZHxA4Xs9Jl6htEIrUt9AL2ADg1JZ50b43BQ"
+    }
+  }
+}

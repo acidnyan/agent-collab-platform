@@ -1,0 +1,43 @@
+Agent Collaboration Platform
+Copyright 2026 Agent Collaboration Platform contributors
+
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+This product includes adapted portions of newtro/delegateos:
+https://github.com/newtro/delegateos
+Author / copyright attribution: Scott Smith and DelegateOS contributors.
+The inspected upstream package.json identifies Scott Smith as author and MIT
+as its license. That checkout contains no standalone LICENSE or copyright year;
+no upstream copyright year has been invented here.
+
+Adaptations: JCS object signing helpers; monotonic DCT creation, attenuation and
+chain verification; TaskContract signing and verification dispatcher; MCP tool
+interception. ACP replaces DelegateOS BLAKE2b/SJT identity and wire format with
+SHA-256, Ed25519 did:key and ACP schemas, and adds fail-closed argument-schema
+inheritance, bilateral acknowledgements, quota enforcement and approval gates.
+Adapted files retain SPDX Apache-2.0 AND MIT and upstream attribution headers.
+
+MIT License (for integrated/adapted DelegateOS portions)
+Copyright (c) Scott Smith and DelegateOS contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Dependency notices: @a2a-js/sdk is Apache-2.0; @modelcontextprotocol/sdk,
+canonicalize, Ajv and ajv-formats are MIT. Dependencies retain their own licenses
+in their distributed packages; this NOTICE does not relicense dependencies.
