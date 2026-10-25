@@ -297,3 +297,67 @@ sequenceDiagram
 | **A. フルスクラッチ** | ワイヤ通信から暗号・Capability・Runtimeまで全てゼロから実装 | 依存は最小だが、A2A互換ブリッジの自作が必要で初期工数が大 |
 | **B. 単一OSSのハードフォーク** | `a2aproject/a2a-js` または `Cotal-AI/Cotal` を丸ごとForkして直接改造 | 初速は出るが、本家A2A仕様更新時のコンフリクトやNATS等のミドルウェア強制が重荷になる |
 | **C. 標準SDKオーバーレイ＋コア選択的統合（★推奨）** | ワイヤ層は `@a2a-js/sdk` (Apache-2.0) と `@modelcontextprotocol/sdk` (MIT) を**Forkせずnpm依存で利用**し、契約・Capability減衰・検収コアに `newtro/delegateos` (MIT) の設計/コードを統合。その上に**5つのHITLゲート、BYOK `UsageReceipt`、隔離Sandbox、双方向ハッシュチェーン監査台帳**をオーバーレイ実装する | **開発工数を約50〜60%削減**しつつ、A2A/MCP標準エコシステムと完全互換・アップストリーム追従も容易 |
+
+## M2/M3 implemented profile (WP-7–WP-12)
+
+`WorkerNode` and `RequesterClient` are the production protocol coordinators in
+`@acp/runtime`. Each holds one owner's key and connects outbound to a relay.
+`PROPOSE → ACCEPT → START/IN_PROGRESS → DELIVER → VERIFY_ACCEPT → SETTLED`
+uses the M1 signed contract machine. Every application event is followed by an
+actor-signed audit body and a peer-signed AckReceipt. A final signed checkpoint
+is countersigned over the network; neither process possesses the peer key.
+Audit JSONL is written incrementally, sealed at settlement, and checked with the
+existing `verifyAudit` / `acp audit-verify`. Interrupted logs remain unsealed and
+therefore cannot be mistaken for completed valid bundles.
+
+`@acp/adapters` supplies `CommandAgentAdapter`, `ClaudeCodeAdapter`,
+`CodexCliAdapter`, `OpenAICompatibleAdapter`, and `McpClientAdapter`, plus a
+`SandboxAgentAdapter` convenience wrapper. The shared `AgentAdapter` interface
+lives in runtime to avoid a dependency cycle. Task contexts contain JSON, an
+AbortSignal, a disposable workspace, usage reporting and a guarded tool callback;
+private keys and owner credentials never enter that context. Command runners use
+an environment allowlist. CLI provider authentication can use a host loopback
+broker; real API keys are attached only to upstream requests. OpenAI/Anthropic
+HTTP adapters perform host-owned fetch calls. MCP SDK transports terminate at
+MCPProxy, which enforces manifest-bound capability chains, quotas and signed
+side-effect approvals before backend execution.
+
+Owner approval is supplied by `InteractiveCliApprovalProvider` (stream-based
+`[y/N]`), `WebhookApprovalProvider` (signed request and verified, target-bound
+ApprovalReceipt response), or `PolicyAutoApprovalProvider`. Automatic contract
+acceptance/final verification is an explicit CLI choice. Neither `--yes` nor
+policy auto-approval authorizes external side effects or budget increases;
+programmatic explicit confirmed gates are required for those operations.
+Verification obtains final approval only after crypto/budget and schema/isolated
+checks pass. Unknown deterministic check targets are rejected.
+
+The blind relay offers HTTP, bounded long polling, SSE and WebSocket polling or
+live subscriptions. It verifies outer signatures and shape, bounds queue/body
+sizes, prevents envelope-ID replay, and verifies signed AgentCard registration.
+`/.well-known/agent.json` returns an A2A-shaped card with the signed ACP extension;
+`/agents` and `/agents/:did` expose the signed records. Invites embed an owner-signed
+card, routing identities, relay URL and validity window in either supported URI
+format. Gateways independently enforce message order and reject replay.
+
+`createRelayFetchHandler` uses Web Request/Response streams and a filesystem-free
+core entry point. The Cloudflare entry point uses Node crypto compatibility and
+a Durable Object binding, persisting queue/registry/replay state. Without a binding,
+its in-memory handler is for local development and resets on isolate eviction.
+Node `startLocalRelay` serves the same routes plus WebSocket support. The edge
+entry point supports HTTP/SSE/long polling; Node provides WebSocket upgrades.
+
+`detectDockerRuntime` prefers a functional Podman, then Docker.
+`runContainerOrSubprocessSandbox` selects OCI for manifest `oci_container`, or
+falls back to the Node permission-restricted sandbox when no runtime exists.
+OCI disables network access, uses a read-only root filesystem, drops all
+capabilities, enables no-new-privileges, and bounds PID count and memory.
+`ExecutionAttestation.effectiveIsolationLevel` records what ran. Container
+execution failures are not retried in a weaker sandbox. Command/CLI adapters are
+trusted host executables with environment and workspace hygiene, not the
+restricted JavaScript sandbox; attestations identify that distinction.
+
+The original schemas, exports and 169 M0/M1 conformance tests are retained.
+This implementation continues the signed plaintext M1 payload profile; the
+X25519 encryption, external settlement and transparency anchoring discussed in
+the design above remain future work. Public relays require operational access
+controls/TLS appropriate to their deployment; the reference queue is bounded.

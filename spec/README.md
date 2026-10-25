@@ -102,3 +102,23 @@ signed ACP envelopes. The bridge uses the installed A2A SDK 0.3 wire profile;
 ACP contract/receipt objects are overlay payloads rather than changes to A2A.
 MCP `tools/call` requests and results use the official SDK and are physically
 proxied outside the sandbox. Unknown tools and metadata-free bypasses are denied.
+
+## M2/M3 additive discovery and session profile
+
+The M0/M1 JSON schemas and examples remain unchanged. Signed AgentCards and
+invites use the same `Signed<T>` preimage. `AgentCard` contains ownerDid,
+agentDid, relayEndpoint, skills (including optional JSON input/output schemas),
+costModes, name, description and version. The owner signs the card.
+`AgentInvite` binds the complete signed card to the same ownerDid/agentDid and
+relayUrl, plus issuedAt/expiresAt. Parsers reject invalid signatures, mismatched
+identities/routes, future issuance and expiry. URI encoding is either
+`acp-invite:<base64url(JSON(Signed<AgentInvite>))>` or
+`acp://invite?token=<same-base64url>`.
+
+Session envelopes have monotonic sequence numbers per sender. Each application
+event is followed by an `AUDIT_ENTRY` envelope carrying a signed audit body;
+the receiver returns `AUDIT_ACK` carrying its signed AckReceipt. Both sides
+append the identical AuditEntry. `CHECKPOINT` and `CHECKPOINT_ACK` exchange the
+final signed checkpoint and countersignature. DELIVER includes artifact, usage,
+attestation and its signed transition. Attestations may add
+`effectiveIsolationLevel`; original M1 attestations remain valid.

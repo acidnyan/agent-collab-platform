@@ -1,6 +1,6 @@
-# Agent Collaboration Protocol & Runtime (Draft)
+# Agent Collaboration Protocol & Runtime (ACP)
 
-> **Status**: `Draft / Pre-Public`（初期設計ドラフト・公開GitHubリポジトリ作成前）
+> **Status**: `v0.2.0 (M0–M3 Reference Implementation)` — Cross-Owner Agent Collaboration Platform
 > **Target**: 異なる所有者（Owner）に属する自律エージェント同士が、互いのランタイムや認証情報を信頼せずにタスクを分割・委譲・実行・検証・検収できるOSSプロトコルおよびリファレンス実装。
 
 ## 結論（1画面サマリ）
@@ -28,6 +28,124 @@ flowchart LR
 
     GA <-->|"Signed Envelope (JCS + Ed25519)\n+ E2E Encrypted Payload"| R
     R <-->|"Signed Envelope (JCS + Ed25519)\n+ E2E Encrypted Payload"| GB
+```
+
+## 3-Minute Quickstart / 3分クイックスタート (M2/M3)
+
+Requires Node.js 22 and pnpm 10. From the repository root:
+Node.js 22・pnpm 10 を用意し、リポジトリ直下で実行します。
+
+```sh
+pnpm install --frozen-lockfile
+pnpm build
+```
+
+**Terminal 1 — Relay / 中継器**
+
+```sh
+pnpm acp relay start --port 8787 --host 127.0.0.1
+```
+
+For different machines, use a reachable HTTPS relay URL in both terminals below.
+Each owner connects outbound; their machines need no inbound port forwarding.
+For Cloudflare, copy `packages/relay/wrangler.toml.example` to
+`packages/relay/wrangler.toml`, then use your own Wrangler installation and account
+from that directory. The example binds a Durable Object for persistent queues
+and registry state. This repository does not publish or provision infrastructure.
+
+別マシン間では、以下の `--relay` を共通の到達可能な HTTPS URL に変更します。
+両オーナーの接続は外向きなので、自宅側のポート開放は不要です。
+Cloudflare 用の設定例は `packages/relay/wrangler.toml.example` です。
+
+**Terminal 2 — Bob Worker / 受託側**
+
+```sh
+pnpm acp keygen /tmp/bob.private.json
+pnpm acp worker start --key /tmp/bob.private.json \
+  --relay http://127.0.0.1:8787 --adapter sandbox \
+  --name "Bob Worker" --auto-accept --once --audit /tmp/bob-audit.jsonl
+```
+
+Copy the printed `acp-invite:...` line. This local example echoes the JSON input
+through a restricted subprocess. `--auto-accept` permits contract acceptance;
+external side effects and budget increases still require explicit approval.
+Remove it for an interactive `[y/N]` gate. Keys and audit output paths must be fresh.
+
+表示された `acp-invite:...` の1行をコピーします。この例は隔離された
+JavaScript 子プロセスで入力 JSON を返します。`--auto-accept` を外すと
+契約承認が対話式になります。外部副作用・予算増額は自動承認されません。
+鍵・監査ファイルの出力先には未使用のパスを指定してください。
+
+**Terminal 3 — Alice Requester / 依頼・検証側**
+
+```sh
+pnpm acp keygen /tmp/alice.private.json
+# Paste Bob's complete token when prompted / Bob のトークンを貼り付ける
+read -r BOB_INVITE
+pnpm acp delegate --key /tmp/alice.private.json --to "$BOB_INVITE" \
+  --title "JSON report" --description "Return the supplied JSON report" \
+  --input '{"summary":"Hello from Alice","findings":[]}' \
+  --output-schema '{"type":"object","required":["summary","findings"]}' \
+  --auto-approve --audit /tmp/alice-audit.jsonl --out /tmp/report.json
+pnpm acp audit-verify /tmp/alice-audit.jsonl
+pnpm acp discover --relay http://127.0.0.1:8787
+```
+
+Expected: `SETTLED`, a JSON deliverable, and audit status `VALID` on both owners.
+Alice verifies signatures, digests and budget, JSON Schema and registered isolated
+checks, then obtains a signed final approval. `--auto-approve` explicitly opts
+into policy approval of final verification; omit it for human review.
+`acp://invite?token=...` is also accepted. Alternatively, use `--to <Bob DID>
+--relay <URL>`. Bob can verify his own `/tmp/bob-audit.jsonl` locally.
+
+双方で `SETTLED` / `VALID` を確認できます。Alice は暗号・予算検証、
+スキーマ・隔離された決定的チェック、オーナー承認の3段階を通して検収します。
+`--auto-approve` を外すと最終検収も対話式になります。Bob 側でも
+`pnpm acp audit-verify /tmp/bob-audit.jsonl` を実行できます。
+
+**Choose an adapter / 実エージェント接続**
+
+| Adapter | CLI / programmatic entry | Behavior |
+| --- | --- | --- |
+| Command | `--adapter command --cmd 'your-command'` | stdin JSON + `TASK_INPUT_FILE`, stdout JSON, fresh workspace, sanitized environment |
+| Claude Code | `--adapter claude` | `claude -p --output-format json`, wrapper/direct JSON and token usage |
+| Codex CLI | `--adapter codex` | `codex exec --json`, JSONL agent output and token usage |
+| OpenAI compatible | `--adapter openai --model <model> [--endpoint <URL>]` | Host-owned BYOK HTTP requests; exact provider token accounting |
+| MCP | `McpClientAdapter` from `@acp/adapters` | Official SDK client, stdio or in-memory transport; CapGuard + quota + approval proxy |
+| Restricted JS | `--adapter sandbox [--cmd 'return input;']` | Node permission-restricted subprocess, or hardened OCI when requested in the manifest |
+
+Claude/Codex binaries must already be installed. Their adapters accept
+`binaryPath`, `extraArgs`, and `command`/`runner` overrides. When a provider key is
+configured in the host (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), a task-scoped
+loopback broker injects it upstream; the CLI receives only a temporary local
+broker credential. Host credentials, private keys and inherited `NODE_OPTIONS`
+are not copied into child environments. The OpenAI adapter supports local
+Ollama/vLLM endpoints without a key and Anthropic's Messages API via
+`apiStyle: 'anthropic'` programmatically.
+
+Command and CLI adapters run owner-configured executables with fresh working
+folders; this is process hygiene, not OS-level filesystem/network confinement.
+Use the restricted sandbox for untrusted JavaScript. OCI uses an already-present
+`node:22-bookworm-slim` image, prefers Podman, disables networking, drops Linux
+capabilities and applies memory/PID limits. An unavailable runtime falls back to
+the restricted subprocess and records the effective isolation level in the signed
+attestation. A container execution failure is surfaced rather than rerun.
+
+実 CLI は事前インストールが必要です。プロバイダー鍵はホストの仲介プロセスに
+保持し、子プロセスには実鍵を渡しません。Command/CLI の作業ディレクトリ分離は
+OS の完全隔離ではありません。非信頼の JavaScript は `sandbox` を使用します。
+OCI が利用できない場合は制限付き子プロセスへフォールバックし、実際の隔離方式を
+署名付き証明に記録します。
+
+Relay envelopes retain the M1 signed plaintext wire format: use HTTPS for transit.
+The relay has no owner keys and cannot authorize work, but can observe metadata
+and payloads or deny delivery. End-to-end encryption is not implemented by this
+milestone. See [security details](docs/security-model.md).
+
+A fully automated **separate-process command-adapter demo** is also available:
+
+```sh
+node examples/network-collab/run.mjs
 ```
 
 ## 5つの設計原則
@@ -90,6 +208,5 @@ bundle under verification. The built CLI is also available as
 Read the [demo walkthrough](examples/two-owner-demo/README.md),
 [wire rules](spec/README.md), [conformance suite](conformance/README.md), and
 [M1 security model](docs/security-model.md). M1 uses signed plaintext relay
-payloads and the restricted JavaScript subprocess driver. Hardened OS containers
-and payload encryption are M2 work. The root code is Apache-2.0; adapted DelegateOS
+payloads and the restricted JavaScript subprocess driver. M2/M3 adds optional hardened OCI execution; end-to-end payload encryption remains future work. The root code is Apache-2.0; adapted DelegateOS
 portions retain MIT attribution in [NOTICE](NOTICE).

@@ -45,6 +45,15 @@ importers:
       '@acp/two-owner-demo':
         specifier: workspace:*
         version: link:../examples/two-owner-demo
+      '@acp/adapters':
+        specifier: workspace:*
+        version: link:../packages/adapters
+      '@acp/relay':
+        specifier: workspace:*
+        version: link:../packages/relay
+      '@acp/sandbox':
+        specifier: workspace:*
+        version: link:../packages/sandbox
 
   examples/two-owner-demo:
     dependencies:
@@ -63,6 +72,21 @@ importers:
       '@acp/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
+
+  packages/adapters:
+    dependencies:
+      '@acp/core':
+        specifier: workspace:*
+        version: link:../core
+      '@acp/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@acp/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.20.0
+        version: 1.32.2(zod@4.6.7)
 
   packages/core:
     dependencies:
@@ -108,6 +132,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.20.0
         version: 1.32.2(zod@4.6.7)
+      '@acp/relay':
+        specifier: workspace:*
+        version: link:../relay
 
   packages/sandbox:
     dependencies:

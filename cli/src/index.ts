@@ -6,11 +6,13 @@ import type { KeyPair, Gate } from '@acp/core';
 import { parseJsonl, verifyAudit } from '@acp/ledger';
 import type { AuditBundle } from '@acp/ledger';
 import { runDemo } from '@acp/two-owner-demo';
+import { networkCommand } from './network.js';
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as unknown;
 function save(path: string, value: unknown, privateFile = false) { writeFileSync(path, JSON.stringify(value, null, 2) + '\n', { mode: privateFile ? 0o600 : 0o644, flag: 'wx' }); }
 async function main(args: string[]) {
   const [command, ...rest] = args;
   switch (command) {
+    case 'relay': case 'worker': case 'delegate': case 'discover': case 'invite': await networkCommand(command, rest); break;
     case 'keygen': {
       if (rest.length !== 1) throw new Error('Usage: acp keygen <owner.private.json>');
       const key = generateKeyPair(); save(rest[0], key, true); console.log(JSON.stringify({ did: key.did, keyFile: rest[0] })); break;
@@ -40,7 +42,7 @@ async function main(args: string[]) {
       if (directory) mkdirSync(directory, { recursive: true, mode: 0o700 });
       console.log(JSON.stringify(await runDemo(directory), null, 2)); break;
     }
-    default: throw new Error('Usage: acp <keygen|validate|approve|audit-verify|demo>');
+    default: throw new Error('Usage: acp <keygen|validate|approve|audit-verify|demo|relay|worker|delegate|discover|invite>');
   }
 }
 main(process.argv.slice(2)).catch(error => { console.error(String(error)); process.exitCode = 1; });

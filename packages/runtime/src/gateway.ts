@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ContractMachine, createCapability, verifyCapabilityChain, digest, CapabilityGuard } from '@acp/core';
 import type { TaskContract, KeyPair, ApprovalReceipt, CapabilityToken, Capability, Signed, Transition, ContractEvent, Json, SignedEnvelope } from '@acp/core';
-import { runSandbox } from '@acp/sandbox';
+import { runContainerOrSubprocessSandbox } from '@acp/sandbox';
 import { ApprovalGate } from './policy.js';
 import type { OwnerPolicy } from './policy.js';
 import { QuotaMeter } from './quota.js';
@@ -9,6 +9,7 @@ import type { MCPProxy } from './mcp.js';
 import { EnvelopeInbox } from './inbox.js';
 import { VerificationEngine } from './verifier.js';
 export class OwnerGateway {
+  effectiveIsolationLevel = 'subprocess_restricted';
   readonly capabilities = new CapabilityGuard();
   readonly inbox: EnvelopeInbox;
   readonly machine: ContractMachine; readonly approvals: ApprovalGate; readonly quota: QuotaMeter;
@@ -20,7 +21,7 @@ export class OwnerGateway {
   accept(receipt: ApprovalReceipt): Signed<Transition> { this.approvals.require(this.contract.manifest.taskId, 'contract_acceptance', this.contract.contractDigest, receipt); return this.applyOwn('ACCEPT'); }
   private applyOwn(event: ContractEvent): Signed<Transition> { const signed = this.machine.event(event, this.owner); this.machine.apply(signed); if (['SETTLED', 'CANCELLED'].includes(this.machine.state)) this.capabilities.revokeTask(this.contract.manifest.taskId); return signed; }
   transition(event: ContractEvent): Signed<Transition> { if (['ACCEPT', 'VERIFY_ACCEPT', 'VERIFY_REJECT', 'SETTLE'].includes(event)) throw new Error('GATED_TRANSITION_REQUIRED'); return this.applyOwn(event); }
-  async verifyAndSettle(envelope: SignedEnvelope, engine: VerificationEngine, approval?: ApprovalReceipt) {
+  async verifyAndSettle(envelope: SignedEnvelope, engine: VerificationEngine, approval?: ApprovalReceipt | (() => Promise<ApprovalReceipt>)) {
     if (this.owner.did !== this.contract.manifest.requester.ownerDid || this.machine.state !== 'DELIVERED') throw new Error('INVALID_VERIFICATION_STATE');
     const result = await engine.verify(this.contract, envelope, this.approvals, approval);
     const verification = this.applyOwn(result.event);
@@ -36,8 +37,9 @@ export class OwnerGateway {
   async execute(code: string, proxy: MCPProxy, input?: Json): Promise<Json> {
     if (this.machine.state !== 'IN_PROGRESS') throw new Error('CONTRACT_NOT_RUNNING');
     const policy = this.contract.manifest.sandboxPolicy;
-    if (policy.isolationLevel !== 'subprocess_restricted' || policy.networkAccess !== 'none' || policy.filesystemScope !== 'ephemeral_workspace_only') throw new Error('UNSUPPORTED_SANDBOX_POLICY');
-    return runSandbox({ code, input, timeoutMs: this.quota.budget.maxWallClockSeconds * 1000, signal: this.quota.controller.signal, onTool: (name, args) => proxy.callTool(name, args), onUsage: (i, o) => this.quota.record(i, o) });
+    if (!['subprocess_restricted', 'oci_container'].includes(policy.isolationLevel) || policy.networkAccess !== 'none' || policy.filesystemScope !== 'ephemeral_workspace_only') throw new Error('UNSUPPORTED_SANDBOX_POLICY');
+    const result = await runContainerOrSubprocessSandbox({ isolationLevel: policy.isolationLevel, code, input, timeoutMs: this.quota.budget.maxWallClockSeconds * 1000, signal: this.quota.controller.signal, onTool: (name, args) => proxy.callTool(name, args), onUsage: (i, o) => this.quota.record(i, o) });
+    this.effectiveIsolationLevel = result.effectiveIsolationLevel; return result.output;
   }
   close(): void { this.quota.close(); }
 }

@@ -25,3 +25,11 @@ complete, legitimately signed bundle.
 A new implementation can consume these JSON vectors without TypeScript. It must
 produce the exact canonical bytes and signatures, accept the valid attenuations,
 reject every invalid attenuation, and implement the same transition table.
+
+`network-collab.test.ts` covers M2/M3: all five adapters, genuine SDK MCP calls,
+signed discovery/invites, HTTP/SSE/long-poll/WebSocket routes, approval providers,
+OCI fallback, quota/CapGuard rejection and separate-process CLI collaboration.
+TCP binding denied with EPERM/EACCES automatically selects a Web fetch bridge.
+Force that path with `ACP_TEST_FETCH_BRIDGE=1 pnpm exec vitest run
+conformance/network-collab.test.ts`. Real keys/provider billing are unnecessary;
+provider responses and credentials in the tests are synthetic fixtures.

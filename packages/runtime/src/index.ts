@@ -5,3 +5,7 @@ export * from './verifier.js';
 export * from './gateway.js';
 export * from './a2a.js';
 export * from './inbox.js';
+export * from './adapter.js';
+export * from './approval-providers.js';
+export { createSignedAgentCard, verifySignedAgentCard, toA2AAgentCard, createInviteToken, parseAndVerifyInviteToken } from '@acp/core';
+export * from './session.js';

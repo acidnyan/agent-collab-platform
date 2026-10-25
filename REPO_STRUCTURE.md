@@ -221,3 +221,29 @@ agent-collab-platform/
 - **参考・部分移植する候補**:
   - `Cotal-AI/Cotal` (Apache-2.0, TypeScript): `checkpoint()` による中断・再開可能なHITL承認ゲートと、Claude Code / Codex ハーネスコネクタの設計。
   - `GetBusbar/busbar` (Apache-2.0, Rust): エージェントに生APIキーを渡さずプロキシ境界でトークン予算上限（Quota）を強制する設計。
+
+## M2/M3 delivery map (WP-7–WP-12)
+
+| Work package | Implemented source | Verification |
+| --- | --- | --- |
+| WP-7 adapters/discovery | `packages/adapters/src/`, `packages/core/src/discovery.ts`, `packages/runtime/src/adapter.ts` | All five adapters complete signed two-owner sessions; exact HTTP usage; CLI wrapper parsing; credential isolation |
+| WP-8 relay/invites | `packages/relay/src/fetch.ts`, `index.ts`, `worker.ts`, `wrangler.toml.example` | HTTP, SSE, long poll, WebSocket, registry signatures, expiry/tamper rejection, edge persistence |
+| WP-9 approval/isolation | `packages/runtime/src/approval-providers.ts`, `packages/sandbox/src/container.ts` | Interactive streams, signed webhook, policy sensitive gates, OCI detection/fallback |
+| WP-10 orchestrator/CLI | `packages/runtime/src/session.ts`, `session-audit.ts`, `cli/src/network.ts` | Separate-owner key custody, protocol transitions, per-event AckReceipts and countersigned checkpoint |
+| WP-11 network conformance/demo | `conformance/network-collab.test.ts`, `examples/network-collab/run.mjs` | Actual TCP sessions and separate CLI processes; automatic fetch bridge under EPERM/EACCES |
+| WP-12 onboarding/CI | `README.md`, `.github/workflows/ci.yml` | Node 22 + pnpm frozen install, build, schema validation, tests, original demo |
+
+Dependency direction is `adapters → runtime → relay/core/ledger/sandbox`;
+`cli → adapters/runtime/relay` and the original examples remain supported.
+The wildcard pnpm workspace includes `packages/adapters`; root tsconfig includes
+its sources and the package has its own declaration-producing build.
+
+New CLI commands: `relay start`, `worker start`, `delegate`, `discover`,
+`invite create`. Existing `keygen`, `validate`, `approve`, `audit-verify`, and
+`demo` retain their interfaces. `pnpm acp` runs the source CLI; `node
+cli/dist/index.js` and the package binary run the compiled CLI.
+
+Cloudflare's default worker export is `packages/relay/src/worker.ts`; it routes
+requests to the configured Durable Object. The Web fetch handler is also usable
+without Node socket binding for local or embedded hosts. WebSockets are provided
+by the Node entry point. Deployments and credentials remain owner-controlled.
