@@ -20,6 +20,7 @@ try {
   await cli(['keygen', alice]).done; await cli(['keygen', bob]).done;
   let workerReady; const invite = new Promise(resolve => { workerReady = resolve; });
   const worker = cli(['worker', 'start', '--key', bob, '--relay', url, '--adapter', 'command', '--cmd', `${process.execPath} -e 'let s="";process.stdin.on("data",b=>s+=b);process.stdin.on("end",()=>console.log(JSON.stringify({summary:JSON.parse(s).text})));'`, '--auto-accept', '--once', '--audit', join(dir, 'bob.jsonl')], line => { if (line.startsWith('acp-invite:')) workerReady(line); });
+  // WorkerNode and RequesterClient sign fresh relay receive tokens using their local --key files.
   const token = await Promise.race([invite, worker.done.then(() => { throw new Error('Worker exited'); })]);
   console.log(await cli(['delegate', '--key', alice, '--to', token, '--title', 'Report', '--description', 'Echo text as a summary', '--input', '{"text":"Two owners, separate processes"}', '--auto-approve', '--audit', join(dir, 'alice.jsonl'), '--out', join(dir, 'report.json')]).done);
   await worker.done;

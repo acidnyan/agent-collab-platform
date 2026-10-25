@@ -238,6 +238,10 @@
       "additionalProperties": false,
       "required": ["isolationLevel", "networkAccess", "filesystemScope"],
       "properties": {
+        "allowSubprocessFallback": {
+          "type": "boolean",
+          "description": "Explicitly permit a restricted subprocess when OCI isolation is requested."
+        },
         "isolationLevel": {
           "type": "string",
           "enum": ["subprocess_restricted", "oci_container", "wasm", "microvm"]

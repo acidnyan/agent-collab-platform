@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import { createContract, createCapability, createSignedAgentCard, createInviteToken, parseAndVerifyInviteToken, signPayload, verifySigned, verifyEnvelope, verifyContract, verifyApproval, validateManifest, validateOutput, verifyCapabilityChain, verifySignedAgentCard, schemaNarrows, digest } from '@acp/core';
+import { createContract, createCapability, createSignedAgentCard, createInviteToken, parseAndVerifyInviteToken, validateRelayEndpointUrl, signPayload, verifySigned, verifyEnvelope, verifyContract, verifyApproval, validateManifest, validateOutput, verifyCapabilityChain, verifySignedAgentCard, schemaNarrows, digest } from '@acp/core';
 import type { Json, KeyPair, Schema, TaskManifest, Signed, SignedAgentCard, TaskContract, Transition, CapabilityToken, BudgetSpec } from '@acp/core';
 import type { AuditBundle } from '@acp/ledger';
 import { HttpRelayClient } from '@acp/relay';
@@ -20,7 +20,10 @@ import type { Delivery, VerificationResult } from './verifier.js';
 import { asJson, receiveRelay, SessionWire } from './session-audit.js';
 export interface SessionResult { taskId: string; state: 'SETTLED'; deliverable: Json; bundle: AuditBundle; verification?: VerificationResult }
 const policy = { requiredGates: [], autoApprove: [] };
-function transport(relay: RelayTransport | string): RelayTransport { return typeof relay === 'string' ? new HttpRelayClient(relay.replace(/\/$/, '')) : relay; }
+function transport(relay: RelayTransport | string, owner: KeyPair): RelayTransport {
+  const client: RelayTransport = typeof relay === 'string' ? new HttpRelayClient(relay.replace(/\/$/, ''), owner) : relay;
+  client.setRecipientKey?.(owner); return client.withRecipient?.(owner) ?? client;
+}
 function freshAudit(path?: string): void { if (path && existsSync(path)) throw new Error('AUDIT_FILE_ALREADY_EXISTS'); }
 function sessionSignal(timeout: number, signal?: AbortSignal): AbortSignal { return AbortSignal.any([AbortSignal.timeout(timeout), ...(signal ? [signal] : [])]); }
 export interface WorkerNodeOptions {
@@ -35,7 +38,7 @@ export class WorkerNode {
   private completed = 0;
   readonly controller = new AbortController(); lastResult?: SessionResult;
   constructor(readonly options: WorkerNodeOptions) {
-    this.relay = transport(options.relay); this.approvalProvider = options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner);
+    this.relay = transport(options.relay, options.owner); this.approvalProvider = options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner);
     this.agentCard = createSignedAgentCard({ name: options.name ?? options.adapter.name, agentDid: options.agentDid ?? options.owner.did, relayEndpoint: typeof options.relay === 'string' ? options.relay : options.relayUrl ?? 'http://in-memory.local', skills: options.adapter.skills }, options.owner);
   }
   invite(expiresInSeconds = 3600): string { return createInviteToken({ agentCard: this.agentCard, expiresInSeconds }, this.options.owner); }
@@ -112,7 +115,7 @@ async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
   try { return await Promise.race([promise, new Promise<never>((_, reject) => { listener = () => reject(new Error('EXECUTION_ABORTED: ' + String(signal.reason))); signal.addEventListener('abort', listener, { once: true }); if (signal.aborted) listener(); })]); }
   finally { signal.removeEventListener('abort', listener); }
 }
-export interface RequesterClientOptions { owner: KeyPair; relay?: RelayTransport | string; approvalProvider?: ApprovalProvider; verificationEngine?: VerificationEngine; auditPath?: string; timeoutMs?: number }
+export interface RequesterClientOptions { owner: KeyPair; relay?: RelayTransport | string; approvalProvider?: ApprovalProvider; verificationEngine?: VerificationEngine; auditPath?: string; timeoutMs?: number; allowPrivateRelay?: boolean }
 export interface DelegateOptions {
   to: string; relay?: RelayTransport | string; title: string; description: string; input: Json; outputSchema?: Schema;
   budget?: Partial<BudgetSpec>; manifest?: TaskManifest; auditPath?: string; signal?: AbortSignal;
@@ -122,10 +125,12 @@ export class RequesterClient {
   readonly approvalProvider: ApprovalProvider;
   constructor(readonly options: RequesterClientOptions) { this.approvalProvider = options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner); }
   async delegate(options: DelegateOptions): Promise<SessionResult> {
-    const invite = options.to.startsWith('acp') ? parseAndVerifyInviteToken(options.to) : undefined;
+    const invite = options.to.startsWith('acp') ? parseAndVerifyInviteToken(options.to, Date.now(), { allowPrivateRelay: this.options.allowPrivateRelay }) : undefined;
     const relayOption = options.relay ?? this.options.relay ?? invite?.relayUrl;
     if (!relayOption) throw new Error('RELAY_REQUIRED');
-    const relay = transport(relayOption), owner = this.options.owner;
+    if (typeof relayOption === 'string') validateRelayEndpointUrl(relayOption, { allowPrivateRelay: this.options.allowPrivateRelay });
+    else if ('url' in relayOption && typeof relayOption.url === 'string') validateRelayEndpointUrl(relayOption.url, { allowPrivateRelay: this.options.allowPrivateRelay });
+    const relay = transport(relayOption, this.options.owner), owner = this.options.owner;
     const cards = !invite && relay.discover ? await relay.discover() : [];
     if (cards.some(c => !verifySignedAgentCard(c))) throw new Error('INVALID_AGENT_CARD');
     const card = cards.find(c => c.payload.agentDid === options.to || c.payload.ownerDid === options.to);

@@ -5,3 +5,4 @@ export * from './capability.js';
 export * from './receipts.js';
 export * from './contract.js';
 export * from './discovery.js';
+export * from './relay-auth.js';

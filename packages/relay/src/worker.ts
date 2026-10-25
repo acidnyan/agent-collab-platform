@@ -10,6 +10,7 @@ interface DurableState {
 export class RelayDurableObject {
   private relay = new InMemoryRelay(); private handler = createRelayFetchHandler({ relay: this.relay });
   private ready: Promise<void>; private writes = Promise.resolve();
+  private persistedVersion = 0;
   private stored?: { generation: string; count: number };
   constructor(private state: DurableState) {
     this.ready = state.blockConcurrencyWhile(async () => {
@@ -19,29 +20,36 @@ export class RelayDurableObject {
         if (chunks.some(c => !c)) throw new Error('INCOMPLETE_RELAY_STORAGE');
         this.relay.restore(JSON.parse(Buffer.concat(chunks as Uint8Array[]).toString('utf8')) as RelaySnapshot);
       }
+      this.persistedVersion = this.relay.mutationVersion;
     });
   }
   async fetch(request: Request): Promise<Response> {
     await this.ready; const response = await this.handler(request);
     const persist = () => {
-      const snapshot = Buffer.from(JSON.stringify(this.relay.snapshot()));
       this.writes = this.writes.then(async () => {
+        if (this.persistedVersion === this.relay.mutationVersion) return;
+        const version = this.relay.mutationVersion, snapshot = Buffer.from(JSON.stringify(this.relay.snapshot()));
         const generation = randomUUID(), count = Math.ceil(snapshot.length / 64000), old = this.stored;
         // Stay below the Durable Object per-value storage limit. Publish the
         // head only after all chunks exist, so eviction never exposes a partial snapshot.
         for (let i = 0; i < count; i++) await this.state.storage.put('relay:' + generation + ':' + i, new Uint8Array(snapshot.subarray(i * 64000, (i + 1) * 64000)));
         await this.state.storage.put('relay-head', { generation, count }); this.stored = { generation, count };
+        this.persistedVersion = version;
         if (old && this.state.storage.delete) for (let i = 0; i < old.count; i++) await this.state.storage.delete('relay:' + old.generation + ':' + i);
       }); return this.writes;
     };
-    if (new URL(request.url).pathname === '/stream' && response.body) {
+    const path = new URL(request.url).pathname;
+    if (!response.ok) return response;
+    if (request.method === 'GET' && path === '/stream' && response.body) {
+      await persist();
       const reader = response.body.getReader();
       return new Response(new ReadableStream<Uint8Array>({
         async pull(controller) { const { value, done } = await reader.read(); if (done) controller.close(); else { await persist(); controller.enqueue(value); } },
         async cancel() { await reader.cancel(); }
       }), { status: response.status, headers: response.headers });
     }
-    await persist(); return response;
+    if ((request.method === 'POST' && ['/agents', '/envelopes'].includes(path)) || (request.method === 'GET' && path === '/envelopes')) await persist();
+    return response;
   }
 }
 const localHandler = createRelayFetchHandler();

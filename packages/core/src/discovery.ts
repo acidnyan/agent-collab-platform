@@ -8,6 +8,30 @@ export interface DiscoveryAgentCard {
 }
 export type SignedAgentCard = Signed<DiscoveryAgentCard>;
 function relayUrl(value: string): void { const u = new URL(value); if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password) throw new Error('INVALID_RELAY_URL'); }
+/** Validate literal endpoints before using an untrusted invite as a network destination. */
+export function validateRelayEndpointUrl(value: string, options: { allowPrivateRelay?: boolean } = {}): void {
+  const blocked = () => { throw new Error('SSRF_BLOCKED_RELAY_URL'); };
+  let u: URL; try { u = new URL(value); } catch { return blocked(); }
+  if (!['http:', 'https:', 'ws:', 'wss:'].includes(u.protocol) || u.username || u.password) blocked();
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (['metadata.google.internal', 'metadata.goog'].includes(host)) blocked();
+  const privateBlocked = options.allowPrivateRelay === false;
+  let ipv4 = /^\d+\.\d+\.\d+\.\d+$/.test(host) ? host.split('.').map(Number) : undefined;
+  if (host.includes(':')) {
+    const halves = host.split('::'), left = halves[0] ? halves[0].split(':') : [], right = halves[1] ? halves[1].split(':') : [];
+    const words = (halves.length === 2 ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right] : left).map(w => parseInt(w, 16));
+    if (words.every(w => w === 0) || host === 'fd00:ec2::254') blocked();
+    // IPv4-mapped IPv6 must obey the same policy as the embedded IPv4 address.
+    if (words.slice(0, 5).every(w => w === 0) && words[5] === 0xffff) ipv4 = [words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255];
+    if (privateBlocked && ((words.slice(0, 7).every(w => w === 0) && words[7] === 1) || (words[0] & 0xfe00) === 0xfc00 || (words[0] & 0xffc0) === 0xfe80)) blocked();
+  }
+  if (ipv4) {
+    const [a, b] = ipv4;
+    if ((a === 169 && b === 254) || ipv4.every(n => n === 0)) blocked();
+    if (privateBlocked && (a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168))) blocked();
+  }
+  if (privateBlocked && (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host.endsWith('.internal'))) blocked();
+}
 export function createSignedAgentCard(options: Omit<DiscoveryAgentCard, 'type' | 'ownerDid' | 'version' | 'description' | 'costModes'> & Partial<Pick<DiscoveryAgentCard, 'version' | 'description' | 'costModes'>>, owner: KeyPair): SignedAgentCard {
   const card = signPayload({ type: 'AgentCard' as const, version: '0.2.0', description: 'ACP worker', costModes: ['worker_byok'] as BudgetSpec['costBearer'][], ...options, ownerDid: owner.did }, owner);
   if (!verifySignedAgentCard(card)) throw new Error('INVALID_AGENT_CARD'); return card;
@@ -31,7 +55,7 @@ export function createInviteToken(options: { agentCard: SignedAgentCard; expires
   const token = Buffer.from(JSON.stringify(signPayload<Invite>({ type: 'AgentInvite', ownerDid: owner.did, agentDid: p.agentDid, relayUrl: p.relayEndpoint, agentCard: options.agentCard, issuedAt, expiresAt: new Date(Date.parse(issuedAt) + ttl * 1000).toISOString() }, owner))).toString('base64url');
   return options.format === 'acp' ? 'acp://invite?token=' + token : 'acp-invite:' + token;
 }
-export function parseAndVerifyInviteToken(uri: string, now = Date.now()): Invite {
+export function parseAndVerifyInviteToken(uri: string, now = Date.now(), options: { allowPrivateRelay?: boolean } = {}): Invite {
   try {
     let token: string;
     if (uri.startsWith('acp-invite:')) token = uri.slice(11);
@@ -39,6 +63,6 @@ export function parseAndVerifyInviteToken(uri: string, now = Date.now()): Invite
     if (!/^[\w-]+$/.test(token) || token.length > 65536) throw new Error();
     const signed = JSON.parse(Buffer.from(token, 'base64url').toString()) as Signed<Invite>, p = signed.payload;
     if (!verifySigned(signed, p.ownerDid) || p.type !== 'AgentInvite' || !verifySignedAgentCard(p.agentCard) || p.agentCard.payload.ownerDid !== p.ownerDid || p.agentCard.payload.agentDid !== p.agentDid || p.agentCard.payload.relayEndpoint !== p.relayUrl || !Number.isFinite(Date.parse(p.issuedAt)) || !Number.isFinite(Date.parse(p.expiresAt)) || Date.parse(p.issuedAt) > now || Date.parse(p.expiresAt) <= now || Date.parse(p.expiresAt) <= Date.parse(p.issuedAt)) throw new Error();
-    relayUrl(p.relayUrl); return p;
-  } catch { throw new Error('INVALID_OR_EXPIRED_INVITE'); }
+    validateRelayEndpointUrl(p.relayUrl, options); return p;
+  } catch (error) { if (error instanceof Error && error.message === 'SSRF_BLOCKED_RELAY_URL') throw error; throw new Error('INVALID_OR_EXPIRED_INVITE'); }
 }
