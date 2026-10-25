@@ -24,6 +24,7 @@ export class VerificationEngine {
       if (!verifyEnvelope(envelope, m.requester.ownerDid) || envelope.payload.senderDid !== worker || envelope.payload.taskId !== m.taskId || envelope.payload.eventType !== 'DELIVER' || Date.now() > Date.parse(m.deadline)) throw new Error('CRYPTO_ENVELOPE_OR_DEADLINE');
       const d = envelope.payload.payload as unknown as Delivery;
       if (!verifySigned(d.artifact, worker) || d.artifact.payload.type !== 'Artifact' || d.artifact.payload.taskId !== m.taskId || digest(d.artifact.payload.data) !== d.artifact.payload.digest || !verifySigned(d.attestation, worker) || d.attestation.payload.type !== 'ExecutionAttestation' || d.attestation.payload.taskId !== m.taskId || d.attestation.payload.contractDigest !== contract.contractDigest || d.attestation.payload.artifactDigest !== d.artifact.payload.digest || !verifyUsage(d.usage, worker, m.taskId, m.budget)) throw new Error('CRYPTO_ARTIFACT_OR_BUDGET');
+      if (m.sandboxPolicy.isolationLevel === 'oci_container' && m.verification.requireExecutionAttestation && m.sandboxPolicy.allowSubprocessFallback !== true && d.attestation.payload.effectiveIsolationLevel !== 'oci_container') throw new Error('ISOLATION_LEVEL_MISMATCH');
       stages.push('crypto_budget');
       if (!validateOutput(m.io.outputSchema, d.artifact.payload.data)) throw new Error('OUTPUT_SCHEMA');
       for (const check of m.verification.checks ?? []) {

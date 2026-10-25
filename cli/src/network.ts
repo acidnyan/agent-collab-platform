@@ -47,7 +47,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       case 'sandbox': adapter = new SandboxAgentAdapter(text(f, 'cmd', 'return input;')); break;
       default: throw new Error('UNKNOWN_ADAPTER');
     }
-    const worker = new WorkerNode({ owner: key, relay: text(f, 'relay'), adapter, name: text(f, 'name', adapter.name), approvalProvider: approval(key, automatic), auditPath: f.has('--audit') ? text(f, 'audit') : undefined, onEvent: (event, taskId) => console.error(JSON.stringify({ event, taskId })) });
+    const worker = new WorkerNode({ owner: key, relay: new HttpRelayClient(text(f, 'relay'), key), relayUrl: text(f, 'relay'), adapter, name: text(f, 'name', adapter.name), approvalProvider: approval(key, automatic), auditPath: f.has('--audit') ? text(f, 'audit') : undefined, onEvent: (event, taskId) => console.error(JSON.stringify({ event, taskId })) });
     await worker.register(); console.log(worker.invite());
     const stop = () => worker.stop(); process.once('SIGINT', stop); process.once('SIGTERM', stop);
     try { await worker.start({ once: f.has('--once') }); } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); } return;
@@ -55,7 +55,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
   if (command === 'delegate') {
     let outputSchema: Schema = {};
     if (f.has('--output-schema')) { const value = text(f, 'output-schema'); outputSchema = JSON.parse(value.trim().startsWith('{') ? value : readFileSync(value, 'utf8')) as Schema; }
-    const client = new RequesterClient({ owner: key, ...(f.has('--relay') ? { relay: text(f, 'relay') } : {}), approvalProvider: approval(key, automatic), auditPath: f.has('--audit') ? text(f, 'audit') : undefined });
+    const client = new RequesterClient({ owner: key, ...(f.has('--relay') ? { relay: new HttpRelayClient(text(f, 'relay'), key) } : {}), approvalProvider: approval(key, automatic), auditPath: f.has('--audit') ? text(f, 'audit') : undefined });
     const result = await client.delegate({ to: text(f, 'to'), title: text(f, 'title'), description: text(f, 'description'), input: JSON.parse(text(f, 'input')), outputSchema });
     if (f.has('--out')) writeFileSync(text(f, 'out'), JSON.stringify(result.deliverable, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     console.log(JSON.stringify({ taskId: result.taskId, state: result.state, deliverable: result.deliverable, audit: 'VALID' })); return;

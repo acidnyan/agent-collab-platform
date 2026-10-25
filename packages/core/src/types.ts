@@ -25,6 +25,6 @@ export interface TaskManifest {
   verification: { mode: string; requireUsageReceipt: boolean; requireExecutionAttestation: boolean; maxRetries: number; checks?: { checkId: string; kind: string; target: string; expectedExitCode?: number }[] };
   budget: BudgetSpec;
   permissions: { maxDelegationDepth: number; grantedCapabilities: { capabilityId: string; resource: string; allowedTools: string[]; argConstraints?: Schema; maxInvocations: number; expiresAt: string }[] };
-  sandboxPolicy: { isolationLevel: string; networkAccess: string; filesystemScope: string; allowedHosts?: string[] };
+  sandboxPolicy: { isolationLevel: string; networkAccess: string; filesystemScope: string; allowedHosts?: string[]; allowSubprocessFallback?: boolean };
   hitlPolicy: { requiredGates: string[] }; signatures?: Record<string, Signature>;
 }

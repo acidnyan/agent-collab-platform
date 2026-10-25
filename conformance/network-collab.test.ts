@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { spawn } from 'node:child_process';
-import { generateKeyPair, createSignedAgentCard, verifySignedAgentCard, createInviteToken, parseAndVerifyInviteToken, signApproval, verifyApproval, signEnvelope, signPayload, verifySigned } from '../packages/core/src/index.js';
+import { generateKeyPair, createRelayAuthToken, createSignedAgentCard, verifySignedAgentCard, createInviteToken, parseAndVerifyInviteToken, signApproval, verifyApproval, signEnvelope, signPayload, verifySigned } from '../packages/core/src/index.js';
 import type { Json, KeyPair } from '../packages/core/src/index.js';
 import { WorkerNode, RequesterClient, PolicyAutoApprovalProvider, InteractiveCliApprovalProvider, WebhookApprovalProvider, connectMCPTools, buildTaskManifest, VerificationEngine } from '../packages/runtime/src/index.js';
 import type { AgentAdapter, ApprovalProvider, DelegateOptions, Delivery } from '../packages/runtime/src/index.js';
@@ -100,24 +100,24 @@ describe('WP-8 signed discovery, invite and relay transports', () => {
   });
   it('wakes long polls immediately and prevents envelope replay', async () => {
     const { fetcher, url } = await network(), a = generateKeyPair(), b = generateKeyPair();
-    const pending = fetcher(url + '/envelopes?recipient=' + encodeURIComponent(b.did) + '&waitMs=1000');
+    const pending = fetcher(url + '/envelopes?recipient=' + encodeURIComponent(b.did) + '&waitMs=1000', { headers: { authorization: 'Bearer ' + createRelayAuthToken(b) } });
     const envelope = signEnvelope({ taskId: 'task_network1', recipientDid: b.did, seq: 0, eventType: 'PING', payload: {} }, a);
     expect((await fetcher(url + '/envelopes', { method: 'POST', body: JSON.stringify(envelope) })).status).toBe(202);
     expect(await (await pending).json()).toEqual({ envelopes: [envelope] });
     expect((await fetcher(url + '/envelopes', { method: 'POST', body: JSON.stringify(envelope) })).status).toBe(400);
-    expect(await (await fetcher(url + '/envelopes?recipient=' + encodeURIComponent(b.did) + '&waitMs=1')).json()).toEqual({ envelopes: [] });
+    expect(await (await fetcher(url + '/envelopes?recipient=' + encodeURIComponent(b.did) + '&waitMs=1', { headers: { authorization: 'Bearer ' + createRelayAuthToken(b) } })).json()).toEqual({ envelopes: [] });
     const bad = structuredClone(envelope); bad.payload.seq++; expect((await fetcher(url + '/envelopes', { method: 'POST', body: JSON.stringify(bad) })).status).toBe(400);
   });
   it('delivers live SSE envelopes with verified signatures', async () => {
     const { fetcher, url } = await network(), a = generateKeyPair(), b = generateKeyPair(), controller = new AbortController();
-    const client = new SseRelayClient(url, fetcher), iterator = client.stream(b.did, controller.signal);
+    const client = new SseRelayClient(url, fetcher, b), iterator = client.stream(b.did, controller.signal);
     const pending = iterator.next();
     const e = signEnvelope({ taskId: 'task_stream01', recipientDid: b.did, seq: 0, eventType: 'PING', payload: { test: true } }, a);
     await client.send(e); expect((await pending).value).toEqual(e); await iterator.return(undefined); controller.abort();
   });
   it('retains the original WebSocket request/response API', async () => {
     const n = await network(); if (!n.wsUrl) return;
-    const client = new WebSocketRelayClient(n.wsUrl); cleanup.push(() => client.close()); const a = generateKeyPair(), b = generateKeyPair();
+    const a = generateKeyPair(), b = generateKeyPair(); const client = new WebSocketRelayClient(n.wsUrl, b); cleanup.push(() => client.close());
     const e = signEnvelope({ taskId: 'task_socket01', recipientDid: b.did, seq: 0, eventType: 'PING', payload: {} }, a);
     await client.send(e); expect(await client.receive(b.did)).toEqual(e);
   });
@@ -221,7 +221,7 @@ it('persists the edge relay registry, queue and replay protection across restart
   expect((await first.fetch(new Request('https://relay.local/envelopes', { method: 'POST', body: JSON.stringify(envelope) }))).status).toBe(202);
   const second = new RelayDurableObject(state);
   expect(await (await second.fetch(new Request('https://relay.local/agents'))).json()).toEqual([card]);
-  expect(await (await second.fetch(new Request('https://relay.local/envelopes?recipient=' + encodeURIComponent(peer.did)))).json()).toEqual(envelope);
+  expect(await (await second.fetch(new Request('https://relay.local/envelopes?recipient=' + encodeURIComponent(peer.did), { headers: { authorization: 'Bearer ' + createRelayAuthToken(peer) } }))).json()).toEqual(envelope);
   const third = new RelayDurableObject(state);
   expect((await third.fetch(new Request('https://relay.local/envelopes', { method: 'POST', body: JSON.stringify(envelope) }))).status).toBe(400);
 });

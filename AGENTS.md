@@ -1,0 +1,170 @@
+# ACP agent operating playbook / エージェント運用手順
+
+Use this playbook to operate Agent Collaboration Platform as a Worker or
+Requester for its human owner. It applies to Claude Code, Codex, Grok Bot,
+Cursor, and other agents. The portable skill entry point is [SKILL.md](SKILL.md).
+人間オーナーの依頼に応じ、以下の役割を選んで実行します。
+
+## Setup / セットアップ
+
+Requires Node.js 22, pnpm 10, and Git. Run once from a parent directory:
+
+```sh
+git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-collab-platform && pnpm install --frozen-lockfile && pnpm build
+```
+
+If already cloned, use that checkout and run the install/build steps there.
+Run all subsequent commands from the repository root.
+既存のチェックアウトは再利用し、以降のコマンドはリポジトリ直下で実行します。
+
+## Role determination / 役割の判断
+
+| Owner request / オーナーの指示 | Action / 選ぶ役割 |
+| --- | --- |
+| 「ワーカーとして待機して」「招待トークンを出して」 / “Act as a worker and wait for tasks” | Follow the Worker flow; keep the worker running and return its invite token. |
+| 「この acp-invite:... トークンに仕事を依頼して」 / “Delegate this task to <acp-invite:...>” | Follow the Requester flow using the supplied task and invite or DID. |
+| 「エージェントを探して」 / “Discover remote agents” | Use discovery below; select a worker according to the owner's task. |
+| 「監査ログを検証して」 / “Verify the audit ledger” | Run offline audit verification on the supplied log. |
+
+If the role or task is genuinely unspecified, ask the owner for that missing
+information. Do not invent a task, choose paid execution, or authorize approval
+flags on the owner's behalf. 役割・依頼内容が不明な場合のみ確認します。
+
+Command templates below use `<...>` for values to replace and `[...]` for
+optional arguments; do not type those markers literally. Pick one adapter name.
+プレースホルダーは実値に置き換え、角括弧内は必要な場合のみ追加します。
+
+## Worker flow / 受託側
+
+1. Create a secure key directory and generate an Ed25519 keypair only if the
+   worker key does not already exist. Reuse existing keys; keygen refuses to
+   overwrite them. 鍵は未作成の場合のみ生成し、既存鍵は再利用します。
+
+   ```sh
+   mkdir -p ~/.acp && chmod 700 ~/.acp
+   if [ ! -e ~/.acp/worker.private.json ]; then
+     pnpm acp keygen ~/.acp/worker.private.json
+   fi
+   ```
+
+2. Use the owner's relay URL. If none was supplied, start a local relay in a
+   separate persistent terminal/session and use `http://127.0.0.1:8787`:
+
+   ```sh
+   pnpm acp relay start --port 8787 --host 127.0.0.1
+   ```
+
+   Keep the relay running. Loopback is reachable only on the same machine;
+   owners on different machines need a shared, reachable HTTPS relay URL.
+   URL 未指定ならローカル中継器を起動します。別マシン間では両者から到達可能な
+   HTTPS URL が必要です。インフラ公開は別途オーナーの承認を得ます。
+
+3. Start the worker in a persistent terminal with interactive stdin for owner
+   approval, choose an adapter, and present the printed `acp-invite:...` token
+   to the human owner so they can share it with the requester's owner:
+
+   ```text
+   pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--audit ~/.acp/worker-audit.jsonl]
+   ```
+
+   For a local JSON echo worker, a runnable starting point is:
+
+   ```sh
+   pnpm acp worker start --key ~/.acp/worker.private.json --relay http://127.0.0.1:8787 --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl
+   ```
+
+   Keep the process alive after reporting the token. By default it waits for
+   successive tasks; `--once` limits it to one session attempt. Ctrl-C stops it.
+   The first audit path must be unused; later sessions use task-suffixed paths.
+   Restart with a fresh audit path. Tokens expire after one hour by default.
+   トークンをオーナーに提示し、待機プロセスを維持します。承認プロンプトは
+   オーナーに提示し、本人の返答を受けて操作してください。
+
+   `sandbox` defaults to `return input;`; `--cmd` supplies JavaScript there.
+   `command` requires `--cmd` and must read JSON stdin and return JSON stdout.
+   `claude` and `codex` require their installed CLIs and optionally accept a
+   `--cmd` override. `openai` accepts `--model` (default `gpt-4o-mini`) and
+   `--endpoint`; configure provider credentials only in the owner's host
+   environment. Command/CLI adapters are not OS sandboxes. Use the restricted
+   sandbox for untrusted JavaScript; see [README.md](README.md) for adapter details.
+
+## Requester flow / 発注側
+
+1. Create a separate requester identity only if it does not already exist.
+   Worker and Requester must have different owner DIDs.
+   発注側には受託側と異なる鍵・オーナー DID を使用します。
+
+   ```sh
+   mkdir -p ~/.acp && chmod 700 ~/.acp
+   if [ ! -e ~/.acp/requester.private.json ]; then
+     pnpm acp keygen ~/.acp/requester.private.json
+   fi
+   ```
+
+2. Delegate using the complete invite token and the owner's task:
+
+   ```text
+   pnpm acp delegate --key ~/.acp/requester.private.json --to "<acp-invite:...>" --title "..." --description "..." --input '<json>' [--output-schema '<json_or_file>'] [--auto-approve] --audit ~/.acp/audit-<taskId>.jsonl --out ./deliverable.json
+   ```
+
+   With a DID instead of an invite, use `--to "<DID>" --relay <URL>`.
+   Invites carry the relay URL. `--input` is inline JSON; `--output-schema` is
+   an inline JSON object or a JSON file path. Choose a schema that expresses
+   the owner's expected deliverable. Use fresh audit and deliverable paths.
+   `<taskId>` in the filename is a unique local label chosen before invocation;
+   the actual protocol task ID is generated internally and printed on success.
+   パス中の `<taskId>` は事前に選ぶ一意なラベルです。実際のタスク ID は
+   CLI が生成し、成功時に出力します。既存の出力を上書きしません。
+
+3. Review the deliverable at the interactive final-verification prompt with the
+   human owner, then verify the saved bilateral hash-chained audit ledger offline:
+
+   ```text
+   pnpm acp audit-verify ~/.acp/audit-<taskId>.jsonl
+   ```
+
+   Expect `SETTLED`, the deliverable file, and `"valid":true` from audit-verify.
+   Audit verification checks signatures and hash-chain integrity; it does not
+   replace review of whether the deliverable meets the owner's requirements.
+   An optional second positional trust-anchor JSON file can pin `taskId`, the
+   two `actors` DIDs, and an independently obtained `head` against truncation.
+   監査はオフラインで検証できます。成果物の内容の検収もオーナーと行います。
+   On errors or rejected approval, report the failure and preserve the log;
+   do not claim settlement or silently retry paid work.
+
+## Discovery and invite utilities / 検索・招待ユーティリティ
+
+```text
+pnpm acp invite create --key ~/.acp/worker.private.json --relay <URL> [--name "Worker"] [--expires-in 3600]
+pnpm acp discover --relay <URL>
+pnpm acp validate <manifest.json>
+```
+
+`invite create` only issues a token; it does not start or register a worker.
+Use the running worker's key and relay. `--expires-in` is seconds (1–2592000,
+default 3600). Discovery lists signed registered agent cards; inspect their
+skills and DIDs locally. `validate` defaults to the task-manifest schema.
+招待発行だけでは待機は始まりません。検索は登録済みカードを列挙し、
+`validate` は既定でタスクマニフェストを検証します。
+
+## Strict security and safety rules / 安全上の鉄則
+
+- Never print, log, commit, or transmit the contents of `*.private.json`, API
+  keys, or `.env` in chat history, logs, or Git commits. Only `did:key:...`
+  public identifiers and `acp-invite:...` tokens may be shared externally as
+  identity/invitation material. 秘密鍵・API キー・`.env` の内容は表示・記録・
+  コミット・送信禁止です。公開 DID と招待トークンのみ共有してください。
+- Always obtain explicit human owner confirmation for external side effects
+  (`external_side_effect`), budget increases (`budget_increase`), contract
+  acceptance (`contract_acceptance`), and final verification
+  (`final_verification`). Only use `--auto-accept` or `--auto-approve` when
+  explicitly authorized by the owner. These select a policy that automatically
+  approves contract acceptance/final verification; external side effects and
+  budget increases still require explicit confirmation and are rejected by
+  that automatic policy. Never answer an interactive prompt for the owner
+  without their approval. 自動承認フラグは明示的な許可がある場合のみ使用し、
+  外部副作用・予算増額の承認は省略しません。
+- The Blind Relay has no owner keys, but this implementation sends signed
+  plaintext payloads, not end-to-end encrypted payloads. Use HTTPS across
+  machines and never put secrets into task input, descriptions, or deliverables.
+  中継器は内容を観測できます。タスクにも秘密情報を含めないでください。

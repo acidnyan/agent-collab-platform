@@ -32,6 +32,13 @@ flowchart LR
 
 ## 3-Minute Quickstart / 3分クイックスタート (M2/M3)
 
+**For AI agents / AI エージェント向け:** Read [AGENTS.md](AGENTS.md) for the
+autonomous Worker/Requester playbook, setup commands, and owner approval rules.
+[SKILL.md](SKILL.md) provides the portable `agent-collab-platform` skill with
+English/Japanese role triggers, discovery, and offline audit verification.
+Claude Code・Codex・Grok Bot・Cursor などは、これらの手順で役割を判断し、
+秘密鍵を共有せずにセットアップ・待機・委譲・検証を実行できます。
+
 Requires Node.js 22 and pnpm 10. From the repository root:
 Node.js 22・pnpm 10 を用意し、リポジトリ直下で実行します。
 
@@ -130,6 +137,8 @@ Use the restricted sandbox for untrusted JavaScript. OCI uses an already-present
 capabilities and applies memory/PID limits. An unavailable runtime falls back to
 the restricted subprocess and records the effective isolation level in the signed
 attestation. A container execution failure is surfaced rather than rerun.
+When execution attestation is required, verification rejects an OCI downgrade
+unless the signed manifest explicitly sets `sandboxPolicy.allowSubprocessFallback: true`.
 
 実 CLI は事前インストールが必要です。プロバイダー鍵はホストの仲介プロセスに
 保持し、子プロセスには実鍵を渡しません。Command/CLI の作業ディレクトリ分離は
@@ -141,6 +150,24 @@ Relay envelopes retain the M1 signed plaintext wire format: use HTTPS for transi
 The relay has no owner keys and cannot authorize work, but can observe metadata
 and payloads or deny delivery. End-to-end encryption is not implemented by this
 milestone. See [security details](docs/security-model.md).
+
+HTTP receives, SSE streams and WebSocket receives/subscriptions require a fresh
+recipient-signed `RelayAuth` token. `WorkerNode`, `RequesterClient` and the CLI
+sign automatically. For direct transport use, pass the recipient key as
+`new HttpRelayClient(url, key)`, `new SseRelayClient(url, fetch, key)` or
+`new WebSocketRelayClient(wsUrl, key)`. HTTP/SSE also accept an async token
+generator as their third argument; WebSocket accepts it as its second argument.
+Raw HTTP callers can send `createRelayAuthToken(key, { action })` through
+`Authorization: Bearer <token>`, `x-acp-relay-auth` or the `auth` query parameter.
+Use `receive`, `stream` or `subscribe` to match the operation. Tokens expire after
+five minutes of clock skew and each nonce can be used once while retained in the
+bounded replay cache. Direct `InMemoryRelay.receive(did)` remains available by
+default; construct with `{ requireAuth: true }` to require a token there too.
+
+Invite endpoints always block metadata and unspecified addresses.
+`parseAndVerifyInviteToken(uri, Date.now(), { allowPrivateRelay: false })` and
+`RequesterClient`'s `allowPrivateRelay: false` option also reject private and
+loopback endpoints. Local relays remain enabled by default.
 
 A fully automated **separate-process command-adapter demo** is also available:
 

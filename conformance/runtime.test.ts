@@ -72,7 +72,7 @@ describe('A2A and blind relay wire integration',()=>{
   });
   it('rejects outer signature tampering and replay',()=>{const relay=new InMemoryRelay(),e=signEnvelope({taskId:'task_relay001',recipientDid:other.did,seq:0,eventType:'PROPOSE',payload:{}},owner);relay.send(e);expect(()=>relay.send(e)).toThrow(/REPLAY/);expect(relay.receive(other.did)).toEqual(e);e.payload.seq++;expect(()=>relay.send(e)).toThrow(/INVALID_ENVELOPE/);});
   for(const transport of ['http','websocket'] as const)it(transport+' routes immutable envelopes and rejects corrupted signatures',async()=>{
-    const server=await startLocalRelay(),client=transport==='http'?new HttpRelayClient(server.url):new WebSocketRelayClient(server.wsUrl);
+    const server=await startLocalRelay(),client=transport==='http'?new HttpRelayClient(server.url,other):new WebSocketRelayClient(server.wsUrl,other);
     try{const e=signEnvelope({taskId:'task_relay001',recipientDid:other.did,seq:0,eventType:'PROPOSE',payload:{byte:'x'}},owner);await client.send(e);expect(await client.receive(other.did)).toEqual(e);expect(await client.receive(other.did)).toBeUndefined();e.payload.payload={byte:'y'};await expect(client.send(e)).rejects.toThrow();}
     finally{if(client instanceof WebSocketRelayClient)await client.close();await server.close();}
   });
