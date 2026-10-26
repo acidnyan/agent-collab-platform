@@ -4,7 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { Json } from '@acp/core';
-export interface SandboxOptions { code: string; input?: Json; timeoutMs: number; onTool: (name: string, args: Record<string, unknown>) => Promise<unknown>; onUsage?: (inputTokens: number, outputTokens: number) => void; signal?: AbortSignal }
+export interface SandboxOptions {
+  code: string;
+  input?: Json;
+  timeoutMs: number;
+  onTool: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
+  signal?: AbortSignal;
+}
 // This trusted wrapper is the only code with access to Node APIs. VM values cross
 // the process boundary as JSON, never as host functions, objects or credentials.
 export const sandboxWrapper = String.raw`
@@ -33,41 +40,101 @@ export function sanitizedEnvironment(directory: string): NodeJS.ProcessEnv {
   return { LANG: 'C.UTF-8', TZ: 'UTC', HOME: directory, TMPDIR: directory };
 }
 export async function runSandbox(options: SandboxOptions): Promise<Json> {
-  if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 604800000) throw new Error('INVALID_TIMEOUT');
+  if (
+    !Number.isSafeInteger(options.timeoutMs) ||
+    options.timeoutMs < 1 ||
+    options.timeoutMs > 604800000
+  )
+    throw new Error('INVALID_TIMEOUT');
   const directory = await mkdtemp(join(tmpdir(), 'acp-task-'));
   try {
     await writeFile(join(directory, 'runner.cjs'), sandboxWrapper, { mode: 0o600 });
-    await writeFile(join(directory, 'task.json'), JSON.stringify({ code: options.code, input: options.input ?? null, timeoutMs: options.timeoutMs }), { mode: 0o600 });
+    await writeFile(
+      join(directory, 'task.json'),
+      JSON.stringify({
+        code: options.code,
+        input: options.input ?? null,
+        timeoutMs: options.timeoutMs,
+      }),
+      { mode: 0o600 },
+    );
     return await new Promise<Json>((resolve, reject) => {
-      const child = spawn(process.execPath, ['--experimental-permission', '--allow-fs-read=' + directory, '--allow-fs-write=' + directory, '--no-addons', '--disable-proto=throw', '--max-old-space-size=64', join(directory, 'runner.cjs')], { cwd: directory, env: sanitizedEnvironment(directory), stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
-      let done = false, requests = 0, stderr = '';
-      const finish = (error?: Error, result?: Json) => { if (done) return; done = true; clearTimeout(timer); options.signal?.removeEventListener('abort', abort); child.kill('SIGKILL'); error ? reject(error) : resolve(result ?? null); };
+      const child = spawn(
+        process.execPath,
+        [
+          '--experimental-permission',
+          '--allow-fs-read=' + directory,
+          '--allow-fs-write=' + directory,
+          '--no-addons',
+          '--disable-proto=throw',
+          '--max-old-space-size=64',
+          join(directory, 'runner.cjs'),
+        ],
+        {
+          cwd: directory,
+          env: sanitizedEnvironment(directory),
+          stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+        },
+      );
+      let done = false,
+        requests = 0,
+        stderr = '';
+      const finish = (error?: Error, result?: Json) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener('abort', abort);
+        child.kill('SIGKILL');
+        error ? reject(error) : resolve(result ?? null);
+      };
       const abort = () => finish(new Error('SANDBOX_HALTED: ' + String(options.signal?.reason)));
       const timer = setTimeout(() => finish(new Error('SANDBOX_TIMEOUT')), options.timeoutMs);
-      options.signal?.addEventListener('abort', abort, { once: true }); if (options.signal?.aborted) abort();
-      child.stderr?.on('data', (b: Buffer) => { stderr = (stderr + b.toString()).slice(-4096); });
+      options.signal?.addEventListener('abort', abort, { once: true });
+      if (options.signal?.aborted) abort();
+      child.stderr?.on('data', (b: Buffer) => {
+        stderr = (stderr + b.toString()).slice(-4096);
+      });
       // Requests arrive from another OS process. The child has no tool handlers,
       // capability counters, private keys or credentials, and cannot skip CapGuard.
       let serial = Promise.resolve();
       child.on('message', (message: unknown) => {
-        serial = serial.then(async () => {
-          if (done) return;
-          const m = message as { type: string; id: number; name: string; args: Record<string, unknown>; error?: string; value?: Json };
-          if (JSON.stringify(m).length > 1048576) return finish(new Error('SANDBOX_MESSAGE_LIMIT'));
-          if (m.type === 'done') return finish(m.error ? new Error(m.error) : undefined, m.value);
-          if (m.type !== 'tool' || ++requests > 10000) return finish(new Error('SANDBOX_PROTOCOL'));
-          try {
-            let value: unknown = null;
-            if (m.name === '$usage') { if (!options.onUsage) throw new Error('USAGE_ADAPTER_REQUIRED'); options.onUsage(m.args.inputTokens as number, m.args.outputTokens as number); }
-            else value = await options.onTool(m.name, m.args);
-            if (!done && child.connected) child.send({ id: m.id, value });
-          } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
-        }).catch(e => finish(e as Error));
+        serial = serial
+          .then(async () => {
+            if (done) return;
+            const m = message as {
+              type: string;
+              id: number;
+              name: string;
+              args: Record<string, unknown>;
+              error?: string;
+              value?: Json;
+            };
+            if (JSON.stringify(m).length > 1048576)
+              return finish(new Error('SANDBOX_MESSAGE_LIMIT'));
+            if (m.type === 'done') return finish(m.error ? new Error(m.error) : undefined, m.value);
+            if (m.type !== 'tool' || ++requests > 10000)
+              return finish(new Error('SANDBOX_PROTOCOL'));
+            try {
+              let value: unknown = null;
+              if (m.name === '$usage') {
+                if (!options.onUsage) throw new Error('USAGE_ADAPTER_REQUIRED');
+                options.onUsage(m.args.inputTokens as number, m.args.outputTokens as number);
+              } else value = await options.onTool(m.name, m.args);
+              if (!done && child.connected) child.send({ id: m.id, value });
+            } catch (error) {
+              finish(error instanceof Error ? error : new Error(String(error)));
+            }
+          })
+          .catch((e) => finish(e as Error));
       });
-      child.on('error', e => finish(e));
-      child.on('exit', code => { if (!done) finish(new Error('SANDBOX_EXIT: ' + code + ' ' + stderr)); });
+      child.on('error', (e) => finish(e));
+      child.on('exit', (code) => {
+        if (!done) finish(new Error('SANDBOX_EXIT: ' + code + ' ' + stderr));
+      });
     });
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 export * from './container.js';

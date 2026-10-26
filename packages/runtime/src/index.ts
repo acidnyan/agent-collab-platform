@@ -7,5 +7,11 @@ export * from './a2a.js';
 export * from './inbox.js';
 export * from './adapter.js';
 export * from './approval-providers.js';
-export { createSignedAgentCard, verifySignedAgentCard, toA2AAgentCard, createInviteToken, parseAndVerifyInviteToken } from '@acp/core';
+export {
+  createSignedAgentCard,
+  verifySignedAgentCard,
+  toA2AAgentCard,
+  createInviteToken,
+  parseAndVerifyInviteToken,
+} from '@acp/core';
 export * from './session.js';
