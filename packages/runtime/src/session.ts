@@ -106,6 +106,74 @@ function mailboxRelay(relay: RelayTransport, mailbox: TaskMailbox): RelayTranspo
     receive: (_recipientDid, _waitMs, signal) => mailbox.take(signal),
   };
 }
+/**
+ * One reader for a recipient DID. Concurrent delegate() calls share this inbox
+ * and only see envelopes for their own taskId.
+ */
+class RecipientInbox {
+  private readonly mailboxes = new Map<string, TaskMailbox>();
+  private wake?: () => void;
+  private readAbort?: AbortController;
+  private started = false;
+  constructor(
+    private readonly relay: RelayTransport,
+    private readonly did: string,
+  ) {}
+  attach(taskId: string): TaskMailbox {
+    const existing = this.mailboxes.get(taskId);
+    if (existing) return existing;
+    const mailbox = new TaskMailbox();
+    this.mailboxes.set(taskId, mailbox);
+    this.wake?.();
+    this.wake = undefined;
+    if (!this.started) {
+      this.started = true;
+      void this.pump();
+    }
+    return mailbox;
+  }
+  /** Drop the task mailbox. The shared reader stops dequeuing once none remain. */
+  detach(taskId: string): void {
+    this.mailboxes.delete(taskId);
+    if (this.mailboxes.size === 0) this.readAbort?.abort();
+  }
+  private async pump(): Promise<void> {
+    for (;;) {
+      if (this.mailboxes.size === 0) {
+        await new Promise<void>((resolve) => {
+          if (this.mailboxes.size > 0) {
+            resolve();
+            return;
+          }
+          this.wake = resolve;
+        });
+        continue;
+      }
+      const controller = new AbortController();
+      this.readAbort = controller;
+      try {
+        const envelope = await receiveRelay(this.relay, this.did, controller.signal);
+        this.mailboxes.get(envelope.payload.taskId)?.push(envelope);
+      } catch {
+        // The last mailbox closed, or the transport aborted this read.
+      }
+    }
+  }
+}
+const recipientInboxes = new WeakMap<object, Map<string, RecipientInbox>>();
+function recipientInbox(source: object, relay: RelayTransport, did: string): RecipientInbox {
+  let byDid = recipientInboxes.get(source);
+  if (!byDid) {
+    byDid = new Map();
+    recipientInboxes.set(source, byDid);
+  }
+  let inbox = byDid.get(did);
+  if (!inbox) {
+    inbox = new RecipientInbox(relay, did);
+    byDid.set(did, inbox);
+  }
+  return inbox;
+}
 export interface WorkerNodeOptions {
   owner: KeyPair;
   relay: RelayTransport | string;
@@ -501,7 +569,12 @@ export class RequesterClient {
         allowPrivateRelay: this.options.allowPrivateRelay,
       });
     const relay = transport(relayOption, this.options.owner),
-      owner = this.options.owner;
+      owner = this.options.owner,
+      inbox = recipientInbox(
+        typeof relayOption === 'string' ? this : relayOption,
+        relay,
+        owner.did,
+      );
     const cards = !invite && relay.discover ? await relay.discover() : [];
     if (cards.some((c) => !verifySignedAgentCard(c))) throw new Error('INVALID_AGENT_CARD');
     const card = cards.find(
@@ -531,8 +604,9 @@ export class RequesterClient {
       Math.min(this.options.timeoutMs ?? 120000, Date.parse(manifest.deadline) - Date.now()),
       options.signal,
     );
+    const mailbox = inbox.attach(manifest.taskId);
     const wire = new SessionWire(
-      relay,
+      mailboxRelay(relay, mailbox),
       owner,
       peer,
       manifest.taskId,
@@ -626,6 +700,7 @@ export class RequesterClient {
       await wire.rawSend('ERROR', { code: safeError(e) }).catch(() => {});
       throw e;
     } finally {
+      inbox.detach(manifest.taskId);
       gateway?.close();
     }
   }
