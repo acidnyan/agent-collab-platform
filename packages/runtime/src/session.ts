@@ -30,6 +30,7 @@ import type {
   TaskManifest,
   Signed,
   SignedAgentCard,
+  SignedEnvelope,
   TaskContract,
   Transition,
   CapabilityToken,
@@ -67,6 +68,44 @@ function freshAudit(path?: string): void {
 function sessionSignal(timeout: number, signal?: AbortSignal): AbortSignal {
   return AbortSignal.any([AbortSignal.timeout(timeout), ...(signal ? [signal] : [])]);
 }
+/** Per-task queue so one session cannot dequeue another task's envelopes. */
+class TaskMailbox {
+  private queue: SignedEnvelope[] = [];
+  private waiters: Array<() => void> = [];
+  push(envelope: SignedEnvelope): void {
+    this.queue.push(envelope);
+    this.waiters.shift()?.();
+  }
+  async take(signal?: AbortSignal): Promise<SignedEnvelope> {
+    for (;;) {
+      signal?.throwIfAborted();
+      const next = this.queue.shift();
+      if (next) return next;
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', onAbort);
+          this.waiters = this.waiters.filter((waiter) => waiter !== onWake);
+          error ? reject(error) : resolve();
+        };
+        const onAbort = () => finish(new Error('SESSION_ABORTED'));
+        const onWake = () => finish();
+        this.waiters.push(onWake);
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+        else if (this.queue.length) onWake();
+      });
+    }
+  }
+}
+function mailboxRelay(relay: RelayTransport, mailbox: TaskMailbox): RelayTransport {
+  return {
+    send: (envelope) => relay.send(envelope),
+    receive: (_recipientDid, _waitMs, signal) => mailbox.take(signal),
+  };
+}
 export interface WorkerNodeOptions {
   owner: KeyPair;
   relay: RelayTransport | string;
@@ -91,6 +130,7 @@ export class WorkerNode {
   readonly agentCard: SignedAgentCard;
   readonly approvalProvider: ApprovalProvider;
   private completed = 0;
+  private readonly mailboxes = new Map<string, TaskMailbox>();
   readonly controller = new AbortController();
   lastResult?: SessionResult;
   constructor(readonly options: WorkerNodeOptions) {
@@ -123,20 +163,100 @@ export class WorkerNode {
     options: { once?: boolean; signal?: AbortSignal } = {},
   ): Promise<SessionResult | undefined> {
     await this.register();
-    do {
-      try {
-        this.lastResult = await this.runOnce(options.signal);
-      } catch (e) {
-        if (options.once) throw e;
-        if (this.controller.signal.aborted || options.signal?.aborted) break;
-        this.options.onEvent?.('REJECTED', '');
+    const idleSignal = AbortSignal.any([
+      this.controller.signal,
+      ...(options.signal ? [options.signal] : []),
+    ]);
+    const jobs = new Set<Promise<void>>();
+    try {
+      while (!idleSignal.aborted) {
+        const envelope = await receiveRelay(this.relay, this.options.owner.did, idleSignal);
+        if (this.deliver(envelope)) continue;
+        const job = this.beginTask(envelope, idleSignal, options.once === true);
+        if (!job) continue;
+        jobs.add(job);
+        void job.finally(() => jobs.delete(job)).catch(() => undefined);
+        if (options.once) {
+          await this.pumpUntil(job, idleSignal);
+          return this.lastResult;
+        }
       }
-    } while (!options.once && !this.controller.signal.aborted && !options.signal?.aborted);
+    } catch (error) {
+      if (!idleSignal.aborted) throw error;
+    } finally {
+      await Promise.allSettled([...jobs]);
+    }
     return this.lastResult;
+  }
+  private deliver(envelope: SignedEnvelope): boolean {
+    const mailbox = this.mailboxes.get(envelope.payload.taskId);
+    if (!mailbox) return false;
+    mailbox.push(envelope);
+    return true;
+  }
+  private beginTask(
+    first: SignedEnvelope,
+    idleSignal: AbortSignal,
+    once: boolean,
+  ): Promise<void> | undefined {
+    if (
+      !verifyEnvelope(first, this.options.owner.did) ||
+      first.payload.eventType !== 'PROPOSE' ||
+      first.payload.seq !== 0
+    ) {
+      if (once) throw new Error('INVALID_PROPOSAL_ENVELOPE');
+      this.options.onEvent?.('REJECTED', '');
+      return;
+    }
+    const mailbox = new TaskMailbox();
+    this.mailboxes.set(first.payload.taskId, mailbox);
+    const job = this.executeTask(first, idleSignal, mailboxRelay(this.relay, mailbox))
+      .then((result) => {
+        this.lastResult = result;
+      })
+      .catch((error) => {
+        if (once) throw error;
+        this.options.onEvent?.('REJECTED', '');
+      })
+      .finally(() => {
+        this.mailboxes.delete(first.payload.taskId);
+      });
+    return job;
+  }
+  /** Keep reading the shared inbox until a single task finishes, without dropping its peer's mail. */
+  private async pumpUntil(job: Promise<void>, idleSignal: AbortSignal): Promise<void> {
+    const wait = new AbortController();
+    try {
+      while (!idleSignal.aborted) {
+        const incoming = receiveRelay(
+          this.relay,
+          this.options.owner.did,
+          AbortSignal.any([idleSignal, wait.signal]),
+        ).then(
+          (envelope) => envelope,
+          (error: unknown) => {
+            if (idleSignal.aborted || wait.signal.aborted) return undefined;
+            throw error;
+          },
+        );
+        const envelope = await Promise.race([job.then(() => undefined), incoming]);
+        if (!envelope) return;
+        if (!this.deliver(envelope)) this.options.onEvent?.('REJECTED', '');
+      }
+    } finally {
+      wait.abort();
+    }
   }
   async runOnce(signal?: AbortSignal): Promise<SessionResult> {
     const idleSignal = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
     const first = await receiveRelay(this.relay, this.options.owner.did, idleSignal);
+    return this.executeTask(first, idleSignal, this.relay);
+  }
+  private async executeTask(
+    first: SignedEnvelope,
+    idleSignal: AbortSignal,
+    relay: RelayTransport,
+  ): Promise<SessionResult> {
     if (
       !verifyEnvelope(first, this.options.owner.did) ||
       first.payload.eventType !== 'PROPOSE' ||
@@ -168,7 +288,7 @@ export class WorkerNode {
       idleSignal,
     );
     const wire = new SessionWire(
-      this.relay,
+      relay,
       this.options.owner,
       m.requester.ownerDid,
       m.taskId,
