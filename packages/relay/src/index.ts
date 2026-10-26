@@ -55,15 +55,30 @@ export async function startLocalRelay(
       }
       const reader = result.body.getReader();
       try {
-        while (!response.destroyed) {
+        while (!response.destroyed && !response.writableEnded) {
           const { value, done } = await reader.read();
           if (done) break;
-          if (!response.write(value))
-            await new Promise<void>((resolve) => response.once('drain', resolve));
+          if (!response.write(value)) {
+            // A disconnected client never emits drain. Close and error must unblock the write.
+            if (response.destroyed || response.writableEnded) break;
+            await new Promise<void>((resolve) => {
+              const doneWriting = () => {
+                response.off('drain', doneWriting);
+                response.off('close', doneWriting);
+                response.off('error', doneWriting);
+                resolve();
+              };
+              response.once('drain', doneWriting);
+              response.once('close', doneWriting);
+              response.once('error', doneWriting);
+              if (response.destroyed || response.writableEnded) doneWriting();
+            });
+            if (response.destroyed || response.writableEnded) break;
+          }
         }
       } finally {
         await reader.cancel();
-        response.end();
+        if (!response.destroyed && !response.writableEnded) response.end();
       }
     } catch (e) {
       if (!response.headersSent) response.writeHead(400, relayHttpHeaders('json'));
@@ -73,8 +88,21 @@ export async function startLocalRelay(
   server.requestTimeout = 10000;
   const wsServer = new WebSocketServer({ server, path: '/ws', maxPayload: 1048576 });
   wsServer.on('connection', (socket) => {
-    let unsubscribe = () => {};
-    socket.once('close', () => unsubscribe());
+    let subscription: {
+      disposed: boolean;
+      timer?: ReturnType<typeof setTimeout>;
+      stop: () => void;
+    } = { disposed: true, stop: () => {} };
+    const disposeSubscription = () => {
+      subscription.disposed = true;
+      if (subscription.timer !== undefined) {
+        clearTimeout(subscription.timer);
+        subscription.timer = undefined;
+      }
+      subscription.stop();
+      subscription.stop = () => {};
+    };
+    socket.once('close', () => disposeSubscription());
     socket.on('message', (raw) => {
       try {
         const request = JSON.parse(raw.toString()) as {
@@ -93,24 +121,40 @@ export async function startLocalRelay(
         } else if (request.method === 'subscribe' && request.recipientDid) {
           const did = request.recipientDid,
             receive = relay.openInbox(did, request.authToken ?? request.auth, 'subscribe');
-          unsubscribe();
+          disposeSubscription();
+          const current: {
+            disposed: boolean;
+            timer?: ReturnType<typeof setTimeout>;
+            stop: () => void;
+          } = { disposed: false, stop: () => {} };
+          subscription = current;
           const flush = () => {
+            if (current.disposed) return;
             let envelope;
             // A slow socket must not pull the recipient queue ahead of maxQueueSize.
             while (
+              !current.disposed &&
               socket.readyState === WebSocket.OPEN &&
               socket.bufferedAmount < 1048576 &&
               (envelope = receive())
             )
               socket.send(JSON.stringify({ envelope }));
-            if (socket.readyState === WebSocket.OPEN && socket.bufferedAmount >= 1048576)
-              setTimeout(flush, 20);
+            if (
+              !current.disposed &&
+              socket.readyState === WebSocket.OPEN &&
+              socket.bufferedAmount >= 1048576
+            ) {
+              if (current.timer !== undefined) clearTimeout(current.timer);
+              current.timer = setTimeout(() => {
+                current.timer = undefined;
+                flush();
+              }, 20);
+            }
           };
-          unsubscribe = relay.subscribe(did, flush);
+          current.stop = relay.subscribe(did, flush);
           flush();
         } else if (request.method === 'unsubscribe') {
-          unsubscribe();
-          unsubscribe = () => {};
+          disposeSubscription();
         } else throw new Error('INVALID_REQUEST');
       } catch (e) {
         socket.send(
