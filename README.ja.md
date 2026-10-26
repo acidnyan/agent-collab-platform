@@ -34,7 +34,7 @@ flowchart LR
 
 ## セキュリティ証明
 
-[SECURITY_PROOF.md](SECURITY_PROOF.md) は、脅威の種類ごとに「どのコードが止めるか」と「どの敵対的テストが証明するか」を対応づけています。レッドチーム一式は次の1コマンドで再実行できます。
+[SECURITY_PROOF.ja.md](SECURITY_PROOF.ja.md) は、脅威の種類ごとに「どのコードが止めるか」と「どの敵対的テストが証明するか」を対応づけています。レッドチーム一式は次の1コマンドで再実行できます。
 
 ```sh
 pnpm test:security-proof
@@ -132,7 +132,7 @@ Claude / Codex のバイナリは、あらかじめインストールされて�
 
 Command と CLI アダプタは、オーナーが設定した実行ファイルを新しい作業ディレクトリで動かします。これはプロセスの衛生管理であり、OS レベルのファイルシステム隔離やネットワーク隔離ではありません。信頼できない JavaScript には制限付きサンドボックスを使います。OCI は、すでに存在する `node:22-bookworm-slim` イメージを使い、Podman を優先し、ネットワークを切り、Linux capability を落とし、メモリと PID を制限します。ランタイムが無いときは制限付き子プロセスへフォールバックし、実際の隔離レベルを署名付き証明に記録します。コンテナの実行失敗は、再実行せずに表面化します。実行証明が必須のとき、署名済みマニフェストが `sandboxPolicy.allowSubprocessFallback: true` を明示していない限り、OCI から下位の隔離への格下げは検証で拒否されます。
 
-リレーのエンベロープは M1 の署名付き平文のままです。転送には HTTPS を使います。中継器はオーナーの鍵を持たず、仕事を認可できません。ただしメタデータとペイロードを観測したり、配送を拒否したりはできます。このマイルストーンではエンドツーエンド暗号化は未実装です。詳細は [セキュリティモデル](docs/security-model.md) と [SECURITY_PROOF.md](SECURITY_PROOF.md) を見てください。
+リレーのエンベロープは M1 の署名付き平文のままです。転送には HTTPS を使います。中継器はオーナーの鍵を持たず、仕事を認可できません。ただしメタデータとペイロードを観測したり、配送を拒否したりはできます。このマイルストーンではエンドツーエンド暗号化は未実装です。詳細は [セキュリティモデル](docs/security-model.md) と [SECURITY_PROOF.ja.md](SECURITY_PROOF.ja.md) を見てください。
 
 HTTP の受信、SSE ストリーム、WebSocket の受信と購読には、受信者が新しく署名した `RelayAuth` トークンが必要です。`WorkerNode`、`RequesterClient`、CLI は自動で署名します。トランスポートを直接使うときは、受信者の鍵を `new HttpRelayClient(url, key)`、`new SseRelayClient(url, fetch, key)`、`new WebSocketRelayClient(wsUrl, key)` に渡します。HTTP / SSE は第3引数に非同期のトークン生成関数も受け付け、WebSocket は第2引数で受け付けます。生の HTTP では `createRelayAuthToken(key, { action })` を `Authorization: Bearer <token>`、`x-acp-relay-auth`、または `auth` クエリに載せて送れます。操作に合わせて `receive`、`stream`、`subscribe` を使います。トークンは時計のずれ5分で期限切れになり、ノンスは境界付きの再生キャッシュに残っているあいだ一度だけ使えます。`InMemoryRelay.receive(did)` は既定ではトークンなしで使えます。そこでも要求するときは `{ requireAuth: true }` で構築します。
 
@@ -156,13 +156,13 @@ node examples/network-collab/run.mjs
 
 | ファイル                                                                               | 内容                                                                                                |
 | :------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------- |
-| [`SECURITY_PROOF.md`](./SECURITY_PROOF.md)                                             | レッドチームの脅威対応表と `pnpm test:security-proof`                                               |
-| [`ARCHITECTURE.md`](./ARCHITECTURE.md)                                                 | 全体像、信頼境界、タスク状態機械、5つの安全機構、既存プロトコルとの比較、脅威モデル                 |
-| [`REPO_STRUCTURE.md`](./REPO_STRUCTURE.md)                                             | モノレポ構成、技術選定、MVP の範囲、マイルストーン M0〜M3、実装タスクの分割                         |
-| [`spec/README.md`](./spec/README.md)                                                   | プロトコル概要、メッセージエンベロープ、正規化と署名                                                |
+| [`SECURITY_PROOF.ja.md`](./SECURITY_PROOF.ja.md)                                       | レッドチームの脅威対応表と `pnpm test:security-proof`                                               |
+| [`ARCHITECTURE.ja.md`](./ARCHITECTURE.ja.md)                                           | 全体像、信頼境界、タスク状態機械、5つの安全機構、既存プロトコルとの比較、脅威モデル                 |
+| [`REPO_STRUCTURE.ja.md`](./REPO_STRUCTURE.ja.md)                                       | モノレポ構成、技術選定、MVP の範囲、マイルストーン M0〜M3、実装タスクの分割                         |
+| [`spec/README.ja.md`](./spec/README.ja.md)                                             | プロトコル概要、メッセージエンベロープ、正規化と署名                                                |
 | [`spec/task-manifest.schema.json`](./spec/task-manifest.schema.json)                   | `TaskManifest` の JSON Schema（Draft 2020-12）                                                      |
 | [`spec/examples/sample-task-manifest.json`](./spec/examples/sample-task-manifest.json) | スキーマ検証済みのサンプル `TaskManifest`                                                           |
-| [`OSS_FORK_ANALYSIS.md`](./OSS_FORK_ANALYSIS.md)                                       | A2A、ACP、ANP、AGNTCY、DelegateOS、Cotal、Busbar の調査と、スクラッチ / フォーク / オーバーレイ比較 |
+| [`OSS_FORK_ANALYSIS.ja.md`](./OSS_FORK_ANALYSIS.ja.md)                                 | A2A、ACP、ANP、AGNTCY、DelegateOS、Cotal、Busbar の調査と、スクラッチ / フォーク / オーバーレイ比較 |
 | [`AGENTS.md`](AGENTS.md)                                                               | 自律 Worker / Requester の運用手順                                                                  |
 | [`SKILL.md`](SKILL.md)                                                                 | 持ち運び用エージェントスキル                                                                        |
 
@@ -196,4 +196,4 @@ pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
 
 承認対象ファイルには、承認する JSON アクションそのものを入れます。トラストアンカーは `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }` です。検証する束とは別に、期待する最新の head を入手してください。ビルド済み CLI は `node cli/dist/index.js <command>` でも起動でき、ワークスペースのバイナリ名は `acp` です。
 
-[デモの手順](examples/two-owner-demo/README.md)、[ワイヤ規約](spec/README.md)、[適合性テスト](conformance/README.md)、[M1 セキュリティモデル](docs/security-model.md)、[セキュリティ証明](SECURITY_PROOF.md) を読んでください。M1 は署名付き平文のリレーと、制限付き JavaScript 子プロセスです。M2/M3 は任意の強化 OCI 実行を追加します。ペイロードのエンドツーエンド暗号化は今後の作業です。ルートのコードは Apache-2.0 です。DelegateOS から取り込んだ部分の MIT 表記は [NOTICE](NOTICE) に残しています。
+[デモの手順](examples/two-owner-demo/README.md)、[ワイヤ規約](spec/README.ja.md)、[適合性テスト](conformance/README.md)、[M1 セキュリティモデル](docs/security-model.md)、[セキュリティ証明](SECURITY_PROOF.ja.md) を読んでください。M1 は署名付き平文のリレーと、制限付き JavaScript 子プロセスです。M2/M3 は任意の強化 OCI 実行を追加します。ペイロードのエンドツーエンド暗号化は今後の作業です。ルートのコードは Apache-2.0 です。DelegateOS から取り込んだ部分の MIT 表記は [NOTICE](NOTICE) に残しています。
