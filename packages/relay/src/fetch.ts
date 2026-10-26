@@ -175,9 +175,12 @@ export class InMemoryRelay {
     };
   }
   async wait(did: string, ms: number, signal?: AbortSignal): Promise<void> {
-    if (this.queues.get(did)?.length || signal?.aborted || ms <= 0) return;
+    if (signal?.aborted || ms <= 0 || this.queues.get(did)?.length) return;
     await new Promise<void>((resolve) => {
+      let settled = false;
       const done = () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         off();
         signal?.removeEventListener('abort', done);
@@ -186,7 +189,8 @@ export class InMemoryRelay {
       const off = this.subscribe(did, done),
         timer = setTimeout(done, ms);
       signal?.addEventListener('abort', done, { once: true });
-      if (signal?.aborted) done();
+      // Cover the gap between the length check and listener installation.
+      if (signal?.aborted || this.queues.get(did)?.length) done();
     });
   }
   snapshot(): RelaySnapshot {
@@ -249,6 +253,49 @@ export function relayHttpHeaders(kind: 'json' | 'empty' | 'sse' = 'json'): Recor
     ...(kind === 'json' ? { 'content-type': 'application/json; charset=utf-8' } : {}),
     ...(kind === 'sse' ? { 'content-type': 'text/event-stream', 'x-accel-buffering': 'no' } : {}),
   };
+}
+function relayJson(value: unknown, status = 200): Response {
+  return Response.json(value, { status, headers: relayHttpHeaders('json') });
+}
+export function relayErrorResponse(error: unknown): Response {
+  return error instanceof Error && error.message === 'RELAY_UNAUTHORIZED'
+    ? relayJson({ error: 'RELAY_UNAUTHORIZED' }, 401)
+    : relayJson({ error: String(error) }, 400);
+}
+export type DurableLongPoll =
+  | { mode: 'response'; response: Response }
+  | {
+      mode: 'wait';
+      recipient: string;
+      waitMs: number;
+      receive: () => SignedEnvelope | undefined;
+    };
+/**
+ * Authenticate a long-poll and pop envelopes that are already queued.
+ * The caller waits outside the durable-object lock when the inbox is empty.
+ */
+export function beginDurableLongPoll(relay: InMemoryRelay, request: Request): DurableLongPoll {
+  try {
+    const url = new URL(request.url);
+    const recipient = url.searchParams.get('recipient') ?? '';
+    resolveDid(recipient);
+    const ms = Number(url.searchParams.get('waitMs'));
+    if (!url.searchParams.has('waitMs') || !Number.isFinite(ms) || ms < 0)
+      throw new Error('INVALID_WAIT');
+    const token =
+      request.headers.get('authorization')?.match(/^Bearer (\S+)$/i)?.[1] ??
+      request.headers.get('x-acp-relay-auth') ??
+      url.searchParams.get('auth') ??
+      undefined;
+    const receive = relay.openInbox(recipient, token, 'receive');
+    const buffered: SignedEnvelope[] = [];
+    let envelope: SignedEnvelope | undefined;
+    while ((envelope = receive())) buffered.push(envelope);
+    if (buffered.length) return { mode: 'response', response: relayJson({ envelopes: buffered }) };
+    return { mode: 'wait', recipient, waitMs: Math.min(ms, 30000), receive };
+  } catch (error) {
+    return { mode: 'response', response: relayErrorResponse(error) };
+  }
 }
 export function createRelayFetchHandler(
   options: RelayFetchOptions = {},
@@ -383,11 +430,14 @@ export function createRelayFetchHandler(
           const e = receive();
           return e ? json(e) : empty(204);
         }
-        await relay.wait(recipient, Math.min(ms!, 30000), request.signal);
-        const envelopes: SignedEnvelope[] = [];
-        let e;
-        while ((e = receive())) envelopes.push(e);
-        return json({ envelopes });
+        const ready: SignedEnvelope[] = [];
+        let queued: SignedEnvelope | undefined;
+        while ((queued = receive())) ready.push(queued);
+        if (!ready.length) {
+          await relay.wait(recipient, Math.min(ms!, 30000), request.signal);
+          while ((queued = receive())) ready.push(queued);
+        }
+        return json({ envelopes: ready });
       }
       return json({ error: 'NOT_FOUND' }, 404);
     } catch (error) {

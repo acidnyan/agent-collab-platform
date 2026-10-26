@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from 'node:crypto';
-import { createRelayFetchHandler, InMemoryRelay } from './fetch.js';
-import type { RelaySnapshot } from './fetch.js';
+import {
+  beginDurableLongPoll,
+  createRelayFetchHandler,
+  InMemoryRelay,
+  relayErrorResponse,
+  relayHttpHeaders,
+} from './fetch.js';
+import type { DurableLongPoll, RelaySnapshot } from './fetch.js';
+import type { SignedEnvelope } from '@acp/core/edge';
 interface DurableState {
   storage: {
     get<T>(key: string): Promise<T | undefined>;
@@ -86,7 +93,47 @@ export class RelayDurableObject {
   }
   async fetch(request: Request): Promise<Response> {
     await this.ready;
+    if (this.longPollWait(request) !== undefined) return this.handleLongPoll(request);
     return this.enqueue(() => this.handle(request));
+  }
+  /** Positive waitMs on GET /envelopes. Invalid values stay on the normal handler path. */
+  private longPollWait(request: Request): number | undefined {
+    if (request.method !== 'GET') return undefined;
+    const url = new URL(request.url);
+    if (url.pathname !== '/envelopes' || !url.searchParams.has('waitMs')) return undefined;
+    const ms = Number(url.searchParams.get('waitMs'));
+    if (!Number.isFinite(ms) || ms <= 0) return undefined;
+    return ms;
+  }
+  /**
+   * Authenticate and pop inside the mutation turn, then release that turn while
+   * relay.wait is pending so a POST can wake the poll.
+   */
+  private async handleLongPoll(request: Request): Promise<Response> {
+    const opened = await this.enqueue(() => this.openLongPoll(request));
+    if (opened.mode === 'response') return opened.response;
+    await this.relay.wait(opened.recipient, opened.waitMs, request.signal);
+    return this.enqueue(() => this.finishLongPoll(opened.receive));
+  }
+  private async openLongPoll(request: Request): Promise<DurableLongPoll> {
+    const started = beginDurableLongPoll(this.relay, request);
+    if (started.mode === 'response') {
+      if (started.response.ok) await this.writeSnapshot();
+      return started;
+    }
+    await this.writeSnapshot();
+    return started;
+  }
+  private async finishLongPoll(receive: () => SignedEnvelope | undefined): Promise<Response> {
+    const envelopes: SignedEnvelope[] = [];
+    try {
+      let envelope: SignedEnvelope | undefined;
+      while ((envelope = receive())) envelopes.push(envelope);
+    } catch (error) {
+      return relayErrorResponse(error);
+    }
+    await this.writeSnapshot();
+    return Response.json({ envelopes }, { headers: relayHttpHeaders('json') });
   }
   private async handle(request: Request): Promise<Response> {
     const response = await this.handler(request);
