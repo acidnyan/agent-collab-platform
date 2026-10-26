@@ -39,11 +39,16 @@ export async function resolveCommand(command: string): Promise<string> {
 }
 export const runCommand: CommandRunner = async (request) => {
   const command = await resolveCommand(request.command);
+  // Windows refuses to spawn a .js/.cjs/.mjs path directly (EFTYPE). Run it with this Node.
+  const script = /\.(?:cjs|mjs|js)$/i.test(command);
+  const binary = script ? process.execPath : command;
+  const args = script ? [command, ...request.args] : request.args;
   return new Promise<CommandResult>((resolve, reject) => {
-    const child = spawn(command, request.args, {
+    const child = spawn(binary, args, {
       cwd: request.cwd,
       env: request.env,
       stdio: ['pipe', 'pipe', 'pipe'],
+      shell: false,
       detached: process.platform !== 'win32',
     });
     let stdout = '',

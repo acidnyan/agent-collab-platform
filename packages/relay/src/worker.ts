@@ -17,6 +17,7 @@ export class RelayDurableObject {
   private ready: Promise<void>;
   private writes = Promise.resolve();
   private persistedVersion = 0;
+  private committedSnapshot?: RelaySnapshot;
   private stored?: { generation: string; count: number };
   constructor(private state: DurableState) {
     this.ready = state.blockConcurrencyWhile(async () => {
@@ -33,19 +34,29 @@ export class RelayDurableObject {
         );
       }
       this.persistedVersion = this.relay.mutationVersion;
+      this.committedSnapshot = this.relay.snapshot();
     });
   }
-  async fetch(request: Request): Promise<Response> {
-    await this.ready;
-    const response = await this.handler(request);
-    const persist = () => {
-      this.writes = this.writes.then(async () => {
-        if (this.persistedVersion === this.relay.mutationVersion) return;
-        const version = this.relay.mutationVersion,
-          snapshot = Buffer.from(JSON.stringify(this.relay.snapshot()));
-        const generation = randomUUID(),
-          count = Math.ceil(snapshot.length / 64000),
-          old = this.stored;
+  /** Queue one storage attempt. A rejection stays on that attempt and does not poison the next one. */
+  private enqueueWrite(work: () => Promise<void>): Promise<void> {
+    const run = this.writes.catch(() => undefined).then(work);
+    this.writes = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+  private persist(): Promise<void> {
+    return this.enqueueWrite(async () => {
+      if (this.persistedVersion === this.relay.mutationVersion) return;
+      const version = this.relay.mutationVersion,
+        snapshot = Buffer.from(JSON.stringify(this.relay.snapshot())),
+        rollback = this.committedSnapshot;
+      const generation = randomUUID(),
+        count = Math.ceil(snapshot.length / 64000),
+        old = this.stored;
+      let committed = false;
+      try {
         // Stay below the Durable Object per-value storage limit. Publish the
         // head only after all chunks exist, so eviction never exposes a partial snapshot.
         for (let i = 0; i < count; i++)
@@ -56,12 +67,23 @@ export class RelayDurableObject {
         await this.state.storage.put('relay-head', { generation, count });
         this.stored = { generation, count };
         this.persistedVersion = version;
+        this.committedSnapshot = JSON.parse(snapshot.toString('utf8')) as RelaySnapshot;
+        committed = true;
         if (old && this.state.storage.delete)
           for (let i = 0; i < old.count; i++)
             await this.state.storage.delete('relay:' + old.generation + ':' + i);
-      });
-      return this.writes;
-    };
+      } catch (error) {
+        // A failed put/delete must not leave memory ahead of the last durable snapshot.
+        if (!committed && rollback && this.relay.mutationVersion === version)
+          this.relay.restore(rollback);
+        throw error;
+      }
+    });
+  }
+  async fetch(request: Request): Promise<Response> {
+    await this.ready;
+    const response = await this.handler(request);
+    const persist = () => this.persist();
     const path = new URL(request.url).pathname;
     if (!response.ok) return response;
     if (request.method === 'GET' && path === '/stream' && response.body) {

@@ -42,6 +42,7 @@ export interface InMemoryRelayOptions {
   maxSeenEntries?: number;
   maxAuthSeenEntries?: number;
   maxQueues?: number;
+  maxQueueSize?: number;
   tamper?: (e: SignedEnvelope) => SignedEnvelope;
 }
 export class InMemoryRelay {
@@ -59,6 +60,7 @@ export class InMemoryRelay {
   readonly maxSeenEntries: number;
   readonly maxAuthSeenEntries: number;
   readonly maxQueues: number;
+  readonly maxQueueSize: number;
   constructor(options?: InMemoryRelayOptions | ((e: SignedEnvelope) => SignedEnvelope)) {
     const config = typeof options === 'function' ? { tamper: options } : (options ?? {});
     this.tamper = config.tamper;
@@ -66,7 +68,13 @@ export class InMemoryRelay {
     this.maxSeenEntries = config.maxSeenEntries ?? 100000;
     this.maxAuthSeenEntries = config.maxAuthSeenEntries ?? this.maxSeenEntries;
     this.maxQueues = config.maxQueues ?? 10000;
-    for (const limit of [this.maxSeenEntries, this.maxAuthSeenEntries, this.maxQueues])
+    this.maxQueueSize = config.maxQueueSize ?? 1000;
+    for (const limit of [
+      this.maxSeenEntries,
+      this.maxAuthSeenEntries,
+      this.maxQueues,
+      this.maxQueueSize,
+    ])
       if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('INVALID_RELAY_LIMIT');
   }
   private remember(set: Set<string>, key: string, limit: number): void {
@@ -110,7 +118,7 @@ export class InMemoryRelay {
       queue = this.queues.get(did) ?? [];
     if (
       (!this.queues.has(did) && this.queues.size >= this.maxQueues) ||
-      queue.length >= 1000 ||
+      queue.length >= this.maxQueueSize ||
       Buffer.byteLength(JSON.stringify(envelope)) > 1048576
     )
       throw new Error('RELAY_CAPACITY');
@@ -196,7 +204,7 @@ export class InMemoryRelay {
       snapshot.queues.length > this.maxQueues ||
       snapshot.agents.length > 10000 ||
       snapshot.queues.some(
-        ([did, q]) => q.length > 1000 || q.some((e) => !verifyRelayEnvelope(e, did)),
+        ([did, q]) => q.length > this.maxQueueSize || q.some((e) => !verifyRelayEnvelope(e, did)),
       ) ||
       snapshot.agents.some((c) => !verifySignedAgentCard(c))
     )
@@ -313,46 +321,62 @@ export function createRelayFetchHandler(
         );
         if (path === '/stream') {
           let stop = () => {};
-          const stream = new ReadableStream<Uint8Array>({
-            start(controller) {
-              const encoder = new TextEncoder();
-              let closed = false;
-              const close = () => {
-                if (closed) return;
-                closed = true;
-                off();
-                clearInterval(heartbeat);
-                request.signal.removeEventListener('abort', close);
-                try {
-                  controller.close();
-                } catch {
-                  /* Stream cancellation already closed the controller. */
-                }
-              };
-              const flush = () => {
-                if (closed) return;
-                try {
-                  let e;
-                  while ((e = receive()))
-                    controller.enqueue(encoder.encode('data: ' + JSON.stringify(e) + '\n\n'));
-                } catch (e) {
-                  close();
-                }
-              };
-              const off = relay.subscribe(recipient, flush);
-              const heartbeat = setInterval(() => {
-                if (!closed) controller.enqueue(encoder.encode(': heartbeat\n\n'));
-              }, 15000);
-              stop = close;
-              request.signal.addEventListener('abort', close, { once: true });
-              controller.enqueue(encoder.encode(': connected\n\n'));
-              flush();
-              if (request.signal.aborted) close();
+          let flush = () => {};
+          // One queued chunk keeps an unread stream from draining the relay queue.
+          const stream = new ReadableStream<Uint8Array>(
+            {
+              start(controller) {
+                const encoder = new TextEncoder();
+                let closed = false;
+                const close = () => {
+                  if (closed) return;
+                  closed = true;
+                  off();
+                  clearInterval(heartbeat);
+                  request.signal.removeEventListener('abort', close);
+                  try {
+                    controller.close();
+                  } catch {
+                    /* Stream cancellation already closed the controller. */
+                  }
+                };
+                flush = () => {
+                  if (closed) return;
+                  try {
+                    let envelope;
+                    // Leave envelopes in the bounded recipient queue until the client pulls.
+                    while (
+                      controller.desiredSize !== null &&
+                      controller.desiredSize > 0 &&
+                      (envelope = receive())
+                    )
+                      controller.enqueue(
+                        encoder.encode('data: ' + JSON.stringify(envelope) + '\n\n'),
+                      );
+                  } catch {
+                    close();
+                  }
+                };
+                const off = relay.subscribe(recipient, flush);
+                const heartbeat = setInterval(() => {
+                  if (!closed && controller.desiredSize !== null && controller.desiredSize > 0)
+                    controller.enqueue(encoder.encode(': heartbeat\n\n'));
+                }, 15000);
+                stop = close;
+                request.signal.addEventListener('abort', close, { once: true });
+                controller.enqueue(encoder.encode(': connected\n\n'));
+                flush();
+                if (request.signal.aborted) close();
+              },
+              pull() {
+                flush();
+              },
+              cancel() {
+                stop();
+              },
             },
-            cancel() {
-              stop();
-            },
-          });
+            { highWaterMark: 1 },
+          );
           return new Response(stream, { headers: relayHttpHeaders('sse') });
         }
         if (!url.searchParams.has('waitMs')) {

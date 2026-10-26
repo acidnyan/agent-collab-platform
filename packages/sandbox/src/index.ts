@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import type { Json } from '@acp/core';
 export interface SandboxOptions {
   code: string;
@@ -47,6 +48,8 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
   )
     throw new Error('INVALID_TIMEOUT');
   const directory = await mkdtemp(join(tmpdir(), 'acp-task-'));
+  let child: ChildProcess | undefined;
+  let exited = Promise.resolve();
   try {
     await writeFile(join(directory, 'runner.cjs'), sandboxWrapper, { mode: 0o600 });
     await writeFile(
@@ -59,7 +62,7 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
       { mode: 0o600 },
     );
     return await new Promise<Json>((resolve, reject) => {
-      const child = spawn(
+      const subprocess = spawn(
         process.execPath,
         [
           '--experimental-permission',
@@ -76,6 +79,13 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
           stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
         },
       );
+      child = subprocess;
+      // `close` means stdio and the process handle are gone, so Windows can release cwd.
+      exited = new Promise((resolveExit) => {
+        const finished = () => resolveExit();
+        subprocess.once('exit', finished);
+        subprocess.once('close', finished);
+      });
       let done = false,
         requests = 0,
         stderr = '';
@@ -84,20 +94,20 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
         done = true;
         clearTimeout(timer);
         options.signal?.removeEventListener('abort', abort);
-        child.kill('SIGKILL');
+        if (subprocess.exitCode === null && !subprocess.killed) subprocess.kill('SIGKILL');
         error ? reject(error) : resolve(result ?? null);
       };
       const abort = () => finish(new Error('SANDBOX_HALTED: ' + String(options.signal?.reason)));
       const timer = setTimeout(() => finish(new Error('SANDBOX_TIMEOUT')), options.timeoutMs);
       options.signal?.addEventListener('abort', abort, { once: true });
       if (options.signal?.aborted) abort();
-      child.stderr?.on('data', (b: Buffer) => {
+      subprocess.stderr?.on('data', (b: Buffer) => {
         stderr = (stderr + b.toString()).slice(-4096);
       });
       // Requests arrive from another OS process. The child has no tool handlers,
       // capability counters, private keys or credentials, and cannot skip CapGuard.
       let serial = Promise.resolve();
-      child.on('message', (message: unknown) => {
+      subprocess.on('message', (message: unknown) => {
         serial = serial
           .then(async () => {
             if (done) return;
@@ -120,20 +130,27 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
                 if (!options.onUsage) throw new Error('USAGE_ADAPTER_REQUIRED');
                 options.onUsage(m.args.inputTokens as number, m.args.outputTokens as number);
               } else value = await options.onTool(m.name, m.args);
-              if (!done && child.connected) child.send({ id: m.id, value });
+              if (!done && subprocess.connected) subprocess.send({ id: m.id, value });
             } catch (error) {
               finish(error instanceof Error ? error : new Error(String(error)));
             }
           })
           .catch((e) => finish(e as Error));
       });
-      child.on('error', (e) => finish(e));
-      child.on('exit', (code) => {
+      subprocess.on('error', (e) => finish(e));
+      subprocess.on('exit', (code) => {
         if (!done) finish(new Error('SANDBOX_EXIT: ' + code + ' ' + stderr));
       });
     });
   } finally {
-    await rm(directory, { recursive: true, force: true });
+    try {
+      if (child && child.exitCode === null && !child.killed) child.kill('SIGKILL');
+      // Wait until the child has actually exited, then give Windows a short retry window.
+      await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 250))]);
+      await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch {
+      // EBUSY, EPERM, and EACCES while deleting the temp dir must not replace the result.
+    }
   }
 }
 

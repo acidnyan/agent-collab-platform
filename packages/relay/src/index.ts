@@ -58,7 +58,8 @@ export async function startLocalRelay(
         while (!response.destroyed) {
           const { value, done } = await reader.read();
           if (done) break;
-          response.write(value);
+          if (!response.write(value))
+            await new Promise<void>((resolve) => response.once('drain', resolve));
         }
       } finally {
         await reader.cancel();
@@ -95,8 +96,15 @@ export async function startLocalRelay(
           unsubscribe();
           const flush = () => {
             let envelope;
-            while (socket.readyState === WebSocket.OPEN && (envelope = receive()))
+            // A slow socket must not pull the recipient queue ahead of maxQueueSize.
+            while (
+              socket.readyState === WebSocket.OPEN &&
+              socket.bufferedAmount < 1048576 &&
+              (envelope = receive())
+            )
               socket.send(JSON.stringify({ envelope }));
+            if (socket.readyState === WebSocket.OPEN && socket.bufferedAmount >= 1048576)
+              setTimeout(flush, 20);
           };
           unsubscribe = relay.subscribe(did, flush);
           flush();
