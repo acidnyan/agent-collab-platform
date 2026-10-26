@@ -105,9 +105,22 @@ export class InMemoryRelay {
   }
 }
 export interface RelayFetchOptions { relay?: InMemoryRelay; agentCard?: SignedAgentCard }
+/** Defensive headers for any relay URL opened directly in a browser. */
+export function relayHttpHeaders(kind: 'json' | 'empty' | 'sse' = 'json'): Record<string, string> {
+  return {
+    'x-content-type-options': 'nosniff',
+    'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'cache-control': kind === 'sse' ? 'no-cache, no-store' : 'no-store',
+    ...(kind === 'json' ? { 'content-type': 'application/json; charset=utf-8' } : {}),
+    ...(kind === 'sse' ? { 'content-type': 'text/event-stream', 'x-accel-buffering': 'no' } : {})
+  };
+}
 export function createRelayFetchHandler(options: RelayFetchOptions = {}): (request: Request) => Promise<Response> {
   const relay = options.relay ?? new InMemoryRelay();
-  const json = (value: unknown, status = 200) => Response.json(value, { status });
+  const json = (value: unknown, status = 200) => Response.json(value, { status, headers: relayHttpHeaders('json') });
+  const empty = (status: 202 | 204) => new Response(null, { status, headers: relayHttpHeaders('empty') });
   async function body(request: Request): Promise<unknown> {
     if (Number(request.headers.get('content-length')) > 1048576) throw new Error('BODY_TOO_LARGE');
     const reader = request.body?.getReader(); if (!reader) throw new Error('MISSING_BODY');
@@ -127,7 +140,7 @@ export function createRelayFetchHandler(options: RelayFetchOptions = {}): (reque
         const card = options.agentCard ?? relay.agents.values().next().value;
         return card ? json(toA2AAgentCard(card)) : json({ error: 'NO_AGENT_REGISTERED' }, 404);
       }
-      if (request.method === 'POST' && path === '/envelopes') { relay.send(await body(request) as SignedEnvelope); return new Response(null, { status: 202 }); }
+      if (request.method === 'POST' && path === '/envelopes') { relay.send(await body(request) as SignedEnvelope); return empty(202); }
       if (request.method === 'GET' && ['/envelopes', '/stream'].includes(path)) {
         const recipient = url.searchParams.get('recipient') ?? ''; resolveDid(recipient);
         const ms = url.searchParams.has('waitMs') ? Number(url.searchParams.get('waitMs')) : undefined;
@@ -147,9 +160,9 @@ export function createRelayFetchHandler(options: RelayFetchOptions = {}): (reque
               controller.enqueue(encoder.encode(': connected\n\n')); flush(); if (request.signal.aborted) close();
             }, cancel() { stop(); }
           });
-          return new Response(stream, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', 'x-accel-buffering': 'no' } });
+          return new Response(stream, { headers: relayHttpHeaders('sse') });
         }
-        if (!url.searchParams.has('waitMs')) { const e = receive(); return e ? json(e) : new Response(null, { status: 204 }); }
+        if (!url.searchParams.has('waitMs')) { const e = receive(); return e ? json(e) : empty(204); }
         await relay.wait(recipient, Math.min(ms!, 30000), request.signal);
         const envelopes: SignedEnvelope[] = []; let e; while ((e = receive())) envelopes.push(e); return json({ envelopes });
       }

@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { verifyEnvelope, createRelayAuthToken } from '@acp/core';
 import type { SignedEnvelope, KeyPair, RelayAuthAction } from '@acp/core';
-import { InMemoryRelay, createRelayFetchHandler } from './fetch.js';
+import { InMemoryRelay, createRelayFetchHandler, relayHttpHeaders } from './fetch.js';
 export * from './fetch.js';
 export { createSignedAgentCard, verifySignedAgentCard, toA2AAgentCard, createInviteToken, parseAndVerifyInviteToken } from '@acp/core';
 export async function startLocalRelay(options: { port?: number; host?: string; tamper?: (e: SignedEnvelope) => SignedEnvelope } = {}) {
@@ -14,12 +14,13 @@ export async function startLocalRelay(options: { port?: number; host?: string; t
       const chunks: Buffer[] = []; let size = 0;
       for await (const chunk of request) { size += (chunk as Buffer).length; if (size > 1048576) throw new Error('BODY_TOO_LARGE'); chunks.push(chunk as Buffer); }
       const result = await handler(new Request(new URL(request.url ?? '/', 'http://localhost'), { method: request.method, headers: Object.entries(request.headers).flatMap(([name, value]) => value === undefined ? [] : (Array.isArray(value) ? value : [value]).map(v => [name, v] as [string, string])), ...(chunks.length ? { body: Buffer.concat(chunks) } : {}), signal: controller.signal }));
-      response.writeHead(result.status, Object.fromEntries(result.headers));
+      const kind = result.headers.get('content-type')?.startsWith('text/event-stream') ? 'sse' : result.body == null ? 'empty' : 'json';
+      response.writeHead(result.status, { ...Object.fromEntries(result.headers), ...relayHttpHeaders(kind) });
       if (!result.body) { response.end(); return; }
       const reader = result.body.getReader();
       try { while (!response.destroyed) { const { value, done } = await reader.read(); if (done) break; response.write(value); } }
       finally { await reader.cancel(); response.end(); }
-    } catch (e) { if (!response.headersSent) response.writeHead(400, { 'content-type': 'application/json' }); if (!response.destroyed) response.end(JSON.stringify({ error: String(e) })); }
+    } catch (e) { if (!response.headersSent) response.writeHead(400, relayHttpHeaders('json')); if (!response.destroyed) response.end(JSON.stringify({ error: String(e) })); }
   });
   server.requestTimeout = 10000;
   const wsServer = new WebSocketServer({ server, path: '/ws', maxPayload: 1048576 });

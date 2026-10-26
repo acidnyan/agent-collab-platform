@@ -129,6 +129,45 @@ describe.each(['/envelopes', '/stream'])('M3.1 HTTP %s authentication', path => 
   });
 });
 
+describe('relay HTTP security headers', () => {
+  const required = {
+    'x-content-type-options': 'nosniff',
+    'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
+    'x-frame-options': 'DENY'
+  } as const;
+  function expectSecurity(response: Response): void {
+    for (const [name, value] of Object.entries(required)) expect(response.headers.get(name)).toBe(value);
+    expect(response.headers.get('referrer-policy')).toBe('no-referrer');
+  }
+  async function exercise(base: string, request: (input: string, init?: RequestInit) => Promise<Response>): Promise<void> {
+    const health = await request(base + '/health');
+    expect(health.status).toBe(200); expectSecurity(health);
+    expect(health.headers.get('content-type')).toBe('application/json; charset=utf-8');
+    expect(health.headers.get('cache-control')).toBe('no-store');
+    const posted = await request(base + '/envelopes', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(envelope()) });
+    expect(posted.status).toBe(202); expectSecurity(posted); expect(posted.headers.get('cache-control')).toBe('no-store');
+    const delivered = await request(base + recipientPath('/envelopes'), { headers: headers() });
+    expect(delivered.status).toBe(200); expectSecurity(delivered);
+    expect(delivered.headers.get('content-type')).toBe('application/json; charset=utf-8');
+    expect(delivered.headers.get('cache-control')).toBe('no-store');
+    const empty = await request(base + recipientPath('/envelopes'), { headers: headers() });
+    expect(empty.status).toBe(204); expectSecurity(empty); expect(empty.headers.get('cache-control')).toBe('no-store');
+    const stream = await request(base + recipientPath('/stream'), { headers: headers(bob, 'stream') });
+    expect(stream.status).toBe(200); expectSecurity(stream);
+    expect(stream.headers.get('content-type')).toBe('text/event-stream');
+    expect(stream.headers.get('cache-control')).toBe('no-cache, no-store');
+    await stream.body?.cancel();
+  }
+  it('createRelayFetchHandler sets nosniff, CSP, and DENY on health, envelopes, and stream', async () => {
+    const handler = createRelayFetchHandler();
+    await exercise('https://relay.example', (input, init) => handler(new Request(input, init)));
+  });
+  it('startLocalRelay sets nosniff, CSP, and DENY on health, envelopes, and stream', async () => {
+    const server = await startLocalRelay(); cleanup.push(server.close);
+    await exercise(server.url, (input, init) => fetch(input, init));
+  });
+});
+
 function wsRequest(socket: WebSocket, body: unknown): Promise<any> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { socket.off('message', receive); reject(new Error('TEST_WS_TIMEOUT')); }, 2000);
