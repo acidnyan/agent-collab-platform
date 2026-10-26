@@ -1,31 +1,33 @@
 # ACP Protocol Specification (`spec/`)
 
-**結論**: 本ディレクトリはプログラミング言語に依存しないプロトコル仕様と JSON Schema (Draft 2020-12) の正本（Single Source of Truth）を定義する。すべてのプロトコルオブジェクトは **RFC 8785 (JCS: JSON Canonicalization Scheme)** で正規化されたバイト列に対して **SHA-256 ダイジェスト** と **Ed25519 署名** を計算する。
+**English** | [日本語 (README.ja.md)](./README.ja.md)
+
+**Conclusion**: This directory is the language-independent source of truth for the protocol specification and the JSON Schema (Draft 2020-12). Every protocol object computes a **SHA-256 digest** and an **Ed25519 signature** over bytes canonicalized with **RFC 8785 (JCS: JSON Canonicalization Scheme)**.
 
 ---
 
-## 1. 共通暗号・シリアライズ規則
+## 1. Shared cryptographic and serialization rules
 
-1. **エンコーディング**: UTF-8 JSON（I-JSON サブセット準拠、浮動小数点の誤差を避けるため金額・トークン数・秒数はすべて整数 `integer` で表現する）。
-2. **正規化（Canonicalization）**: 署名およびハッシュ計算の対象となるJSONオブジェクトは、[RFC 8785 (JCS)](https://www.rfc-editor.org/info/rfc8785/) に従ってキーを辞書順ソートし空白を除去した決定論的バイト列に変換する。
-3. **識別子（Principal ID）**: オーナーおよびエージェントの識別子は W3C `did:key` 形式（Ed25519公開鍵のMultibase base58btcエンコード、例: `did:key:z6Mk...`）を使用する。
-4. **ダイジェスト表記**: `"sha256:<64文字の16進小文字>"`（例: `"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"`）。
-5. **署名表記**: `"ed25519:<base64urlまたは128文字の16進小文字>"`。署名計算時は対象オブジェクトから `signature` / `signatures` フィールドを除いた状態でJCS正規化を行う。
-
----
-
-## 2. コアスキーマ一覧
-
-| ファイル名 | ステータス | 役割 |
-| :--- | :--- | :--- |
-| [`task-manifest.schema.json`](./task-manifest.schema.json) | **Draft v0.1 (検証済)** | 依頼側（Requester）が提示するタスク仕様・入出力JSON Schema・受入基準・検証方法・予算上限・付与Capability・隔離要件の定義 |
-| `capability-token.schema.json` | Planned (M0) | UCAN/Biscuit風の減衰可能スコープトークン定義（`issuer`, `audience`, `taskId`, `resources`, `allowedTools`, `argConstraints`, `maxInvocations`, `maxDelegationDepth`, `proofs`） |
-| `envelope.schema.json` | Planned (M0) | Relay通過用の署名付きメッセージエンベロープ（`envelopeId`, `taskId`, `seq`, `eventType`, `senderDid`, `recipientDid`, `payload`, `signature`）および受領確認 `AckReceipt` |
-| `audit-entry.schema.json` | Planned (M0) | 双方向署名ハッシュチェーン台帳エントリおよび `UsageReceipt` / `ApprovalReceipt` |
+1. **Encoding**: UTF-8 JSON (the I-JSON subset). Amounts, token counts, and durations are integers, so floating-point error does not enter the signed bytes.
+2. **Canonicalization**: A JSON object that will be signed or hashed is converted to a deterministic byte string with keys sorted lexicographically and whitespace removed, following [RFC 8785 (JCS)](https://www.rfc-editor.org/info/rfc8785/).
+3. **Principal ID**: Owner and agent identifiers use W3C `did:key` (the Ed25519 public key in multibase base58btc, for example `did:key:z6Mk...`).
+4. **Digest form**: `"sha256:<64 lowercase hex characters>"` (for example `"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"`).
+5. **Signature form**: `"ed25519:<base64url or 128 lowercase hex characters>"`. Before signing, remove the `signature` / `signatures` fields from the object and then apply JCS.
 
 ---
 
-## 3. スキーマ検証コマンド
+## 2. Core schemas
+
+| File                                                       | Status                     | Role                                                                                                                                                                                      |
+| :--------------------------------------------------------- | :------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`task-manifest.schema.json`](./task-manifest.schema.json) | **Draft v0.1 (validated)** | The task specification the requester presents: input and output JSON Schema, acceptance criteria, verification method, budget cap, granted Capabilities, and isolation requirements       |
+| `capability-token.schema.json`                             | Planned (M0)               | A UCAN/Biscuit-style attenuating scope token (`issuer`, `audience`, `taskId`, `resources`, `allowedTools`, `argConstraints`, `maxInvocations`, `maxDelegationDepth`, `proofs`)            |
+| `envelope.schema.json`                                     | Planned (M0)               | The signed message envelope that crosses the Relay (`envelopeId`, `taskId`, `seq`, `eventType`, `senderDid`, `recipientDid`, `payload`, `signature`) and the acknowledgement `AckReceipt` |
+| `audit-entry.schema.json`                                  | Planned (M0)               | A bilateral signed hash-chain ledger entry, plus `UsageReceipt` / `ApprovalReceipt`                                                                                                       |
+
+---
+
+## 3. Schema validation command
 
 ```bash
 npx --yes -p ajv-cli@5 -p ajv-formats@3 ajv validate \
@@ -72,13 +74,13 @@ security model for supported scope and schema syntax.
 
 Approval receipt gate names map to the manifest's names:
 
-| Receipt gate | Manifest gate |
-| --- | --- |
-| contract_acceptance | GATE_CONTRACT_ACCEPT |
+| Receipt gate         | Manifest gate             |
+| -------------------- | ------------------------- |
+| contract_acceptance  | GATE_CONTRACT_ACCEPT      |
 | external_side_effect | GATE_EXTERNAL_SIDE_EFFECT |
-| budget_increase | GATE_BUDGET_OVERRUN |
-| redelegation | GATE_SUB_DELEGATION |
-| final_verification | GATE_DELIVERY_ACCEPT |
+| budget_increase      | GATE_BUDGET_OVERRUN       |
+| redelegation         | GATE_SUB_DELEGATION       |
+| final_verification   | GATE_DELIVERY_ACCEPT      |
 
 Owner-signed approval receipts bind the task, gate, exact target digest and
 APPROVED/REJECTED decision. Gate instances reject receipt replay. Signed

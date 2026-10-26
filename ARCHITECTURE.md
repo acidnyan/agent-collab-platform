@@ -1,12 +1,14 @@
-# ARCHITECTURE: 異オーナー間エージェント協働基盤
+# ARCHITECTURE: Cross-Owner Agent Collaboration Platform
 
-**結論**: 異なる所有者（Owner）に属するエージェント同士が、中央管理者を信頼せずに安全にタスクを委譲・実行・検収するため、**「ローカル主権型Gatewayランタイム」「減衰可能なCapabilityトークン」「署名付きTaskContract」「BYOK＋署名付きUsageReceipt」「双方向ハッシュチェーン監査ログ」** の5層で構成する。中継サーバー（Relay）は暗号化・署名済みエンベロープを運ぶだけのBlind Transportとし、あらゆる権限検証・承認（HITL）・隔離実行は各オーナー自身のGateway Runtimeが強制する。
+**English** | [日本語 (ARCHITECTURE.ja.md)](./ARCHITECTURE.ja.md)
+
+**Conclusion**: Agents that belong to different owners delegate, run, and accept tasks without trusting a central administrator. The system has five layers: a **locally sovereign Gateway runtime**, **attenuating Capability tokens**, a **signed TaskContract**, **BYOK plus a signed UsageReceipt**, and a **bilateral hash-chain audit log**. The Relay is a Blind Transport that only carries encrypted and signed envelopes. Every authorization check, human approval (HITL), and isolated execution is enforced by each owner's own Gateway Runtime.
 
 ---
 
-## 1. システム全体像と信頼境界（Trust Boundaries）
+## 1. System shape and trust boundaries
 
-### 1.1 アーキテクチャ・信頼境界図
+### 1.1 Architecture and trust-boundary diagram
 
 ```mermaid
 flowchart TB
@@ -28,7 +30,7 @@ flowchart TB
     end
 
     subgraph UntrustedNet["Untrusted Network / Blind Relay Boundary"]
-        Relay["Untrusted Relay Server\n(WebSocket / HTTP SSE / Local IPC)\n※暗号文と署名メタデータのみ保持"]
+        Relay["Untrusted Relay Server\n(WebSocket / HTTP SSE / Local IPC)\nholds ciphertext and signature metadata only"]
     end
 
     subgraph TrustZoneB["Trust Boundary B: Worker Owner Zone (did:key:zOwnerB)"]
@@ -56,121 +58,125 @@ flowchart TB
     CapGuardB -.->|"Capability Invocation (Scoped & Audited)"| CapIssuerA
 ```
 
-### 1.2 コンポーネントの役割と責務境界
+### 1.2 Component roles and responsibility boundaries
 
-| コンポーネント | 所有者・配置 | 信頼前提 | 責務 |
-| :--- | :--- | :--- | :--- |
-| **Owner (`did:key`)** | 各ユーザー（人間または組織） | 自身のルート鍵（Ed25519）を保持 | ポリシー設定、重要ゲート（HITL）の署名承認、エージェント鍵への権限委譲 |
-| **Gateway Runtime** | 各オーナーのローカル環境または専有VM | **自オーナーにとってのTCB（信頼基点）**。相手オーナーからは信頼されない | 契約署名検証、Capability発行・減衰検証、HITLゲート強制、クォータ計量、サンドボックス起動、監査ログ記録 |
-| **Agent (Planner / Worker)** | 各オーナーのRuntime配下 | LLMはプロンプトインジェクションを受けうるため**半信頼（Semi-trusted）** | タスク分割、実装・調査の遂行。直接外部通信や生クレデンシャル参照はできず、必ずGateway Runtime経由で操作する |
-| **Sandbox Runner** | 受託側（Worker）Runtime内部 | **非信頼（Untrusted execution）** | タスク単位で使い捨てられる隔離環境（コンテナ/WASM/制限付きプロセス）。ファイルシステム・ネットワーク・環境変数を制限 |
-| **Relay** | 任意の第三者またはローカルLoopback | **完全非信頼（Untrusted / Honest-but-Curious以下）** | メッセージの中継と一時キューイングのみ。ペイロードはE2E暗号化可能であり、改ざんはEd25519署名で即座に検知される |
-| **Audit Ledger** | 両オーナーが各自ローカルに保持（任意で外部公開ログへアンカー） | 単独の自己申告は信用せず、**双方の相互署名（Countersignature）**で証拠化する | `prevHash` で連結された追記専用イベントログ。紛争（Dispute）時に第三者または検証CLIがオフラインで再現検証可能 |
-
----
-
-## 2. 既存プロトコル・標準との比較（再利用と差分）
-
-車輪の再発明を避け、既存の標準仕様を最大限再利用したうえで、**「異オーナー間の不信前提（Zero-Trust Cross-Owner Execution）」に欠けている契約・権限減衰・コスト分離・検収層**を定義する。
-
-| 領域 | 参照プロトコル / 仕様 | 採用・再利用する要素 | 本基盤で追加・差分設計する要素（Delta） |
-| :--- | :--- | :--- | :--- |
-| **エージェント間通信** | **Agent2Agent (A2A)** (Linux Foundation / Google)<br>https://github.com/a2aproject/A2A<br>https://a2a-protocol.org/latest/ | Agent Card による能力公開の概念、JSON-RPC / イベントストリームによる非同期タスク通知モデル | A2Aは主にエンタープライズ内・既知パートナー間の通信を想定しており、異オーナー間の**署名付き拘束契約（TaskContract）、減衰Capability、クォータ証明、双方向ハッシュチェーン監査**を持たないため、これらをエンベロープ層と契約層として追加 |
-| **ツール接続** | **Model Context Protocol (MCP)**<br>https://modelcontextprotocol.io/ | エージェントからローカルツール・リソースへの標準呼び出しインターフェース（`tools/call`, `resources/read`） | 相手エージェントにMCPサーバーを直接公開すると権限が広すぎるため、Gatewayが **`CapabilityToken` で許可されたツール名・引数JSON Schemaのみを通すMCP Capability Proxy** を挟む |
-| **権限委譲トークン** | **UCAN v1.0** (https://github.com/ucan-wg/spec)<br>**Biscuit** (https://github.com/biscuit-auth/biscuit) | `did:key` ベースの自己完結型トークン、オフライン検証可能な権限減衰（Attenuation）、証明チェーン（Proofs） | エージェント協働に特化した制約語彙（MCPツール名、引数パターン、最大呼び出し回数 `maxInvocations`、最大委譲深さ `maxDelegationDepth`、タスクID束縛）をJSON Schemaで標準化 |
-| **正規化・署名** | **RFC 8785 (JCS)** (https://www.rfc-editor.org/info/rfc8785/)<br>**Ed25519 (RFC 8032)** | JSONオブジェクトの決定論的シリアライズ（JCS）＋Ed25519署名による言語非依存のハッシュ・署名検証 | 全メッセージ（Manifest, Contract, Capability, UsageReceipt, AuditEntry）を単一のJCS+Ed25519エンベロープ規則に統一 |
-| **成果物証明・監査** | **in-toto Attestation** (https://github.com/in-toto/attestation)<br>**Sigstore Rekor** (https://github.com/sigstore/rekor) | 成果物ダイジェスト（SHA-256）に対するStatement/Predicate構造、追記専用ログの考え方 | 重厚なPKI（Fulcio等）を必須とせず、まずは **2者間の相互署名ハッシュチェーン（Bilateral Signed Ledger）** でオフライン検証可能にし、外部Transparency Logへのアンカーはオプションとする |
-| **中継リレー** | **Nostr Relay (NIP-01)** (https://github.com/nostr-protocol/nips)<br>**Matrix Federation** (https://spec.matrix.org/) | リレーをステートレスに近い署名付きイベント配送バスとして扱い、クライアント側で署名検証する設計 | 公開タイムラインではなくタスク単位のトピック購読（`task_id` / `recipient_did`）に特化し、ペイロードのX25519 E2E暗号化を標準サポート |
+| Component                    | Owner and placement                                                         | Trust assumption                                                                       | Responsibility                                                                                                                                           |
+| :--------------------------- | :-------------------------------------------------------------------------- | :------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Owner (`did:key`)**        | Each user (a person or an organization)                                     | Holds their own root key (Ed25519)                                                     | Sets policy, signs approvals at important HITL gates, and delegates authority to agent keys                                                              |
+| **Gateway Runtime**          | Each owner's local environment or dedicated VM                              | **Trusted computing base for its own owner.** The other owner does not trust it        | Verifies contract signatures, issues and checks attenuated Capabilities, enforces HITL gates, meters quotas, starts sandboxes, and records the audit log |
+| **Agent (Planner / Worker)** | Under each owner's Runtime                                                  | An LLM can be prompt-injected, so the agent is **semi-trusted**                        | Splits tasks and carries out implementation or research. It cannot talk to the outside world or read raw credentials except through the Gateway Runtime  |
+| **Sandbox Runner**           | Inside the worker Runtime                                                   | **Untrusted execution**                                                                | A disposable isolated environment per task (container, WASM, or a restricted process). Limits the filesystem, network, and environment variables         |
+| **Relay**                    | Any third party, or local loopback                                          | **Fully untrusted (untrusted / honest-but-curious or worse)**                          | Relays messages and queues them briefly. Payloads can be end-to-end encrypted, and Ed25519 signatures detect tampering immediately                       |
+| **Audit Ledger**             | Kept locally by both owners (optionally anchored to an external public log) | A one-sided claim is not trusted. Evidence is a **countersignature from both parties** | An append-only event log linked by `prevHash`. On dispute, a third party or the verification CLI can reproduce the check offline                         |
 
 ---
 
-## 3. タスクライフサイクルと状態機械（State Machine）
+## 2. Comparison with existing protocols (reuse and delta)
 
-タスクのライフサイクルは決定論的な状態機械として定義され、**すべての状態遷移は署名付きイベント（`SignedTransitionEvent`）を伴わなければ成立しない**。
+The design reuses existing standards wherever it can, and adds the **contract, capability attenuation, cost separation, and acceptance layers** that a zero-trust cross-owner execution model still lacks.
+
+| Area                                | Reference protocol / specification                                                                                         | Elements adopted or reused                                                                                            | Elements this platform adds (delta)                                                                                                                                                                                                                                   |
+| :---------------------------------- | :------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Agent-to-agent communication**    | **Agent2Agent (A2A)** (Linux Foundation / Google)<br>https://github.com/a2aproject/A2A<br>https://a2a-protocol.org/latest/ | The Agent Card capability advertisement, and the asynchronous task-notification model over JSON-RPC / event streams   | A2A mainly assumes communication inside an enterprise or between known partners. It has no **signed binding TaskContract, attenuating Capability, quota proof, or bilateral hash-chain audit** across owners. Those layers are added as the envelope and the contract |
+| **Tool connection**                 | **Model Context Protocol (MCP)**<br>https://modelcontextprotocol.io/                                                       | The standard call interface from an agent to local tools and resources (`tools/call`, `resources/read`)               | Publishing an MCP server directly to the other agent grants too much authority. The Gateway inserts an **MCP Capability Proxy** that admits only the tool names and argument JSON Schemas allowed by a `CapabilityToken`                                              |
+| **Delegation tokens**               | **UCAN v1.0** (https://github.com/ucan-wg/spec)<br>**Biscuit** (https://github.com/biscuit-auth/biscuit)                   | Self-contained `did:key` tokens, offline-verifiable attenuation, and proof chains                                     | A constraint vocabulary specialized for agent collaboration, standardized as JSON Schema: MCP tool names, argument patterns, `maxInvocations`, `maxDelegationDepth`, and task-id binding                                                                              |
+| **Canonicalization and signatures** | **RFC 8785 (JCS)** (https://www.rfc-editor.org/info/rfc8785/)<br>**Ed25519 (RFC 8032)**                                    | Deterministic JSON serialization (JCS) plus Ed25519 signatures, so hash and signature checks are language-independent | Every message (Manifest, Contract, Capability, UsageReceipt, AuditEntry) uses one JCS + Ed25519 envelope rule                                                                                                                                                         |
+| **Artifact proof and audit**        | **in-toto Attestation** (https://github.com/in-toto/attestation)<br>**Sigstore Rekor** (https://github.com/sigstore/rekor) | Statement/Predicate structure over an artifact digest (SHA-256), and the idea of an append-only log                   | A heavy PKI (Fulcio and similar) is not required. A **bilateral signed ledger** is offline-verifiable first. Anchoring to an external transparency log is optional                                                                                                    |
+| **Relay**                           | **Nostr Relay (NIP-01)** (https://github.com/nostr-protocol/nips)<br>**Matrix Federation** (https://spec.matrix.org/)      | Treat the relay as a near-stateless signed-event delivery bus, and verify signatures on the client                    | Specialize in per-task topic subscription (`task_id` / `recipient_did`) rather than a public timeline, and support X25519 end-to-end encryption of the payload as a standard                                                                                          |
+
+---
+
+## 3. Task lifecycle and state machine
+
+The task lifecycle is a deterministic state machine. **No state transition is valid unless it carries a signed event (`SignedTransitionEvent`).**
 
 ```mermaid
 stateDiagram-v2
-    [*] --> PROPOSED: PROPOSE (Requester署名)
-    PROPOSED --> NEGOTIATING: COUNTER_OFFER (Worker/Requester署名)
+    [*] --> PROPOSED: PROPOSE (Requester signs)
+    PROPOSED --> NEGOTIATING: COUNTER_OFFER (Worker or Requester signs)
     NEGOTIATING --> NEGOTIATING: COUNTER_OFFER
-    PROPOSED --> ACCEPTED: ACCEPT (Worker署名 + Requester副署)
-    NEGOTIATING --> ACCEPTED: ACCEPT (双方の最終合意署名 = TaskContract成立)
+    PROPOSED --> ACCEPTED: ACCEPT (Worker signature + Requester countersignature)
+    NEGOTIATING --> ACCEPTED: ACCEPT (both final signatures form the TaskContract)
     PROPOSED --> CANCELLED: CANCEL / TIMEOUT
     NEGOTIATING --> CANCELLED: CANCEL / TIMEOUT
 
-    ACCEPTED --> RUNNING: START (Worker Sandbox起動 + Capability有効化)
+    ACCEPTED --> RUNNING: START (Worker sandbox starts + Capability activates)
     ACCEPTED --> CANCELLED: CANCEL / TIMEOUT
 
     RUNNING --> RUNNING: PROGRESS / HEARTBEAT / QUOTA_AMEND_APPROVED
     RUNNING --> DELIVERED: DELIVER (Artifact Hash + Attestation + UsageReceipt)
-    RUNNING --> CANCELLED: CANCEL (RequesterまたはWorkerの中断署名)
-    RUNNING --> TIMED_OUT: TIMEOUT (deadline超過)
+    RUNNING --> CANCELLED: CANCEL (Requester or Worker interrupt signature)
+    RUNNING --> TIMED_OUT: TIMEOUT (deadline exceeded)
 
-    DELIVERED --> VERIFYING: VERIFY_START (Requester Gatewayが自動検証・HITL開始)
-    VERIFYING --> ACCEPTED_DELIVERY: VERIFY_ACCEPT (検収合格署名)
-    VERIFYING --> REJECTED_DELIVERY: VERIFY_REJECT (不合格理由 + 証跡署名)
-    VERIFYING --> DISPUTED: DISPUTE (双方の検証結果不一致)
+    DELIVERED --> VERIFYING: VERIFY_START (Requester Gateway starts checks and HITL)
+    VERIFYING --> ACCEPTED_DELIVERY: VERIFY_ACCEPT (acceptance signature)
+    VERIFYING --> REJECTED_DELIVERY: VERIFY_REJECT (rejection reason + evidence signature)
+    VERIFYING --> DISPUTED: DISPUTE (the two verification results disagree)
 
-    REJECTED_DELIVERY --> RUNNING: RETRY_ALLOWED (maxRetries内の再提出)
-    REJECTED_DELIVERY --> DISPUTED: DISPUTE (Workerが却下に異議)
-    REJECTED_DELIVERY --> SETTLED: SETTLE (不成立終了の合意または期限切れ)
+    REJECTED_DELIVERY --> RUNNING: RETRY_ALLOWED (resubmit within maxRetries)
+    REJECTED_DELIVERY --> DISPUTED: DISPUTE (Worker contests the rejection)
+    REJECTED_DELIVERY --> SETTLED: SETTLE (agreed unsuccessful end, or expiry)
 
-    ACCEPTED_DELIVERY --> SETTLED: SETTLE (Capability失効 + 監査ログ確定)
-    CANCELLED --> SETTLED: SETTLE (Capability即時失効 + 監査ログ確定)
-    TIMED_OUT --> SETTLED: SETTLE (Capability即時失効 + 監査ログ確定)
-    DISPUTED --> SETTLED: SETTLE (双方の監査バンドル出力完了)
+    ACCEPTED_DELIVERY --> SETTLED: SETTLE (Capability revoked + audit log sealed)
+    CANCELLED --> SETTLED: SETTLE (Capability revoked immediately + audit log sealed)
+    TIMED_OUT --> SETTLED: SETTLE (Capability revoked immediately + audit log sealed)
+    DISPUTED --> SETTLED: SETTLE (both audit bundles exported)
 
     SETTLED --> [*]
 ```
 
-### 状態遷移の不変条件（Invariants）
-1. **`ACCEPTED`（契約成立）以前にはいかなるリソースアクセスも発生しない**: `CapabilityToken` は `ACCEPTED` 遷移後にのみ有効化（または発行）される。
-2. **`DELIVERED` には3点セットが必須**: 成果物マニフェスト（SHA-256 content-addressed）、実行証跡（`ExecutionAttestation`）、リソース消費証明（`UsageReceipt`）が欠けている場合、Requester Gatewayは自動的にスキーマエラーとして弾く。
-3. **終端状態（`SETTLED`）でのCapability即時失効**: タスクが `SETTLED` / `CANCELLED` / `TIMED_OUT` に達した瞬間、その `task_id` に紐づくすべての `CapabilityToken` は有効期限前であってもGatewayの失効リスト（Revocation Set）に登録され無効化される。
+### State-transition invariants
+
+1. **No resource access happens before `ACCEPTED` (contract formation).** A `CapabilityToken` is activated, or issued, only after the `ACCEPTED` transition.
+2. **`DELIVERED` requires a three-part bundle.** The artifact manifest (SHA-256 content-addressed), the execution evidence (`ExecutionAttestation`), and the resource-consumption proof (`UsageReceipt`) are all required. If any piece is missing, the Requester Gateway rejects the delivery as a schema error.
+3. **Capabilities die at the terminal state (`SETTLED`).** The moment a task reaches `SETTLED`, `CANCELLED`, or `TIMED_OUT`, every `CapabilityToken` bound to that `task_id` is entered in the Gateway revocation set and invalidated, even if it has not yet expired.
 
 ---
 
-## 4. 異オーナー間の5大安全メカニズム（詳細設計）
+## 4. Five cross-owner safety mechanisms
 
-### 4.1 権限・スコープ制御：減衰可能な Capability Token
+### 4.1 Authority and scope: attenuating Capability tokens
 
-相手エージェントにAPIキーを渡す代わりに、UCAN/Biscuitに着想を得た **JSONベースの減衰可能Capabilityトークン（`CapabilityToken`）** を用いる。
+Instead of handing the other agent an API key, the platform uses a **JSON attenuating Capability token (`CapabilityToken`)** inspired by UCAN and Biscuit.
 
 ```mermaid
 flowchart LR
-    Root["Root Capability (Owner A → Agent A)\nresource: mcp://repo/*\nactions: [read, pr.create]\nmaxCalls: 50, maxDepth: 2"]
-    -->|"Attenuate (減衰のみ許可)"| Delegated["Delegated Capability (Agent A → Worker B)\nresource: mcp://repo/docs/*\nactions: [read]\nmaxCalls: 10, maxDepth: 0\ntaskId: task_01J..."]
-    -->|"Attenuate Blocked!"| SubWorker["Sub-Worker C\n❌ maxDepth=0 のため再委譲不可"]
+    Root["Root Capability (Owner A to Agent A)\nresource: mcp://repo/*\nactions: [read, pr.create]\nmaxCalls: 50, maxDepth: 2"]
+    -->|"Attenuate (narrowing only)"| Delegated["Delegated Capability (Agent A to Worker B)\nresource: mcp://repo/docs/*\nactions: [read]\nmaxCalls: 10, maxDepth: 0\ntaskId: task_01J..."]
+    -->|"Attenuation blocked"| SubWorker["Sub-Worker C\nmaxDepth=0 forbids redelegation"]
 ```
 
-#### 減衰ルール（Attenuation Rules：検証器が強制する不変条件）
-子トークン `child` が親トークン `parent`（`proofs` 配列でハッシュ参照）から派生する際、Gatewayは以下の全条件を数学的・機械的に検証する。1つでも違反すれば署名が正しくても拒絶（`CAPABILITY_ESCALATION_ERROR`）する。
-- **署名連鎖**: `parent.audience === child.issuer` であること。
-- **タスク束縛**: `child.taskId === parent.taskId` であること。
-- **有効期限の縮小**: `child.notBefore >= parent.notBefore` かつ `child.expiresAt <= parent.expiresAt`。
-- **リソース・ツールの部分集合化**: `child.resources` は `parent.resources` のグロブ/URIプレフィックスの部分集合であり、`child.allowedTools` は `parent.allowedTools` の部分集合であること。
-- **引数制約の強化**: `child.argConstraints`（JSON Schemaのサブセット）は `parent.argConstraints` の全制約を継承しつつ追加制約のみを課すこと。
-- **呼び出し回数上限の縮小**: `child.maxInvocations <= parent.maxInvocations`（Gatewayは親トークン単位でも累積呼び出し回数をカウントし、子トークンを複数発行しても親の `maxInvocations` を超えられない）。
-- **委譲深さの減算**: `child.maxDelegationDepth <= parent.maxDelegationDepth - 1`。`0` の場合は一切の再委譲を禁止する。
+#### Attenuation rules (invariants the verifier enforces)
+
+When a child token `child` is derived from a parent token `parent` (the `proofs` array references the parent by hash), the Gateway checks every condition below mechanically. One violation rejects the token even if the signature is valid (`CAPABILITY_ESCALATION_ERROR`).
+
+- **Signature chain**: `parent.audience === child.issuer`.
+- **Task binding**: `child.taskId === parent.taskId`.
+- **Narrower validity window**: `child.notBefore >= parent.notBefore` and `child.expiresAt <= parent.expiresAt`.
+- **Resource and tool subset**: `child.resources` is a subset of the parent glob or URI prefix, and `child.allowedTools` is a subset of `parent.allowedTools`.
+- **Stronger argument constraints**: `child.argConstraints` (a JSON Schema subset) inherits every parent constraint and may only add constraints.
+- **Lower invocation cap**: `child.maxInvocations <= parent.maxInvocations`. The Gateway also counts calls against the parent token, so several children together cannot exceed the parent's `maxInvocations`.
+- **Delegation depth decreases**: `child.maxDelegationDepth <= parent.maxDelegationDepth - 1`. A depth of `0` forbids any further delegation.
 
 ---
 
-### 4.2 承認ゲート（Human-in-the-Loop / HITL）
+### 4.2 Approval gates (human-in-the-loop / HITL)
 
-エージェントの暴走や意図しない外部影響を防ぐため、Gateway Runtimeはポリシーエンジンを内蔵し、以下の5つの操作でオーナー承認（HITL）を強制する。
+The Gateway Runtime contains a policy engine that forces owner approval (HITL) on five operations, so a runaway agent cannot cause an unintended external effect.
 
-#### 承認ゲート発火条件一覧
+#### Gate trigger conditions
 
-| ゲートID | 発火タイミング | デフォルト挙動 | 自動承認（Auto-Approve）が許される条件例 |
-| :--- | :--- | :--- | :--- |
-| `GATE_CONTRACT_ACCEPT` | 受託側が `TaskManifest` を受諾（`ACCEPT`）するとき、または依頼側がカウンターオファーを受諾するとき | **HITL必須** | 信頼済みDIDリスト内 かつ 要求Capabilityが `read-only` かつ 予算上限が閾値以下 |
-| `GATE_EXTERNAL_SIDE_EFFECT` | タスク実行中に外部送信（メール、Slack、GitHub PR作成、Webhook、課金API等）を伴うCapabilityを行使するとき | **HITL必須（常に）** | 原則なし（ドライラン・下書き生成までは自動可、確定送信はオーナー署名必須） |
-| `GATE_BUDGET_OVERRUN` | 実行中のトークン消費またはツール呼び出し回数が `TaskContract.budget` の上限を超え、追加枠（`QUOTA_AMEND`）を要求・承認するとき | **HITL必須** | なし（上限超過は必ず停止し、オーナーの明示的署名を求める） |
-| `GATE_SUB_DELEGATION` | 受託エージェントがさらに第三者オーナーのエージェントへ再委譲（Sub-delegation）しようとするとき | **HITL必須** | `TaskContract` で `maxDelegationDepth > 0` かつ委譲先DIDがホワイトリストに含まれる場合のみ |
-| `GATE_DELIVERY_ACCEPT` | 依頼側が成果物を最終検収（`VERIFY_ACCEPT`）してタスクを完了させるとき | `verification.mode` に依存 | `automated_only` かつ全自動テスト・スキーマ検証がPASSし、かつ予算内の場合のみ自動可 |
+| Gate ID                     | When it fires                                                                                                             | Default behavior               | Example conditions that allow auto-approve                                                                                       |
+| :-------------------------- | :------------------------------------------------------------------------------------------------------------------------ | :----------------------------- | :------------------------------------------------------------------------------------------------------------------------------- |
+| `GATE_CONTRACT_ACCEPT`      | The worker accepts a `TaskManifest` (`ACCEPT`), or the requester accepts a counter-offer                                  | **HITL required**              | The DID is on the trusted list, the requested Capability is `read-only`, and the budget cap is at or below the threshold         |
+| `GATE_EXTERNAL_SIDE_EFFECT` | During execution, a Capability sends something outside (email, Slack, a GitHub PR, a webhook, a billing API, and similar) | **HITL required (always)**     | None in principle. A dry run or a draft may be automatic. A committed send requires the owner's signature                        |
+| `GATE_BUDGET_OVERRUN`       | Token use or tool-call count exceeds `TaskContract.budget`, and the run requests or approves extra room (`QUOTA_AMEND`)   | **HITL required**              | None. Crossing the cap always stops the run and asks for the owner's explicit signature                                          |
+| `GATE_SUB_DELEGATION`       | The worker agent tries to redelegate to an agent owned by a third party                                                   | **HITL required**              | Only when `TaskContract` sets `maxDelegationDepth > 0` and the delegatee DID is on the allowlist                                 |
+| `GATE_DELIVERY_ACCEPT`      | The requester performs final acceptance (`VERIFY_ACCEPT`) and completes the task                                          | Depends on `verification.mode` | Automatic only when the mode is `automated_only`, every automatic test and schema check passes, and the run stayed inside budget |
 
-#### ポリシー記述形式と署名付き承認記録（`ApprovalReceipt`）
-オーナーのポリシーは宣言的なJSON/YAML（`policy.json`）でGatewayに設定され、LLMのプロンプトからは書き換え 불가능とする。人間が承認すると、オーナー鍵（またはオーナー承認UI専用鍵）で署名された `ApprovalReceipt` が生成され、監査ログと相手方への遷移イベントに添付される。
+#### Policy form and the signed approval record (`ApprovalReceipt`)
+
+The owner's policy is declarative JSON or YAML (`policy.json`) configured on the Gateway. An LLM prompt cannot rewrite it. When a person approves, the owner key (or a key dedicated to the approval UI) signs an `ApprovalReceipt`. That receipt is attached to the audit log and to the transition event sent to the peer.
 
 ```json
 {
@@ -192,52 +198,52 @@ flowchart LR
 
 ---
 
-### 4.3 タスク受け渡し・検証プロトコル（Task Manifest / Contract & Verification）
+### 4.3 Task handoff and verification (Task Manifest / Contract)
 
-#### 契約から検収までのフロー
-1. **Manifest定義**: 依頼側が `TaskManifest`（詳細は [`spec/task-manifest.schema.json`](./spec/task-manifest.schema.json)）を作成する。ここには `inputSchema`, `outputSchema`, `acceptanceCriteria`, `verification`, `budget`, `capabilities`, `deadline` が含まれる。
-2. **双方向署名（`TaskContract`）**: 依頼側の `PROPOSE` 署名と、受託側の `ACCEPT` 署名（および必要に応じたRequester副署）が揃ったオブジェクトを `TaskContract` と呼ぶ。契約のSHA-256ハッシュ `contractDigest` が以降の全イベントの親IDとなる。
-3. **中間ステータス通知**: `RUNNING` 中、Worker Gatewayは `PROGRESS`（進捗率・中間ログ要約）や `HEARTBEAT` を送信できる。
-4. **Content-Addressed 成果物納品（`ArtifactBundle`）**:
-   受託側は成果物の生データをそのままプロンプトに混ぜるのではなく、すべての成果物ファイルをSHA-256ダイジェストでアドレス付けしたマニフェスト（in-toto Statement互換構造）として提出する。
-5. **3段階の検収パイプライン（`VERIFYING`）**:
-   Requester Gatewayは受領した成果物を **LLMに渡す前に** 決定論的検証器（Verifier）にかける。
-   - **Step 1: 暗号・整合性検証**: 署名、ハッシュチェーン、成果物のSHA-256ダイジェスト一致、期限内提出、`UsageReceipt` が予算上限以内かを検証。
-   - **Step 2: 機械的検証（Schema & Deterministic Checks）**: 構造化出力を `outputSchema`（JSON Schema Draft 2020-12）で検証し、さらに `verification.checks` に定義された自動検証コマンド（テストスイートやリンタ）を隔離サンドボックス内で実行。
-   - **Step 3: 意味的・人間検収（HITL Review）**: Step 1〜2を通過したもののみ、差分とテスト結果を添えてオーナーのHITL承認画面に提示し、`VERIFY_ACCEPT` または `VERIFY_REJECT`（理由コードと再現ログ付き）を発行する。
+#### Flow from contract to acceptance
 
----
-
-### 4.4 コスト負担・トークン消費の分離（BYOK + Signed Usage Receipts）
-
-OSSとして外部の決済ネットワークや法定通貨エスクローに依存せず、初日から安全に動かせるようにするため、**「推論コストの実行側自己負担（BYOK）＋契約による予算上限（Quota）＋署名付き消費レシート」** を基本モデルとする。
-
-| 項目 | 設計ルール | 理由 |
-| :--- | :--- | :--- |
-| **APIキーの扱い** | **各オーナーのBYOK（Bring Your Own Key）を厳守**。依頼側のOpenAI/Anthropic等のAPIキーを受託側に渡すことはプロトコル上禁止する | 渡したAPIキーは別用途に流用・漏洩されるリスクがあり、技術的に回収・制限できないため |
-| **推論コストの初期負担** | 各エージェントが自分のLLM推論コストを自前のAPIキー／ローカルLLMで負担する | 決済インフラなしで即座に2オーナー間協働を開始できるため |
-| **予算・クォータ契約** | `TaskManifest.budget` に `maxInputTokens`, `maxOutputTokens`, `maxToolInvocations`, `maxWallClockSeconds`, `costModel`（`worker_byok` / `bilateral_quota` / `external_settlement_plugin`）を明記 | 受託側が「どこまでトークンを使ってよいか／使う義務があるか」を契約時に合意するため |
-| **計量と `UsageReceipt`** | Worker GatewayがLLM API呼び出し・ツール呼び出しをプロキシ計量し、納品時にモデル名・トークン数・呼び出し回数・タイムスタンプを含む署名付き `UsageReceipt` を添付する | 双方のローカル台帳にコスト実績を残し、組織間での相互貸借（Bilateral Quota）や事後精算の根拠にするため |
-| **上限到達時のフェイルセーフ** | Worker Gatewayの `QuotaMeter` が `budget` の100%到達を検知した時点でサンドボックスの実行を一時停止（Freeze）し、Requesterへ `QUOTA_AMEND_REQUEST` を送る | 無制限のループやトークン浪費（Denial of Wallet）を機械的に遮断するため |
-| **将来の決済拡張** | Stripe Connect、X Money、Lightning、オンチェーンエスクロー等はコアプロトコルに入れず、`settlementExtension` フィールドを介した外部プラグインとする | コア仕様をシンプル・軽量・規制中立に保つため |
+1. **Manifest.** The requester writes a `TaskManifest` (see [`spec/task-manifest.schema.json`](./spec/task-manifest.schema.json)). It includes `inputSchema`, `outputSchema`, `acceptanceCriteria`, `verification`, `budget`, `capabilities`, and `deadline`.
+2. **Two signatures (`TaskContract`).** The requester's `PROPOSE` signature and the worker's `ACCEPT` signature (plus a requester countersignature when required) together form the `TaskContract`. The SHA-256 hash `contractDigest` is the parent id of every later event.
+3. **Intermediate status.** While `RUNNING`, the Worker Gateway may send `PROGRESS` (a progress ratio and a summary of intermediate logs) and `HEARTBEAT`.
+4. **Content-addressed delivery (`ArtifactBundle`).** The worker does not mix raw artifact bytes into a prompt. It submits a manifest that addresses every artifact file by its SHA-256 digest, in a structure compatible with an in-toto Statement.
+5. **Three-step acceptance pipeline (`VERIFYING`).** The Requester Gateway runs a deterministic verifier **before** it gives the artifact to an LLM.
+   - **Step 1: cryptographic and integrity checks.** Signatures, the hash chain, SHA-256 digest agreement, submission before the deadline, and a `UsageReceipt` inside the budget cap.
+   - **Step 2: mechanical checks (schema and deterministic checks).** Structured output is checked against `outputSchema` (JSON Schema Draft 2020-12). Commands listed in `verification.checks` (a test suite or a linter) run inside an isolated sandbox.
+   - **Step 3: semantic and human acceptance (HITL review).** Only output that passed steps 1 and 2 is shown to the owner, with the diff and the test results. The owner issues `VERIFY_ACCEPT` or `VERIFY_REJECT` (a reason code plus a reproduction log).
 
 ---
 
-### 4.5 隔離実行（Sandboxing）と双方向監査ログ（Audit Ledger）
+### 4.4 Cost separation (BYOK + signed usage receipts)
 
-#### 隔離実行とプロンプトインジェクション防御
-相手オーナーから届くタスク説明文、入力ファイル、エラーメッセージ、中間成果物はすべて **Untrusted Data（信頼できない外部データ）** として扱う。
+The platform does not depend on an external payment network or a fiat escrow, so it can run safely from day one as open source. The base model is **the executor pays its own inference cost (BYOK), a contractual budget cap (quota), and a signed consumption receipt**.
 
-1. **タスク単位の使い捨てサンドボックス**:
-   Worker Gatewayはタスクごとに独立した実行環境（Docker/OCIコンテナ、Bubblewrap/nsjail、またはWASMランタイム）を起動する。
-   - **File System**: タスク専用の一時作業ディレクトリ（`/work/task_<id>`）のみ読み書き可。ホストの `~/.ssh`, `~/.aws`, 環境変数、他タスクのディレクトリはマウントしない。
-   - **Network**: デフォルトは完全遮断（`none`）。必要な場合のみ `TaskManifest.sandboxPolicy.allowedHosts` で合意されたドメインへの外向き通信をGatewayプロキシ経由で許可する。
-2. **構造化データ境界によるプロンプトインジェクション対策**:
-   - 外部から受信した文字列はシステムプロンプトと文字列結合せず、明確な非信頼境界タグ（または専用ロール/JSONフィールド）に封じ込める。
-   - **最重要**: たとえLLMがプロンプトインジェクションによって騙され、不正なツール呼び出しや外部送信を試みても、**プロセス外にいる Gateway Runtime の `CapGuard` と `PolicyEngine` が `CapabilityToken` のスコープとHITLゲートを機械的に検証するため、許可されていない操作は物理的に実行できない**（Defense in Depth）。
+| Item                            | Design rule                                                                                                                                                                                       | Reason                                                                                           |
+| :------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------- |
+| **API keys**                    | **Each owner keeps their own key (BYOK).** The protocol forbids giving the requester's OpenAI, Anthropic, or similar API key to the worker                                                        | A handed-over API key can be reused or leaked, and it cannot be technically reclaimed or limited |
+| **Who pays inference first**    | Each agent pays for its own LLM inference with its own API key or a local LLM                                                                                                                     | Two owners can start collaborating immediately, with no payment infrastructure                   |
+| **Budget and quota contract**   | `TaskManifest.budget` states `maxInputTokens`, `maxOutputTokens`, `maxToolInvocations`, `maxWallClockSeconds`, and `costModel` (`worker_byok` / `bilateral_quota` / `external_settlement_plugin`) | The worker agrees, at contract time, how many tokens it may use and what it is obliged to spend  |
+| **Metering and `UsageReceipt`** | The Worker Gateway proxies LLM API calls and tool calls, and attaches a signed `UsageReceipt` at delivery with the model name, token counts, call counts, and timestamps                          | Both local ledgers keep a cost record that can support bilateral quota or a later settlement     |
+| **Fail-safe at the cap**        | When the Worker Gateway `QuotaMeter` sees 100% of `budget`, it freezes the sandbox and sends `QUOTA_AMEND_REQUEST` to the requester                                                               | An unbounded loop or token burn (denial of wallet) is cut off mechanically                       |
+| **Future payment extensions**   | Stripe Connect, X Money, Lightning, and on-chain escrow stay out of the core protocol. They attach through a `settlementExtension` field as external plugins                                      | The core specification stays simple, small, and regulation-neutral                               |
 
-#### 双方向ハッシュチェーン監査ログ（Bilateral Append-Only Audit Ledger）
-中央サーバーがない環境で「言った・言わない」「納品した・していない」を防ぐため、すべてのプロトコルメッセージはハッシュチェーンを構成し、受信側が受領署名（`AckReceipt`）を返すことで**双方が同じ暗号学的証拠を保持する**。
+---
+
+### 4.5 Isolated execution and the bilateral audit log
+
+#### Isolation and prompt-injection defense
+
+Task descriptions, input files, error messages, and intermediate artifacts that arrive from the other owner are all **untrusted data**.
+
+1. **A disposable sandbox per task.** The Worker Gateway starts an independent execution environment for each task (a Docker/OCI container, Bubblewrap/nsjail, or a WASM runtime).
+   - **File system.** Only the task's temporary work directory (`/work/task_<id>`) is readable and writable. The host's `~/.ssh`, `~/.aws`, environment variables, and other tasks' directories are not mounted.
+   - **Network.** The default is fully closed (`none`). Outbound traffic is allowed only to domains agreed in `TaskManifest.sandboxPolicy.allowedHosts`, and only through the Gateway proxy.
+2. **A structured data boundary against prompt injection.**
+   - Strings received from outside are not concatenated into the system prompt. They are confined to an explicit untrusted-boundary tag, or to a dedicated role or JSON field.
+   - **The important part:** even if prompt injection tricks the LLM into a forbidden tool call or an external send, the Gateway Runtime's `CapGuard` and `PolicyEngine` sit outside the process and mechanically check the `CapabilityToken` scope and the HITL gates. An operation that was not allowed cannot actually run (defense in depth).
+
+#### Bilateral append-only audit ledger
+
+With no central server, the protocol has to prevent "I said / I did not say" and "I delivered / I did not deliver". Every protocol message forms a hash chain, and the receiver returns an acknowledgement signature (`AckReceipt`), so **both parties hold the same cryptographic evidence**.
 
 ```mermaid
 sequenceDiagram
@@ -251,7 +257,7 @@ sequenceDiagram
     GB->>GB: Verify sigA & Schema
     GB->>R: Return AckReceipt #1 (entryHash #1 + sigB)
     R->>GA: Deliver AckReceipt #1
-    Note over GA,GB: 双方が Entry #1 + (sigA, sigB) をローカル台帳に確定保存
+    Note over GA,GB: Both parties commit Entry #1 + (sigA, sigB) to their local ledgers
 
     GB->>GB: Entry #2 (ACCEPT / Contract)<br/>prevHash: entryHash(#1)<br/>entryHash: sha256(JCS(Entry#2))<br/>sigB: Ed25519(OwnerB)
     GB->>R: Send Envelope #2
@@ -260,43 +266,43 @@ sequenceDiagram
     R->>GB: Deliver AckReceipt #2
 ```
 
-- 各監査エントリは以下の構造を持つ:
-  - `seq`: 単調増加シーケンス番号（`1, 2, 3...`）
-  - `taskId`: タスク識別子
-  - `prevEntryHash`: 直前エントリの `entryHash`（初回は64文字の `0`）
-  - `eventType`: `PROPOSE` | `ACCEPT` | `CAPABILITY_INVOKE` | `DELIVER` | `VERIFY_ACCEPT` 等
-  - `payloadDigest`: ペイロード本体（RFC 8785 JCS正規化後）のSHA-256ダイジェスト
-  - `actorDid`: 送信者DID
-  - `timestamp`: ISO 8601 UTCタイムスタンプ
-  - `actorSignature`: 送信者のEd25519署名
-  - `counterSignature`: 受信者の受領・合意Ed25519署名
-- これにより、万が一紛争（`DISPUTED`）が発生した場合でも、`acp-cli audit verify <bundle.json>` を実行するだけで、どのステップまで双方が合意し、成果物が契約の `outputSchema` を満たしていたかを第三者がオフラインで100%検証できる。
+- Each audit entry has this shape:
+  - `seq`: a monotonically increasing sequence number (`1, 2, 3...`)
+  - `taskId`: the task identifier
+  - `prevEntryHash`: the previous entry's `entryHash` (sixty-four `0` characters on the first entry)
+  - `eventType`: `PROPOSE` | `ACCEPT` | `CAPABILITY_INVOKE` | `DELIVER` | `VERIFY_ACCEPT` | and similar
+  - `payloadDigest`: the SHA-256 digest of the payload after RFC 8785 JCS canonicalization
+  - `actorDid`: the sender DID
+  - `timestamp`: an ISO 8601 UTC timestamp
+  - `actorSignature`: the sender's Ed25519 signature
+  - `counterSignature`: the receiver's Ed25519 acknowledgement or agreement signature
+- If a dispute (`DISPUTED`) happens, `acp-cli audit verify <bundle.json>` is enough for a third party to check offline which step both parties agreed on, and whether the artifact satisfied the contract `outputSchema`.
 
 ---
 
-## 5. 脅威モデル（Threat Model）
+## 5. Threat model
 
-| # | 脅威（Threat） | 侵害される境界 | 対策（Countermeasure） | MVP実装 |
-| :--- | :--- | :--- | :--- | :---: |
-| **T1** | **悪意ある依頼によるプロンプトインジェクション**<br>（TaskManifestの説明文や入力データに「秘密鍵を送信せよ」等を混入） | Requester → Worker Sandbox | 1) 受託側Sandboxに秘密鍵やホスト認証情報を一切マウントしない<br>2) 全ツール呼び出しをGatewayの `CapGuard` で検査し、契約外のアクションを遮断<br>3) 外部送信は `GATE_EXTERNAL_SIDE_EFFECT` で人間承認必須 | **Yes** |
-| **T2** | **悪意ある成果物による逆方向インジェクション・不正ファイル上書き**<br>（Workerがパストラバーサル `../../` や悪意あるスクリプトを含む成果物を返却） | Worker → Requester Verifier | 1) 成果物はContent-Addressed（SHA-256）で展開し、パス正規化でディレクトリ脱出を拒否<br>2) 自動検証はRequester側の隔離検証サンドボックスで実行<br>3) LLMに直接読ませる前にJSON Schema検証を実施 | **Yes** |
-| **T3** | **権限昇格・不正な再委譲（Capability Escalation）**<br>（Workerが与えられた以上のツールを呼び出す、または無断で第三者エージェントへ丸投げする） | Worker → Requester Proxy | `CapabilityToken` の減衰検証（`allowedTools`, `argConstraints`, `maxInvocations`, `maxDelegationDepth`）をRequester Gatewayで厳密検証。違反時は即時失効 | **Yes** |
-| **T4** | **トークン・API枯渇攻撃（Denial of Wallet / 無限ループ）**<br>（異常に巨大な入力や無限ループでLLMコストを浪費させる） | Requester ↔ Worker Runtime | 1) ペイロードサイズ上限と `TaskContract.budget`（トークン数・呼び出し回数・実行時間上限）の強制<br>2) BYOKにより自分のAPIキーは自分のQuotaMeterでハードリミット遮断 | **Yes** |
-| **T5** | **中継リレーによる盗聴・改ざん・リプレイ攻撃**<br>（悪意あるRelayがメッセージを書き換える、過去のメッセージを再送する、中身を覗き見る） | Gateway A ↔ Relay ↔ Gateway B | 1) 全エンベロープに `taskId` + `seq` + `nonce` + JCS Ed25519署名を付与し改ざん・リプレイを拒絶<br>2) ペイロードのX25519 + ChaCha20-Poly1305 E2E暗号化（M1でローカル/署名、M2でRelay E2E暗号化を標準化） | **Yes** (署名・リプレイ防止)<br>**M2** (E2E暗号化) |
-| **T6** | **納品後の踏み倒し・否認（Repudiation）**<br>（Workerが成果物を納品したのにRequesterが「受け取っていない」「仕様違反だ」と偽る、またはその逆） | Trust Zone A ↔ Trust Zone B | 1) 全状態遷移に対する双方向署名付き `AckReceipt` とハッシュチェーン監査ログ<br>2) 決定論的な `outputSchema` と自動検証コマンドのハッシュを契約時に固定し、第三者/CLIで再現検証可能にする | **Yes** |
+| #      | Threat                                                                                                                                                              | Boundary crossed                | Countermeasure                                                                                                                                                                                                                                           | MVP implementation                                                           |
+| :----- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------- |
+| **T1** | **Prompt injection in a malicious request.** The TaskManifest description or input data says things such as "send the secret key"                                   | Requester to Worker Sandbox     | 1) Mount no secret keys or host credentials into the worker sandbox<br>2) `CapGuard` inspects every tool call and blocks actions outside the contract<br>3) External sends require a human at `GATE_EXTERNAL_SIDE_EFFECT`                                | **Yes**                                                                      |
+| **T2** | **Reverse injection and malicious file overwrite in an artifact.** The worker returns a path traversal (`../../`) or an artifact that contains a malicious script   | Worker to Requester Verifier    | 1) Expand artifacts as content-addressed SHA-256 objects and reject directory escape after path normalization<br>2) Automatic checks run in the requester's isolated verification sandbox<br>3) Validate JSON Schema before an LLM reads the bytes       | **Yes**                                                                      |
+| **T3** | **Privilege escalation and unauthorized redelegation.** The worker calls a tool beyond its grant, or hands the whole task to a third-party agent without permission | Worker to Requester Proxy       | The Requester Gateway strictly checks Capability attenuation (`allowedTools`, `argConstraints`, `maxInvocations`, `maxDelegationDepth`). A violation is revoked immediately                                                                              | **Yes**                                                                      |
+| **T4** | **Token and API exhaustion (denial of wallet / infinite loop).** An abnormally large input or an infinite loop burns LLM cost                                       | Requester and Worker Runtime    | 1) Enforce a payload size cap and `TaskContract.budget` (token count, call count, and wall-clock cap)<br>2) BYOK means each owner's QuotaMeter hard-stops that owner's own API key                                                                       | **Yes**                                                                      |
+| **T5** | **Relay eavesdropping, tampering, and replay.** A malicious Relay rewrites a message, resends an old message, or reads the contents                                 | Gateway A, Relay, and Gateway B | 1) Every envelope carries `taskId` + `seq` + `nonce` plus a JCS Ed25519 signature, so tampering and replay are rejected<br>2) X25519 + ChaCha20-Poly1305 end-to-end encryption of the payload (local/signed in M1; Relay E2E standardized in M2)         | **Yes** (signatures and replay prevention)<br>**M2** (end-to-end encryption) |
+| **T6** | **Repudiation after delivery.** The worker delivered, and the requester falsely says "I never received it" or "it violates the spec", or the reverse                | Trust Zone A and Trust Zone B   | 1) A countersigned `AckReceipt` and a hash-chain audit log for every state transition<br>2) The deterministic `outputSchema` and the hash of the automatic check command are fixed at contract time, so a third party or the CLI can reproduce the check | **Yes**                                                                      |
 
 ---
 
-## 6. 既存OSSフォーク／オーバーレイ構成オプション（詳細は [`OSS_FORK_ANALYSIS.md`](./OSS_FORK_ANALYSIS.md)）
+## 6. Existing OSS fork and overlay options (detail in [`OSS_FORK_ANALYSIS.md`](./OSS_FORK_ANALYSIS.md))
 
-2026年10月現在、エージェント間通信の標準プロトコルは Linux Foundation 傘下の **A2A (`a2aproject/A2A`)** に収束している（IBM BeeAI `i-am-bee/acp` および Cisco/AGNTCY `agntcy/acp-spec` はアーカイブ済み）。
-そのため、通信層からフルスクラッチで再発明するのではなく、以下の3つの実装アプローチから選択可能である（**推奨はアプローチC**）。
+As of October 2026, the standard agent-to-agent protocol has converged on **A2A (`a2aproject/A2A`)** under the Linux Foundation. IBM BeeAI `i-am-bee/acp` and Cisco/AGNTCY `agntcy/acp-spec` are archived.
+The communication layer should not be reinvented from scratch. Three implementation approaches are available. **Approach C is the recommendation.**
 
-| アプローチ | 構成内容 | 評価 |
-| :--- | :--- | :--- |
-| **A. フルスクラッチ** | ワイヤ通信から暗号・Capability・Runtimeまで全てゼロから実装 | 依存は最小だが、A2A互換ブリッジの自作が必要で初期工数が大 |
-| **B. 単一OSSのハードフォーク** | `a2aproject/a2a-js` または `Cotal-AI/Cotal` を丸ごとForkして直接改造 | 初速は出るが、本家A2A仕様更新時のコンフリクトやNATS等のミドルウェア強制が重荷になる |
-| **C. 標準SDKオーバーレイ＋コア選択的統合（★推奨）** | ワイヤ層は `@a2a-js/sdk` (Apache-2.0) と `@modelcontextprotocol/sdk` (MIT) を**Forkせずnpm依存で利用**し、契約・Capability減衰・検収コアに `newtro/delegateos` (MIT) の設計/コードを統合。その上に**5つのHITLゲート、BYOK `UsageReceipt`、隔離Sandbox、双方向ハッシュチェーン監査台帳**をオーバーレイ実装する | **開発工数を約50〜60%削減**しつつ、A2A/MCP標準エコシステムと完全互換・アップストリーム追従も容易 |
+| Approach                                                                  | What it is                                                                                                                                                                                                                                                                                                                                             | Assessment                                                                                                                  |
+| :------------------------------------------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------- |
+| **A. Full scratch**                                                       | Implement the wire, cryptography, Capability, and Runtime from zero                                                                                                                                                                                                                                                                                    | Dependencies stay minimal, but an A2A-compatible bridge has to be written, so the early effort is large                     |
+| **B. Hard fork of a single OSS project**                                  | Fork all of `a2aproject/a2a-js` or `Cotal-AI/Cotal` and modify it in place                                                                                                                                                                                                                                                                             | The first demo arrives sooner, but conflicts with upstream A2A updates, and forced middleware such as NATS, become a burden |
+| **C. Standard SDK overlay plus selective core integration (recommended)** | Use `@a2a-js/sdk` (Apache-2.0) and `@modelcontextprotocol/sdk` (MIT) as **npm dependencies without forking**. Integrate the design and code of `newtro/delegateos` (MIT) into the contract, Capability attenuation, and acceptance core. Overlay the **five HITL gates, BYOK `UsageReceipt`, isolated sandbox, and bilateral hash-chain audit ledger** | Cuts development effort by about **50–60%**, stays compatible with the A2A/MCP ecosystem, and can follow upstream easily    |
 
 ## M2/M3 implemented profile (WP-7–WP-12)
 

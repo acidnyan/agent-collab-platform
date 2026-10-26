@@ -1,14 +1,16 @@
-# REPO_STRUCTURE: モノレポ構成・技術スタック・MVPロードマップ
+# REPO_STRUCTURE: Monorepo Layout, Stack, and MVP Roadmap
 
-**結論**: プロトコル仕様（`spec/`）と適合性テストベクタ（`conformance/`）を言語非依存の「正（Single Source of Truth）」として最上位に置き、リファレンス実装（`packages/*`）は **TypeScript (Node.js 22 LTS + pnpm workspace)** で最小依存に構築する。最初のマイルストーン（MVP / M1）は、**「異なる鍵ペアを持つ2つのOwner Gatewayが、Untrusted Relay越しに1つのタスクを契約・Capability制限付きツール呼び出し・自動検収・双方向監査ログ記録まで完遂するE2Eデモ」** とする。
+**English** | [日本語 (REPO_STRUCTURE.ja.md)](./REPO_STRUCTURE.ja.md)
+
+**Conclusion**: The protocol specification (`spec/`) and the conformance test vectors (`conformance/`) sit at the top as the language-independent source of truth. The reference implementation (`packages/*`) is built with **TypeScript (Node.js 22 LTS + a pnpm workspace)** and a small dependency set. The first milestone (MVP / M1) is an **end-to-end demo in which two Owner Gateways, with different key pairs, complete one task over an untrusted Relay: contract, a capability-limited tool call, automatic acceptance, and a bilateral audit log**.
 
 ---
 
-## 1. パッケージ依存関係とモノレポ構成
+## 1. Package dependencies and monorepo layout
 
-### 1.1 パッケージ依存グラフ（レイヤ規律）
+### 1.1 Package dependency graph (layer discipline)
 
-循環依存を禁止し、下位レイヤ（`spec` → `core`）は上位レイヤ（`runtime`, `relay`, `cli`）を一切参照しない。
+Cycles are forbidden. A lower layer (`spec` to `core`) never references an upper layer (`runtime`, `relay`, `cli`).
 
 ```mermaid
 flowchart BT
@@ -35,203 +37,207 @@ flowchart BT
     Examples --> Relay
 ```
 
-### 1.2 ディレクトリツリー案
+### 1.2 Directory tree
 
 ```text
 agent-collab-platform/
-├── README.md                          # プロジェクト概要（1画面サマリ）
-├── ARCHITECTURE.md                    # 全体アーキテクチャ・信頼境界・安全設計
-├── REPO_STRUCTURE.md                  # リポジトリ構成・技術スタック・MVP計画（本書）
-├── LICENSE                            # Apache-2.0 または MIT（オーナー判断事項）
+├── README.md                          # Project overview (one-screen summary)
+├── ARCHITECTURE.md                    # Architecture, trust boundaries, and safety design
+├── REPO_STRUCTURE.md                  # Repository layout, stack, and MVP plan (this document)
+├── LICENSE                            # Apache-2.0 or MIT (an owner decision)
 ├── package.json                       # pnpm workspace root
 ├── pnpm-workspace.yaml
 ├── tsconfig.base.json
 │
-├── spec/                              # 【言語非依存】プロトコル仕様 & JSON Schema
-│   ├── README.md                      # エンベロープ・正規化・署名・状態遷移仕様
-│   ├── task-manifest.schema.json      # TaskManifest スキーマ (Draft 2020-12)
-│   ├── capability-token.schema.json   # CapabilityToken スキーマ (M0で追加)
-│   ├── envelope.schema.json           # SignedEnvelope / AckReceipt スキーマ (M0で追加)
-│   ├── audit-entry.schema.json        # AuditLogEntry / UsageReceipt スキーマ (M0で追加)
+├── spec/                              # Language-independent protocol spec and JSON Schema
+│   ├── README.md                      # Envelope, canonicalization, signatures, and state transitions
+│   ├── task-manifest.schema.json      # TaskManifest schema (Draft 2020-12)
+│   ├── capability-token.schema.json   # CapabilityToken schema (added in M0)
+│   ├── envelope.schema.json           # SignedEnvelope / AckReceipt schema (added in M0)
+│   ├── audit-entry.schema.json        # AuditLogEntry / UsageReceipt schema (added in M0)
 │   └── examples/
-│       └── sample-task-manifest.json  # スキーマ検証用サンプルマニフェスト
+│       └── sample-task-manifest.json  # Sample manifest for schema validation
 │
-├── conformance/                       # 【言語非依存】実装適合性テストベクタ
-│   ├── README.md                      # テストベクタ仕様（将来Python/Go/Rust実装を検証）
-│   ├── jcs-signing-vectors.json       # RFC 8785 正規化＋Ed25519署名の一致ベクタ
-│   ├── capability-attenuation.json    # 正常減衰ケースと権限昇格拒否ケースのベクタ
-│   └── state-transitions.json         # 状態機械の正常遷移・不正遷移ベクタ
+├── conformance/                       # Language-independent implementation conformance vectors
+│   ├── README.md                      # Vector spec (later checks Python/Go/Rust implementations)
+│   ├── jcs-signing-vectors.json       # RFC 8785 canonicalization plus Ed25519 signature vectors
+│   ├── capability-attenuation.json    # Valid attenuation cases and privilege-escalation rejections
+│   └── state-transitions.json         # Valid and invalid state-machine transition vectors
 │
 ├── packages/
-│   ├── core/                          # @acp/core: ゼロ外部通信の純粋関数コア
+│   ├── core/                          # @acp/core: pure-function core with no external I/O
 │   │   ├── src/
-│   │   │   ├── crypto/                # did:key, Ed25519署名/検証, RFC 8785 JCS, SHA-256
-│   │   │   ├── capability/            # CapabilityToken発行・減衰検証ロジック
-│   │   │   ├── contract/              # TaskManifest / TaskContract 検証・状態機械
+│   │   │   ├── crypto/                # did:key, Ed25519 sign/verify, RFC 8785 JCS, SHA-256
+│   │   │   ├── capability/            # CapabilityToken issue and attenuation checks
+│   │   │   ├── contract/              # TaskManifest / TaskContract checks and the state machine
 │   │   │   └── index.ts
 │   │   └── test/
 │   │
-│   ├── ledger/                        # @acp/ledger: 追記専用ハッシュチェーン監査台帳
+│   ├── ledger/                        # @acp/ledger: append-only hash-chain audit ledger
 │   │   ├── src/
-│   │   │   ├── store.ts               # JSONL / SQLite 追記ストア
-│   │   │   ├── verifier.ts            # 双方向署名・ハッシュ連鎖の完全性検証器
+│   │   │   ├── store.ts               # JSONL / SQLite append store
+│   │   │   ├── verifier.ts            # Bilateral signature and hash-chain integrity verifier
 │   │   │   └── index.ts
 │   │   └── test/
 │   │
-│   ├── sandbox/                       # @acp/sandbox: 受託タスク隔離実行アダプタ
+│   ├── sandbox/                       # @acp/sandbox: isolated execution adapter for worker tasks
 │   │   ├── src/
-│   │   │   ├── driver.ts              # SandboxDriver インターフェース
-│   │   │   ├── local-process.ts       # MVP用: 制限付き一時ディレクトリ＋環境変数遮断ドライバ
-│   │   │   ├── container.ts           # M2用: Docker / OCI rootless コンテナドライバ
+│   │   │   ├── driver.ts              # SandboxDriver interface
+│   │   │   ├── local-process.ts       # MVP: restricted temp directory and environment cutoff
+│   │   │   ├── container.ts           # M2: Docker / OCI rootless container driver
 │   │   │   └── index.ts
 │   │   └── test/
 │   │
-│   ├── runtime/                       # @acp/runtime: 各オーナーが動かす Gateway Runtime
+│   ├── runtime/                       # @acp/runtime: the Gateway Runtime each owner runs
 │   │   ├── src/
-│   │   │   ├── gateway.ts             # メッセージ送受信・契約ライフサイクル管理
-│   │   │   ├── hitl-gate.ts           # 承認ゲート（Policy評価 + ApprovalReceipt署名）
-│   │   │   ├── mcp-proxy.ts           # CapabilityToken で絞った MCP ツールプロキシ
-│   │   │   ├── quota-meter.ts         # トークン・API呼び出し回数計量 & UsageReceipt発行
-│   │   │   ├── verifier.ts            # 納品物のSHA-256・JSON Schema・自動チェック検証
+│   │   │   ├── gateway.ts             # Message send/receive and contract lifecycle
+│   │   │   ├── hitl-gate.ts           # Approval gates (policy evaluation + ApprovalReceipt signature)
+│   │   │   ├── mcp-proxy.ts           # MCP tool proxy narrowed by a CapabilityToken
+│   │   │   ├── quota-meter.ts         # Token and API-call metering, and UsageReceipt issuance
+│   │   │   ├── verifier.ts            # SHA-256, JSON Schema, and automatic checks on a delivery
 │   │   │   └── index.ts
 │   │   └── test/
 │   │
-│   └── relay/                         # @acp/relay: 非信頼メッセージ中継サーバー
+│   └── relay/                         # @acp/relay: untrusted message relay
 │       ├── src/
-│       │   ├── server.ts              # WebSocket / HTTP SSE ベースの Blind Relay
-│       │   ├── memory-transport.ts    # テスト・ローカル単一マシン検証用インメモリバス
+│       │   ├── server.ts              # Blind Relay over WebSocket / HTTP SSE
+│       │   ├── memory-transport.ts    # In-memory bus for tests and single-machine checks
 │       │   └── index.ts
 │       └── test/
 │
-├── cli/                               # @acp/cli: 開発・運用・監査検証用CLI (`acp`)
+├── cli/                               # @acp/cli: development, operations, and audit CLI (`acp`)
 │   ├── src/
 │   │   ├── commands/
-│   │   │   ├── keygen.ts              # Owner / Agent の did:key ペア生成
-│   │   │   ├── validate.ts            # TaskManifest / Schema 検証
-│   │   │   ├── approve.ts             # HITL 承認署名コマンド
-│   │   │   └── audit-verify.ts        # 監査ログバンドルのオフライン改ざん検証
+│   │   │   ├── keygen.ts              # Generate an Owner / Agent did:key pair
+│   │   │   ├── validate.ts            # Validate a TaskManifest / schema
+│   │   │   ├── approve.ts             # HITL approval signature command
+│   │   │   └── audit-verify.ts        # Offline tamper check of an audit-log bundle
 │   │   └── index.ts
 │   └── package.json
 │
 ├── examples/
-│   └── two-owner-demo/                # MVP E2Eデモ（Owner Alice と Owner Bob の協働）
+│   └── two-owner-demo/                # MVP end-to-end demo (Owner Alice and Owner Bob)
 │       ├── README.md
-│       ├── alice-policy.json          # 依頼側オーナーのHITL・権限ポリシー
-│       ├── bob-policy.json            # 受託側オーナーの受諾・クォータポリシー
-│       └── run-demo.ts                # 正常系＋攻撃遮断系を一気通貫で実証するスクリプト
+│       ├── alice-policy.json          # Requester owner HITL and authority policy
+│       ├── bob-policy.json            # Worker owner acceptance and quota policy
+│       └── run-demo.ts                # Script that runs the happy path and the blocked attacks
 │
 └── docs/
-    ├── protocol-walkthrough.md        # メッセージシーケンス詳細解説
-    └── security-model.md              # 脅威モデルと運用ガイド
+    ├── protocol-walkthrough.md        # Detailed message-sequence walkthrough
+    └── security-model.md              # Threat model and operations guide
 ```
 
 ---
 
-## 2. 技術スタック選定と理由
+## 2. Stack choices and reasons
 
-### 2.1 採用スタック（MVP）
-- **言語・ランタイム**: **TypeScript 5.x (Strict mode) + Node.js 22 LTS**
-  - **理由**: MCP SDK（`@modelcontextprotocol/sdk`）やA2A JS SDK、JSON Schemaエコシステムとの親和性が最も高く、Web/CLI/Relay/Runtimeを単一言語で高速に一気通貫実装できるため。
-- **暗号・署名プリミティブ**: **Node.js 標準 `node:crypto` (Ed25519 / X25519 / SHA-256)**
-  - **理由**: 外部ネイティブアドオンや怪しい暗号ライブラリへの依存をゼロにし、サプライチェーン攻撃リスクを最小化するため。
-- **スキーマ検証**: **JSON Schema Draft 2020-12 (`ajv` v8)**
-  - **理由**: 言語非依存で `spec/*.schema.json` をそのまま配布でき、将来Python（`jsonschema` / `pydantic`）やGo/RustのSDKを追加する際もスキーマと `conformance/` ベクタを共有できるため。
-- **パッケージ管理・テスト**: **pnpm workspaces + Vitest（または Node.js 標準 `node:test`）**
-  - **理由**: 依存関係が軽く、CI/ローカルでの実行速度が速いため。
+### 2.1 Adopted stack (MVP)
 
-### 2.2 代替案と却下理由（MVP時点）
+- **Language and runtime**: **TypeScript 5.x (strict mode) + Node.js 22 LTS**
+  - **Reason**: Closest fit to the MCP SDK (`@modelcontextprotocol/sdk`), the A2A JS SDK, and the JSON Schema ecosystem, so the web surface, CLI, Relay, and Runtime can be built in one language.
+- **Cryptographic primitives**: **Node.js built-in `node:crypto` (Ed25519 / X25519 / SHA-256)**
+  - **Reason**: No native addons and no third-party cryptography libraries, which keeps the supply-chain surface small.
+- **Schema validation**: **JSON Schema Draft 2020-12 (`ajv` v8)**
+  - **Reason**: `spec/*.schema.json` can be distributed as language-independent files. A later Python (`jsonschema` / `pydantic`), Go, or Rust SDK can share the schemas and the `conformance/` vectors.
+- **Package manager and tests**: **pnpm workspaces + Vitest (or Node.js built-in `node:test`)**
+  - **Reason**: The dependency graph stays light, and CI and local runs stay fast.
 
-| 代替案 | 却下理由（なぜ今選ばないか） |
-| :--- | :--- |
-| **Python単一構成** | エージェント実装には人気だが、軽量なGatewayデーモン・WebSocket Relay・厳密な型境界を持つCLI配布ではTypeScript/Node.jsの方が単一コードベースでの凝集度が高い。Python SDKは `spec/` と `conformance/` を使ってM2以降に薄いクライアントとして提供する。 |
-| **Rust / Go でのコア実装** | バイナリ配布や高速性には優れるが、初期プロトコル仕様の反復速度（Schema変更やMCP連携の試行錯誤）が落ちる。仕様が固まった後に必要なら移植する。 |
-| **Protobuf / gRPC 必須化** | 人間による監査ログの可読性、LLM出力との直接検証、ブラウザやCLIからのデバッグ容易性において、RFC 8785 (JCS) 正規化JSONの方が圧倒的に扱いやすい。 |
-| **ブロックチェーン / スマートコントラクト必須化** | ガス代・ウォレット管理・レイテンシが導入障壁になり、OSSとして「手元で5分で動く」体験を損なうため。双方向署名ハッシュチェーンで十分な否認防止が得られる。 |
+### 2.2 Alternatives set aside for the MVP
 
----
-
-## 3. MVPスコープ定義（In-Scope / Out-of-Scope）
-
-### 3.1 MVPの目的
-**「異なる2人のオーナー（AliceとBob）に属するエージェントが、互いのAPIキーやファイルシステムを共有せず、Untrusted Relay経由で1つのタスクを安全に委譲・実行・自動検収・監査記録できること」** を動作するコードとテストで証明する。
-
-### 3.2 MVPに入れるもの / 入れないもの
-
-| 区分 | MVPに入れるもの（In-Scope: M0〜M1） | MVPに入れないもの（Out-of-Scope: M2以降） |
-| :--- | :--- | :--- |
-| **アイデンティティ** | `did:key`（Ed25519公開鍵ベース）とローカル鍵生成CLI | 分散公開ディレクトリ、Web PKI / DNS連携（`did:web`）、評判スコア |
-| **契約・状態機械** | `TaskManifest` 検証、双方署名による `TaskContract`、基本状態機械（`PROPOSE`〜`SETTLED`） | 複雑な複数ラウンド価格オークション、マルチパーティ（3者以上）同時合意 |
-| **権限（Capability）** | 1段の委譲（Requester → Worker）と減衰検証（ツール名・引数Schema・回数上限・期限）、再委譲禁止（`maxDepth: 0`） | 3段以上の多段チェーン委譲（データ構造は対応し、M2で解禁） |
-| **承認（HITL）** | JSONポリシー設定＋CLI/コールバックによるオーナー署名承認（`ApprovalReceipt`） | Web GUIダッシュボード、モバイルPush通知連携 |
-| **コスト・クォータ** | BYOK前提、`QuotaMeter` によるトークン/呼び出し回数上限強制、署名付き `UsageReceipt` | 法定通貨・暗号資産による実決済プラグイン（Stripe / X Money等） |
-| **隔離・通信・監査** | ローカルプロセス隔離（専用一時ディレクトリ＋環境変数遮断）、WebSocket/InMemory Relay、双方向署名JSONL監査台帳 | Docker/WASM隔離ドライバ（M2）、Sigstore Rekor等の外部公開ログへの自動アンカー（M3） |
-
-### 3.3 MVP完了条件（Definition of Done / 実証デモシナリオ）
-
-`pnpm --filter @acp/two-owner-demo start` を実行した際、以下の **正常系1本＋異常系（攻撃遮断）3本** がすべて決定論的テストとしてPASSすることをもってMVP完了とする。
-
-1. **正常系（Happy Path）**:
-   - Owner Alice（Requester）が「指定ドキュメント群の要約と構造化JSONレポート作成」の `TaskManifest` を署名してRelayに投稿。
-   - Owner Bob（Worker）のGatewayがHITL承認（`ApprovalReceipt`）を経て `ACCEPT` し、`TaskContract` が成立。
-   - BobのエージェントがAliceから付与されたRead-Only `CapabilityToken`（`docs/read` のみ許可、最大5回）を使ってAlice GatewayのMCPプロキシから対象文書を取得。
-   - Bobが成果物（SHA-256ハッシュ付きJSON）と `UsageReceipt`（消費トークンが予算内）を `DELIVER`。
-   - Alice Gatewayが `outputSchema` とダイジェストを自動検証して `VERIFY_ACCEPT` → `SETTLED` へ遷移し、双方の監査ログを `acp audit-verify` で検証して `VALID` となる。
-2. **攻撃遮断1（Capability権限昇格の拒否）**:
-   - Bob（またはインジェクションされたプロンプト）が許可されていない `docs/delete` ツールや回数上限（6回目）を呼び出そうとした瞬間、Alice Gatewayが `CAPABILITY_VIOLATION` で遮断し監査ログに記録する。
-3. **攻撃遮断2（予算超過の自動停止）**:
-   - Bobの消費トークンが契約の `maxOutputTokens` を超えた瞬間、Bob Gatewayの `QuotaMeter` が実行を強制停止し、無断で継続しない。
-4. **攻撃遮断3（不正成果物・改ざんメッセージの拒否）**:
-   - Relay上でのメッセージ改ざん、または `outputSchema` を満たさない納品物がAlice GatewayのVerifierで確実に `VERIFY_REJECT` される。
+| Alternative                                   | Why it is not the MVP choice                                                                                                                                                                                                                                           |
+| :-------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Python-only**                               | Popular for agent implementations, but a small Gateway daemon, a WebSocket Relay, and a strictly typed CLI distribute more coherently from one TypeScript/Node.js codebase. A Python SDK can be a thin client later, using `spec/` and `conformance/`, from M2 onward. |
+| **Rust or Go for the core**                   | Better for binary distribution and speed, but slower while the protocol is still changing (schema edits and MCP experiments). Port it after the specification settles.                                                                                                 |
+| **Requiring Protobuf / gRPC**                 | RFC 8785 (JCS) canonical JSON is easier to read in an audit log, to check directly against LLM output, and to debug from a browser or a CLI.                                                                                                                           |
+| **Requiring a blockchain or smart contracts** | Gas, wallet management, and latency would block a five-minute local open-source demo. A bilateral signed hash chain already provides the non-repudiation this milestone needs.                                                                                         |
 
 ---
 
-## 4. マイルストーン（M0〜M3）と実装タスク分割案
+## 3. MVP scope (in scope / out of scope)
 
-### 4.1 マイルストーン全体像
-- **M0: Spec & Core Primitives（仕様と暗号・検証コア）** — スキーマ確定、JCS正規化、Ed25519署名、Capability減衰検証、状態機械の純粋関数実装。
-- **M1: MVP End-to-End（2オーナーローカル/Relay協働実証）** — Ledger、Runtime Gateway、HITLゲート、Blind Relay、2オーナーE2Eデモと攻撃遮断テストの完遂。
-- **M2: Hardened Isolation & E2E Encryption（隔離強化と暗号化中継）** — X25519ペイロードE2E暗号化、Docker/OCIコンテナサンドボックスドライバ、多段Capability委譲、Python SDK。
-- **M3: Ecosystem & Settlement Plugins（外部連携・決済・公開透明性ログ）** — Web HITLコンソール、外部Transparency Log（Sigstore Rekor等）アンカー、決済・エスクロープラグインインターフェース。
+### 3.1 MVP goal
 
-### 4.2 M0〜M1 実装タスク分割（Codex 委譲用ワークパッケージ）
+Prove, with running code and tests, that **agents belonging to two different owners (Alice and Bob) can safely delegate, run, automatically accept, and audit one task over an untrusted Relay, without sharing API keys or filesystems**.
 
-初期設計承認後、以下の順序で実装タスク（WP-1 〜 WP-6）を分割して進める。
+### 3.2 What the MVP includes and excludes
 
-| タスクID | 対象パッケージ | 実装内容 | 受入基準（Acceptance Criteria） |
-| :--- | :--- | :--- | :--- |
-| **WP-1** | `spec/`<br>`conformance/` | 残りのJSON Schema（`capability-token`, `envelope`, `audit-entry`）と適合性テストベクタの作成 | 全スキーマとサンプルJSONが `npx ajv validate --spec=draft2020` でエラー0件でPASSすること |
-| **WP-2** | `packages/core` | `did:key` 生成、RFC 8785 JCS正規化、Ed25519署名/検証、`CapabilityToken` の減衰検証器、`TaskContract` 状態機械の実装 | `conformance/` の全テストベクタ（改ざん検知、期限切れ、スコープ外ツール、回数超過、委譲深さ超過、不正状態遷移）に対する単体テストが100% PASSすること |
-| **WP-3** | `packages/ledger` | ハッシュチェーン（`prevEntryHash`）＋双方向署名（`actorSignature` + `counterSignature`）の追記専用ログストアとオフライン検証器の実装 | 任意の1バイト改ざん・順序入れ替え・エントリ欠落・片側署名欠落を100%検知するテストがPASSすること |
-| **WP-4** | `packages/sandbox`<br>`packages/runtime` | Gateway Runtime、HITLポリシー評価器、`ApprovalReceipt` 署名、Capability MCP Proxy、`QuotaMeter`、3段階成果物Verifierの実装 | 未承認の外部副作用呼び出し、Capabilityスコープ外呼び出し、クォータ超過、スキーマ違反成果物がすべてGateway層で遮断されること |
-| **WP-5** | `packages/relay`<br>`cli/` | Blind Relay（InMemoryおよびWebSocket）と `acp` CLI（`keygen`, `validate`, `approve`, `audit-verify`）の実装 | Relayが秘密鍵を一切持たずにエンベロープをルーティングでき、CLIから監査バンドルの正当性を検証できること |
-| **WP-6** | `examples/two-owner-demo` | Owner Alice と Owner Bob の2オーナー協働E2Eシナリオ（正常系1本＋攻撃遮断3本）の結合実装 | ワンコマンドで全シナリオが自動実行され、終了コード `0` かつ双方の監査ログ検証がPASSすること |
+| Area                            | In scope for the MVP (M0–M1)                                                                                                                           | Out of scope (M2 and later)                                                                                        |
+| :------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------- |
+| **Identity**                    | `did:key` (Ed25519 public key) and a local key-generation CLI                                                                                          | A distributed public directory, Web PKI / DNS (`did:web`), and reputation scores                                   |
+| **Contract and state machine**  | `TaskManifest` validation, a two-signature `TaskContract`, and the basic state machine (`PROPOSE` through `SETTLED`)                                   | Multi-round price auctions, and simultaneous agreement among three or more parties                                 |
+| **Authority (Capability)**      | One delegation hop (Requester to Worker), attenuation checks (tool name, argument schema, call cap, expiry), and no redelegation (`maxDepth: 0`)       | Chains of three or more hops (the data structure can represent them; M2 enables them)                              |
+| **Approval (HITL)**             | JSON policy plus an owner signature through the CLI or a callback (`ApprovalReceipt`)                                                                  | A web GUI dashboard and mobile push notifications                                                                  |
+| **Cost and quota**              | BYOK, a `QuotaMeter` hard cap on tokens and call counts, and a signed `UsageReceipt`                                                                   | A fiat or crypto payment plugin (Stripe, X Money, and similar)                                                     |
+| **Isolation, transport, audit** | Local process isolation (a dedicated temp directory and an environment cutoff), a WebSocket/in-memory Relay, and a bilateral signed JSONL audit ledger | A Docker/WASM isolation driver (M2), and automatic anchoring to an external public log such as Sigstore Rekor (M3) |
+
+### 3.3 MVP definition of done
+
+`pnpm --filter @acp/two-owner-demo start` completes the MVP when **one happy path and three blocked attacks** all pass as deterministic tests.
+
+1. **Happy path**:
+   - Owner Alice (requester) signs a `TaskManifest` for "summarize the given documents and write a structured JSON report" and posts it to the Relay.
+   - Owner Bob's (worker) Gateway passes HITL (`ApprovalReceipt`), sends `ACCEPT`, and the `TaskContract` is formed.
+   - Bob's agent uses a read-only `CapabilityToken` granted by Alice (`docs/read` only, at most five calls) to fetch the documents through Alice's Gateway MCP proxy.
+   - Bob `DELIVER`s an artifact (JSON with a SHA-256 hash) and a `UsageReceipt` whose consumed tokens are inside the budget.
+   - Alice's Gateway checks `outputSchema` and the digest, moves `VERIFY_ACCEPT` to `SETTLED`, and `acp audit-verify` reports `VALID` for both audit logs.
+2. **Blocked attack 1 (Capability escalation)**:
+   - The moment Bob (or an injected prompt) calls a forbidden `docs/delete` tool, or a sixth call past the cap, Alice's Gateway blocks it with `CAPABILITY_VIOLATION` and records the audit log.
+3. **Blocked attack 2 (automatic stop on budget overrun)**:
+   - The moment Bob's consumed tokens exceed the contract `maxOutputTokens`, Bob's Gateway `QuotaMeter` force-stops the run. It does not continue without permission.
+4. **Blocked attack 3 (bad artifact or tampered message)**:
+   - A message tampered on the Relay, or a delivery that fails `outputSchema`, is `VERIFY_REJECT`ed by Alice's Gateway verifier.
 
 ---
 
-## 5. 既存OSSフォーク／ベース利用時の構成オプション（詳細は [`OSS_FORK_ANALYSIS.md`](./OSS_FORK_ANALYSIS.md)）
+## 4. Milestones (M0–M3) and the implementation split
 
-ゼロからのスクラッチ実装だけでなく、既存のパーミッシブライセンス（Apache-2.0 / MIT）OSSをベースにする場合のパッケージマッピング方針を以下に示す。
+### 4.1 Milestone overview
 
-### 5.1 推奨ハイブリッド構成（アプローチC：標準SDK依存 ＋ コア選択的フォーク）
-- **Forkせずに `package.json` の依存（Dependencies）として使うもの（アップストリーム追従を優先）**:
-  - `@a2a-js/sdk` (`a2aproject/a2a-js`, Apache-2.0): AgentCard公開、JSON-RPC / HTTP+SSE タスク通信、永続ストア基盤
-  - `@modelcontextprotocol/sdk` (`modelcontextprotocol/typescript-sdk`, MIT): ツール呼び出し（MCP）のクライアント／サーバー基盤
-- **フォークまたは `packages/core` へソース統合（Vendor/Fork）する有力候補**:
-  - `newtro/delegateos` (MIT, TypeScript): Ed25519 + RFC 8785 (`canonicalize`) + `ajv` ベースの単調減衰Capability (`DCT`)、`TaskContract`、5種検収エンジン（`VerificationEngine`）、MCPツール認可ミドルウェアが既に374テスト付きで実装されており、`@acp/core` および `@acp/runtime` の初期実装を大幅に短縮できる（採用時はリポジトリルートへのMITライセンス表記継承を明記）。
-- **参考・部分移植する候補**:
-  - `Cotal-AI/Cotal` (Apache-2.0, TypeScript): `checkpoint()` による中断・再開可能なHITL承認ゲートと、Claude Code / Codex ハーネスコネクタの設計。
-  - `GetBusbar/busbar` (Apache-2.0, Rust): エージェントに生APIキーを渡さずプロキシ境界でトークン予算上限（Quota）を強制する設計。
+- **M0: Spec and core primitives.** Freeze the schemas, JCS canonicalization, Ed25519 signatures, Capability attenuation checks, and a pure-function state machine.
+- **M1: MVP end to end.** Ledger, Runtime Gateway, HITL gates, Blind Relay, the two-owner demo, and the blocked-attack tests.
+- **M2: Hardened isolation and end-to-end encryption.** X25519 payload encryption, a Docker/OCI container sandbox driver, multi-hop Capability delegation, and a Python SDK.
+- **M3: Ecosystem and settlement plugins.** A web HITL console, anchoring to an external transparency log (Sigstore Rekor and similar), and a payment / escrow plugin interface.
+
+### 4.2 M0–M1 work packages
+
+After the initial design is approved, implementation proceeds as WP-1 through WP-6, in this order.
+
+| Task ID  | Package                                  | Work                                                                                                                                               | Acceptance criteria                                                                                                                                                     |
+| :------- | :--------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **WP-1** | `spec/`<br>`conformance/`                | Remaining JSON Schemas (`capability-token`, `envelope`, `audit-entry`) and the conformance vectors                                                 | Every schema and sample JSON passes `npx ajv validate --spec=draft2020` with zero errors                                                                                |
+| **WP-2** | `packages/core`                          | `did:key` generation, RFC 8785 JCS, Ed25519 sign/verify, the `CapabilityToken` attenuation verifier, and the `TaskContract` state machine          | Unit tests pass 100% of the `conformance/` vectors: tamper detection, expiry, out-of-scope tools, call-count overrun, delegation-depth overrun, and illegal transitions |
+| **WP-3** | `packages/ledger`                        | An append-only log with a hash chain (`prevEntryHash`) and bilateral signatures (`actorSignature` + `counterSignature`), plus an offline verifier  | Tests detect a one-byte tamper, a reordered entry, a missing entry, and a missing signature on either side                                                              |
+| **WP-4** | `packages/sandbox`<br>`packages/runtime` | Gateway Runtime, HITL policy evaluator, `ApprovalReceipt` signatures, the Capability MCP proxy, `QuotaMeter`, and the three-step artifact verifier | An unapproved external side effect, an out-of-scope Capability call, a quota overrun, and a schema-invalid artifact are all blocked at the Gateway                      |
+| **WP-5** | `packages/relay`<br>`cli/`               | Blind Relay (in-memory and WebSocket) and the `acp` CLI (`keygen`, `validate`, `approve`, `audit-verify`)                                          | The Relay routes envelopes without holding any private key, and the CLI can verify an audit bundle                                                                      |
+| **WP-6** | `examples/two-owner-demo`                | The two-owner end-to-end scenario for Alice and Bob (one happy path and three blocked attacks)                                                     | One command runs every scenario, exits `0`, and both audit-log verifications pass                                                                                       |
+
+---
+
+## 5. Layout when basing the work on existing OSS (detail in [`OSS_FORK_ANALYSIS.md`](./OSS_FORK_ANALYSIS.md))
+
+The mapping below is for building on existing permissive-license (Apache-2.0 / MIT) projects, as well as for a from-scratch implementation.
+
+### 5.1 Recommended hybrid (approach C: standard SDK dependencies plus a selective core fork)
+
+- **Use as `package.json` dependencies, without a fork (prefer upstream tracking)**:
+  - `@a2a-js/sdk` (`a2aproject/a2a-js`, Apache-2.0): AgentCard publication, JSON-RPC / HTTP+SSE task transport, and the persistence-store base
+  - `@modelcontextprotocol/sdk` (`modelcontextprotocol/typescript-sdk`, MIT): MCP client and server base for tool calls
+- **Strong candidate to fork or vendor into `packages/core`**:
+  - `newtro/delegateos` (MIT, TypeScript): Ed25519 + RFC 8785 (`canonicalize`) + `ajv`, monotonically attenuating Capabilities (`DCT`), `TaskContract`, five acceptance engines (`VerificationEngine`), and MCP tool-authorization middleware, already covered by 374 tests. It can shorten the first `@acp/core` and `@acp/runtime` implementation. If adopted, the MIT license notice must be preserved at the repository root.
+- **Candidates to study or port in part**:
+  - `Cotal-AI/Cotal` (Apache-2.0, TypeScript): a HITL approval gate that can pause and resume through `checkpoint()`, and the design of the Claude Code / Codex harness connectors.
+  - `GetBusbar/busbar` (Apache-2.0, Rust): a proxy boundary that never gives an agent a raw API key, and enforces a token budget cap (quota).
 
 ## M2/M3 delivery map (WP-7–WP-12)
 
-| Work package | Implemented source | Verification |
-| --- | --- | --- |
-| WP-7 adapters/discovery | `packages/adapters/src/`, `packages/core/src/discovery.ts`, `packages/runtime/src/adapter.ts` | All five adapters complete signed two-owner sessions; exact HTTP usage; CLI wrapper parsing; credential isolation |
-| WP-8 relay/invites | `packages/relay/src/fetch.ts`, `index.ts`, `worker.ts`, `wrangler.toml.example` | HTTP, SSE, long poll, WebSocket, registry signatures, expiry/tamper rejection, edge persistence |
-| WP-9 approval/isolation | `packages/runtime/src/approval-providers.ts`, `packages/sandbox/src/container.ts` | Interactive streams, signed webhook, policy sensitive gates, OCI detection/fallback |
-| WP-10 orchestrator/CLI | `packages/runtime/src/session.ts`, `session-audit.ts`, `cli/src/network.ts` | Separate-owner key custody, protocol transitions, per-event AckReceipts and countersigned checkpoint |
-| WP-11 network conformance/demo | `conformance/network-collab.test.ts`, `examples/network-collab/run.mjs` | Actual TCP sessions and separate CLI processes; automatic fetch bridge under EPERM/EACCES |
-| WP-12 onboarding/CI | `README.md`, `.github/workflows/ci.yml` | Node 22 + pnpm frozen install, build, schema validation, tests, original demo |
+| Work package                   | Implemented source                                                                            | Verification                                                                                                      |
+| ------------------------------ | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| WP-7 adapters/discovery        | `packages/adapters/src/`, `packages/core/src/discovery.ts`, `packages/runtime/src/adapter.ts` | All five adapters complete signed two-owner sessions; exact HTTP usage; CLI wrapper parsing; credential isolation |
+| WP-8 relay/invites             | `packages/relay/src/fetch.ts`, `index.ts`, `worker.ts`, `wrangler.toml.example`               | HTTP, SSE, long poll, WebSocket, registry signatures, expiry/tamper rejection, edge persistence                   |
+| WP-9 approval/isolation        | `packages/runtime/src/approval-providers.ts`, `packages/sandbox/src/container.ts`             | Interactive streams, signed webhook, policy sensitive gates, OCI detection/fallback                               |
+| WP-10 orchestrator/CLI         | `packages/runtime/src/session.ts`, `session-audit.ts`, `cli/src/network.ts`                   | Separate-owner key custody, protocol transitions, per-event AckReceipts and countersigned checkpoint              |
+| WP-11 network conformance/demo | `conformance/network-collab.test.ts`, `examples/network-collab/run.mjs`                       | Actual TCP sessions and separate CLI processes; automatic fetch bridge under EPERM/EACCES                         |
+| WP-12 onboarding/CI            | `README.md`, `.github/workflows/ci.yml`                                                       | Node 22 + pnpm frozen install, build, schema validation, tests, original demo                                     |
 
 Dependency direction is `adapters → runtime → relay/core/ledger/sandbox`;
 `cli → adapters/runtime/relay` and the original examples remain supported.

@@ -1,15 +1,17 @@
-# OSS_FORK_ANALYSIS: 既存OSS調査と「スクラッチ vs フォーク vs オーバーレイ」比較設計
+# OSS_FORK_ANALYSIS: Existing OSS Survey and Scratch vs Fork vs Overlay
 
-**結論**: エージェント間通信のワイヤ標準は **Linux Foundation 傘下の `A2A` (`a2aproject/A2A`) に収束** しており（IBM `i-am-bee/acp` や `agntcy/acp-spec` はアーカイブ済み）、通信層をゼロから再発明すべきではない。一方、A2A単体には「異オーナー間の減衰Capability」「BYOKトークン予算上限＋UsageReceipt」「隔離サンドボックス」「双方向ハッシュチェーン監査」が欠けている。
-したがって、**アプローチC（`@a2a-js/sdk` と `@modelcontextprotocol/sdk` を標準ワイヤとしてnpm依存で利用し、その上に私たちの「契約・Capability・HITL・BYOK監査レイヤ」をオーバーレイ実装する。さらに内部のCapability/契約/検収コアはMITライセンスの `newtro/delegateos` をフォーク・構造統合して開発期間を短縮する）** を第1推奨とする。
+**English** | [日本語 (OSS_FORK_ANALYSIS.ja.md)](./OSS_FORK_ANALYSIS.ja.md)
+
+**Conclusion**: The wire standard for agent-to-agent communication has **converged on `A2A` (`a2aproject/A2A`) under the Linux Foundation**. IBM `i-am-bee/acp` and `agntcy/acp-spec` are archived, so the transport layer should not be reinvented from zero. A2A alone still lacks attenuating Capabilities across owners, a BYOK token budget plus a UsageReceipt, an isolated sandbox, and a bilateral hash-chain audit.
+The first recommendation is therefore **approach C: depend on `@a2a-js/sdk` and `@modelcontextprotocol/sdk` as the standard wire, and overlay this repository's contract, Capability, HITL, and BYOK audit layer. Shorten the Capability, contract, and acceptance core by forking and structurally integrating MIT-licensed `newtro/delegateos`.**
 
 ```mermaid
 flowchart TB
-    subgraph Strategy["推奨ハイブリッド構成（Protocol Overlay + Core Fork）"]
+    subgraph Strategy["Recommended hybrid (protocol overlay + core fork)"]
         direction TB
-        Overlay["当リポジトリの独自コア価値 (Security & Governance Overlay)\n- 5箇所の明示的HITL承認ゲート (ApprovalReceipt)\n- BYOK QuotaMeter & 署名付き UsageReceipt\n- 双方向ハッシュチェーン監査ログ (Bilateral Audit Ledger)\n- Untrusted入力の隔離サンドボックス (Sandbox Runner)"]
-        DelegateCore["フォーク/統合候補: newtro/delegateos (MIT, TypeScript)\n- Ed25519 + RFC8785 JCS 正規化\n- 単調減衰 Capability Token (DCT)\n- TaskContract & 複合 VerificationEngine"]
-        WireSDK["標準ワイヤ依存 (フォークせず npm dependency として利用)\n- Agent間通信: @a2a-js/sdk (a2aproject/a2a-js, Apache-2.0)\n- Tool呼び出し: @modelcontextprotocol/sdk (MIT)"]
+        Overlay["This repository's own core value (security and governance overlay)\n- Five explicit HITL approval gates (ApprovalReceipt)\n- BYOK QuotaMeter and signed UsageReceipt\n- Bilateral hash-chain audit log\n- Isolated sandbox for untrusted input"]
+        DelegateCore["Fork / integration candidate: newtro/delegateos (MIT, TypeScript)\n- Ed25519 + RFC 8785 JCS canonicalization\n- Monotonic attenuating Capability token (DCT)\n- TaskContract and composite VerificationEngine"]
+        WireSDK["Standard wire dependencies (npm dependencies, not a fork)\n- Agent transport: @a2a-js/sdk (a2aproject/a2a-js, Apache-2.0)\n- Tool calls: @modelcontextprotocol/sdk (MIT)"]
 
         Overlay --> DelegateCore
         DelegateCore --> WireSDK
@@ -18,88 +20,91 @@ flowchart TB
 
 ---
 
-## 1. 実在する主要OSSリポジトリの調査結果（2026年10月25日 JST時点）
+## 1. Survey of real OSS repositories (as of 2026-10-25 JST)
 
-GitHub APIおよび公式リポジトリで実在・ライセンス・メンテナンス状態・技術スタックを検証した一覧。
+The table below was checked against the GitHub API and the official repositories for existence, license, maintenance, and stack.
 
-### 1.1 標準プロトコル・大手主導リポジトリ
+### 1.1 Standards and large-sponsor repositories
 
-| リポジトリ (`owner/repo`) | Stars | ライセンス | 言語 | 状態 (最終Push JST) | 概要とフォーク評価 |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| [`a2aproject/A2A`](https://github.com/a2aproject/A2A)<br>[`a2aproject/a2a-js`](https://github.com/a2aproject/a2a-js)<br>[`a2aproject/a2a-python`](https://github.com/a2aproject/a2a-python) | ★26,290<br>★647<br>★2,214 | Apache-2.0 | Spec<br>TypeScript<br>Python | Active<br>(2026-10-23〜25) | **Linux Foundation / Google主導のデファクト標準（v1.0）**。`AgentCard`、Task状態遷移、Artifact納品、JSON-RPC/REST/gRPC、永続ストアを提供。<br>👉 **評価**: 通信土管として必須。フォークすると本家v1.x追従コストが高いため、**`@a2a-js/sdk` パッケージ依存または薄いラッパー拡張が最適**。 |
-| [`i-am-bee/acp`](https://github.com/i-am-bee/acp)<br>[`i-am-bee/agentstack`](https://github.com/i-am-bee/agentstack) | ★1,019<br>★1,172 | Apache-2.0 | Python / TS | **`acp` は ARCHIVED**<br>(2025-08-26)<br>`agentstack` は Active | IBM BeeAIのAgent Communication Protocol。**2025年8月にA2Aへ正式統合され `i-am-bee/acp` はアーカイブ済み**。後継の `agentstack` も内部通信をA2Aへ移行済みで、K8s前提の重厚なホスティング基盤。<br>👉 **評価**: **フォーク非推奨**（A2Aを使うべき）。 |
-| [`agent-network-protocol/AgentNetworkProtocol`](https://github.com/agent-network-protocol/AgentNetworkProtocol)<br>[`agent-network-protocol/anp`](https://github.com/agent-network-protocol/anp) | ★1,458<br>★354 | Apache-2.0 | Spec<br>Rust/Py/TS | Active<br>(2026-10-22〜23) | W3C `did:wba`（Webベース分散ID）による**異オーナー間の相互認証・HTTP署名・E2E暗号化通信**に特化。<br>👉 **評価**: 分散ID・E2E暗号化の設計リファレンスとして優秀だが、タスク分割・検収・トークン予算制御は持たない。 |
-| [`agntcy/acp-spec`](https://github.com/agntcy/acp-spec)<br>[`agntcy/dir`](https://github.com/agntcy/dir)<br>[`agntcy/slim`](https://github.com/agntcy/slim) | ★169<br>★199<br>★231 | Apache-2.0 | OpenAPI<br>Go<br>Rust | **`acp-spec` は ARCHIVED**<br>`dir` / `slim` は Active | Cisco / Outshift主導のAGNTCY。旧Agent Connect Protocol (`acp-spec`, `acp-sdk`) はアーカイブ済み。現行はエージェント名鑑 `agntcy/dir`（OASF）とメッセージング層 `agntcy/slim`。<br>👉 **評価**: 名鑑（Discovery）と低レイヤ通信に特化しており、契約・検収・コスト分離のベースには不向き。 |
-| [`modelcontextprotocol/typescript-sdk`](https://github.com/modelcontextprotocol/typescript-sdk) | ★13,651 | MIT | TypeScript | Active<br>(2026-10-25) | エージェントからツール・リソースを呼び出す標準SDK。<br>👉 **評価**: 受託エージェントにスコープ制限付きでツールを公開する **MCP Capability Proxy の基盤としてそのまま依存利用** する。 |
-| [`ucan-wg/spec`](https://github.com/ucan-wg/spec)<br>[`ucan-wg/ts-ucan`](https://github.com/ucan-wg/ts-ucan) | ★293<br>★132 | Apache-2.0 | Spec<br>TypeScript | `ts-ucan` は<br>2024-03 以降停滞 | 分散Capability認可仕様。仕様はv1.0へ進化したが、`ts-ucan` 実装は更新が止まっている。<br>👉 **評価**: `ts-ucan` の直接利用は避け、減衰モデルのみ踏襲してJCS + Ed25519で実装（または下記の `delegateos` を利用）する。 |
+| Repository (`owner/repo`)                                                                                                                                                                        |         Stars          |  License   | Language                     | Status (last push, JST)                                         | Summary and fork assessment                                                                                                                                                                                                                                                                                                                                         |
+| :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :--------------------: | :--------: | :--------------------------- | :-------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [`a2aproject/A2A`](https://github.com/a2aproject/A2A)<br>[`a2aproject/a2a-js`](https://github.com/a2aproject/a2a-js)<br>[`a2aproject/a2a-python`](https://github.com/a2aproject/a2a-python)      | 26,290<br>647<br>2,214 | Apache-2.0 | Spec<br>TypeScript<br>Python | Active<br>(2026-10-23 to 25)                                    | **De facto standard (v1.0), led by the Linux Foundation / Google.** Provides `AgentCard`, task state transitions, artifact delivery, JSON-RPC/REST/gRPC, and a persistence store.<br>**Assessment**: required as the transport pipe. Forking it makes v1.x upstream tracking expensive, so a **dependency on `@a2a-js/sdk`, or a thin wrapper, is the better fit**. |
+| [`i-am-bee/acp`](https://github.com/i-am-bee/acp)<br>[`i-am-bee/agentstack`](https://github.com/i-am-bee/agentstack)                                                                             |     1,019<br>1,172     | Apache-2.0 | Python / TS                  | **`acp` is ARCHIVED**<br>(2025-08-26)<br>`agentstack` is Active | IBM BeeAI's Agent Communication Protocol. **Formally merged into A2A in August 2025, and `i-am-bee/acp` is archived.** The successor `agentstack` has also moved its internal transport to A2A, and it is a heavy Kubernetes-oriented hosting stack.<br>**Assessment**: **do not fork it. Use A2A.**                                                                |
+| [`agent-network-protocol/AgentNetworkProtocol`](https://github.com/agent-network-protocol/AgentNetworkProtocol)<br>[`agent-network-protocol/anp`](https://github.com/agent-network-protocol/anp) |      1,458<br>354      | Apache-2.0 | Spec<br>Rust/Py/TS           | Active<br>(2026-10-22 to 23)                                    | Specialized in **cross-owner mutual authentication, HTTP signatures, and end-to-end encrypted transport** using W3C `did:wba` (web-based decentralized identity).<br>**Assessment**: a strong design reference for decentralized identity and end-to-end encryption. It does not cover task splitting, acceptance, or token budgets.                                |
+| [`agntcy/acp-spec`](https://github.com/agntcy/acp-spec)<br>[`agntcy/dir`](https://github.com/agntcy/dir)<br>[`agntcy/slim`](https://github.com/agntcy/slim)                                      |   169<br>199<br>231    | Apache-2.0 | OpenAPI<br>Go<br>Rust        | **`acp-spec` is ARCHIVED**<br>`dir` / `slim` are Active         | Cisco / Outshift AGNTCY. The old Agent Connect Protocol (`acp-spec`, `acp-sdk`) is archived. Current work is the agent directory `agntcy/dir` (OASF) and the messaging layer `agntcy/slim`.<br>**Assessment**: focused on discovery and low-level transport. A poor base for contracts, acceptance, and cost separation.                                            |
+| [`modelcontextprotocol/typescript-sdk`](https://github.com/modelcontextprotocol/typescript-sdk)                                                                                                  |         13,651         |    MIT     | TypeScript                   | Active<br>(2026-10-25)                                          | The standard SDK for calling tools and resources from an agent.<br>**Assessment**: **depend on it directly** as the base of an MCP Capability Proxy that exposes tools to a worker agent with a limited scope.                                                                                                                                                      |
+| [`ucan-wg/spec`](https://github.com/ucan-wg/spec)<br>[`ucan-wg/ts-ucan`](https://github.com/ucan-wg/ts-ucan)                                                                                     |       293<br>132       | Apache-2.0 | Spec<br>TypeScript           | `ts-ucan` has been<br>stalled since 2024-03                     | A decentralized Capability authorization specification. The spec has moved to v1.0, but the `ts-ucan` implementation has stopped updating.<br>**Assessment**: avoid depending on `ts-ucan` directly. Follow the attenuation model and implement it with JCS + Ed25519, or use `delegateos` below.                                                                   |
 
-### 1.2 委譲・権限減衰・HITL・コスト制御を備えた新興OSS（フォーク有力候補）
+### 1.2 Newer OSS with delegation, attenuation, HITL, and cost control
 
-| リポジトリ (`owner/repo`) | Stars | ライセンス | 言語 | 状態 (最終Push JST) | 概要とフォーク評価 |
-| :--- | :---: | :---: | :--- | :--- | :--- |
-| [`newtro/delegateos`](https://github.com/newtro/delegateos) | ★4 | **MIT**<br>(`package.json`) | TypeScript | Active<br>(2026-10-25) | **当プロジェクトの設計思想と最も近い実装**。Ed25519 + RFC 8785 (`canonicalize`) + `ajv` を用い、単調減衰Capability (`DCT`)、`TaskContract`、タスク分割、5種の検収エンジン (`schema_match`, `deterministic_check`, `human_review` 等)、完了証明 `Attestation`、MCPミドルウェア、A2A `AgentCard` ブローカーを374テスト付きで実装済み。<br>👉 **評価**: **コア層（`@acp/core`）のフォーク／コード統合ベースとして最有力**（ルートへの `LICENSE` ファイル明記のみ追加確認）。 |
-| [`Cotal-AI/Cotal`](https://github.com/Cotal-AI/Cotal) | ★354 | **Apache-2.0** | TypeScript<br>(NATS) | Active<br>(2026-10-25) | 異マシン・異ハーネス（Claude Code, Codex等）をNATS JetStreamメッシュで接続するランタイム。A2Aメッセージ互換、`checkpoint()` による**中断・再開可能なHITL人間承認ゲート**、JWT ACLを実装済み。<br>👉 **評価**: **ランタイム・メッシュ・HITL承認ワークフローのフォーク／参考候補として最有力**。 |
-| [`GetBusbar/busbar`](https://github.com/GetBusbar/busbar) | ★214 | **Apache-2.0** | Rust | Active<br>(2026-10-25) | エージェントに生APIキーを渡さず境界で秘匿し、6大LLMのコスト計量・予算上限強制・MCP/A2Aガバナンスを行うコントロールプレーン。<br>👉 **評価**: **BYOKコスト分離・QuotaMeterの設計モデル（またはサイドカー併用）** として最適。 |
-| [`asap-protocol/asap-protocol`](https://github.com/asap-protocol/asap-protocol) | ★16 | **Apache-2.0** | Python 3.13+<br>/ TS Client | Active<br>(2026-10-25) | Ed25519署名マニフェスト、Capability Grants、WebAuthn HITL承認、Usage meteringを備えたプロトコル実装。<br>👉 **評価**: **もし言語スタックをPython軸に変更する場合の第1フォーク候補**。 |
-
----
-
-## 2. 必須要件に対するギャップ分析（機能マトリクス）
-
-たかぽんさんの必須要件（`ARCHITECTURE.md` の5大安全メカニズム）に対して、各OSSが何をカバーしているかの対応表。
-
-| 必須要件 | `a2aproject/a2a-js` | `newtro/delegateos` | `Cotal-AI/Cotal` | `GetBusbar/busbar` | 当基盤で追加・統合すべき差分 |
-| :--- | :---: | :---: | :---: | :---: | :--- |
-| **1. 異オーナー間ワイヤ通信 & AgentCard** | **◎ (標準)** | ○ (A2A互換) | ◎ (NATS+A2A) | ○ (A2A Proxy) | `@a2a-js/sdk` 準拠＋Untrusted Relay上のX25519 E2E暗号化 |
-| **2a. 減衰可能な Capability Token** | ❌ (OAuthのみ) | **◎ (DCT / Biscuit)** | △ (静的JWT ACL) | ○ (Tool Grant) | `delegateos` のDCTにタスクID束縛・引数Schema検証を統合 |
-| **2b. 5箇所の明示的HITL承認ゲート** | △ (`input-required`状態のみ) | △ (検収時アダプタのみ) | **◎ (`checkpoint`)** | △ | 契約受諾・外部副作用・予算超過・再委譲・検収の5ゲート＋署名付き `ApprovalReceipt` |
-| **2c. TaskContract & 自動検収パイプライン** | △ (Artifact送受のみ) | **◎ (Contract + 5種検収)** | △ | ❌ | Content-Addressed成果物バンドル＋隔離検証サンドボックス |
-| **2d. コスト分離 (BYOK + UsageReceipt)** | ❌ | ○ (`maxBudget`枠のみ) | ○ (ハーネス別BYOK) | **◎ (Key秘匿+予算上限)** | 実行側Gatewayでのトークン計量と署名付き `UsageReceipt` 発行 |
-| **2e. 隔離実行 & 双方向ハッシュチェーン監査** | ❌ | ○ (単方向Attestation) | ○ (JetStream履歴) | ○ (監査Webhook) | コンテナ/プロセス隔離＋**双方向署名（Countersigned）ハッシュチェーン台帳** |
+| Repository (`owner/repo`)                                                       | Stars |           License           | Language                    | Status (last push, JST) | Summary and fork assessment                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| :------------------------------------------------------------------------------ | :---: | :-------------------------: | :-------------------------- | :---------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`newtro/delegateos`](https://github.com/newtro/delegateos)                     |   4   | **MIT**<br>(`package.json`) | TypeScript                  | Active<br>(2026-10-25)  | **The implementation closest to this project's design.** Uses Ed25519 + RFC 8785 (`canonicalize`) + `ajv`. Already implements monotonic attenuating Capabilities (`DCT`), `TaskContract`, task splitting, five acceptance engines (`schema_match`, `deterministic_check`, `human_review`, and others), a completion `Attestation`, MCP middleware, and an A2A `AgentCard` broker, with 374 tests.<br>**Assessment**: **the strongest base to fork or integrate into the core layer (`@acp/core`)**. Confirm that a root `LICENSE` notice is added. |
+| [`Cotal-AI/Cotal`](https://github.com/Cotal-AI/Cotal)                           |  354  |       **Apache-2.0**        | TypeScript<br>(NATS)        | Active<br>(2026-10-25)  | A runtime that connects different machines and harnesses (Claude Code, Codex, and others) over a NATS JetStream mesh. Implements A2A-compatible messages, a **HITL approval gate that can pause and resume through `checkpoint()`**, and JWT ACLs.<br>**Assessment**: **the strongest fork or reference candidate for the runtime, the mesh, and the HITL approval workflow.**                                                                                                                                                                     |
+| [`GetBusbar/busbar`](https://github.com/GetBusbar/busbar)                       |  214  |       **Apache-2.0**        | Rust                        | Active<br>(2026-10-25)  | A control plane that keeps raw API keys off the agent, meters cost for six major LLMs, enforces budget caps, and governs MCP/A2A.<br>**Assessment**: **the right design model (or sidecar) for BYOK cost separation and QuotaMeter.**                                                                                                                                                                                                                                                                                                              |
+| [`asap-protocol/asap-protocol`](https://github.com/asap-protocol/asap-protocol) |  16   |       **Apache-2.0**        | Python 3.13+<br>/ TS client | Active<br>(2026-10-25)  | A protocol implementation with Ed25519-signed manifests, Capability grants, WebAuthn HITL approval, and usage metering.<br>**Assessment**: **the first fork candidate if the language stack moves to Python.**                                                                                                                                                                                                                                                                                                                                     |
 
 ---
 
-## 3. 3つの開発アプローチの比較評価
+## 2. Gap matrix against the required controls
 
-### アプローチA：フルスクラッチ開発（独自ワイヤプロトコル＋独自コア）
-- **概要**: `ARCHITECTURE.md` の仕様に基づき、通信エンベロープから暗号コア・Relay・RuntimeまですべてゼロからTypeScriptで実装する。
-- **メリット**: 不要なコードや外部依存が一切なく、設計の純度とシンプルさが最も高い。
-- **デメリット**: A2A等の既存エコシステムと直接通信するためのアダプタを別途書く必要があり、初期実装（M0〜M1）に工数がかかる。
+Coverage of the five safety mechanisms in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-### アプローチB：単一OSSのハードフォーク（例：`a2a-js`、`Cotal`、または `delegateos` を丸ごとForkして改造）
-- **概要**: 既存リポジトリをGitHub上でForkし、そのディレクトリ構造のまま直接機能を追加・書き換える。
-- **メリット**: 初日から動くコードベースとテストが手に入る。
-- **デメリット**:
-  - `a2a-js` をForkした場合：通信SDKの内部構造にセキュリティ・契約・サンドボックス層が密結合し、本家A2A仕様のアップデート時にマージコンフリクトが多発する。
-  - `Cotal` をForkした場合：NATSサーバー依存が必須となり、「ローカルやシンプルなWebSocket Relayだけで最小構成で動かす」という手軽さが損なわれる。
-
-### アプローチC（★推奨）：標準プロトコル準拠オーバーレイ ＋ コアモジュールの選択的フォーク統合
-- **概要**:
-  1. **ワイヤ通信とツール接続はForkせず標準SDK（`@a2a-js/sdk` + `@modelcontextprotocol/sdk`）をそのまま利用** し、A2Aの `Message` / `Task` / `Artifact` の拡張メタデータ（または署名エンベロープ）として当基盤の `TaskContract`・`CapabilityToken`・`UsageReceipt`・`ApprovalReceipt` を載せる。
-  2. **最も工数がかかる「Capability減衰・契約・検収・JCS署名」の実装（`@acp/core`）は、MITライセンスの `newtro/delegateos` のモジュール構造（DCT, Contract, Verification, Attestation, MCP Middleware）をベースとして取り込み（またはForkしてモノレポ化）**、そこに不足している「BYOK `UsageReceipt`」「5つのHITLゲート」「双方向ハッシュチェーン台帳」「隔離サンドボックス」を集中実装する。
-- **メリット**:
-  - **開発工数を約50〜60%削減** しつつ、**Linux Foundation標準のA2Aエコシステムと100%相互運用可能** になる。
-  - `@a2a-js/sdk` や `@modelcontextprotocol/sdk` をForkしないため、`pnpm update` だけでアップストリームの更新に無痛で追従できる。
-  - 私たちが本当に作るべき独自価値（異オーナー間の不信境界制御・HITL・BYOKコスト証明・隔離実行・双方向監査）に100%エンジニアリング資源を集中できる。
-
-### 3アプローチ比較まとめ表
-
-| 評価軸 | A: フルスクラッチ | B: 単一リポジトリ丸ごとFork | C: 標準SDKオーバーレイ＋コア選択的統合 (推奨) |
-| :--- | :---: | :---: | :---: |
-| **MVP到達スピード** | △ (中〜遅) | ◎ (速) | **◎ (速: コアの6割を再利用)** |
-| **A2A / MCP エコシステム互換性** | △ (自前ブリッジ要) | ○ | **◎ (公式SDKそのまま)** |
-| **アップストリーム追従性** | ー | ❌ (コンフリクト多発) | **◎ (SDKはnpm更新のみ)** |
-| **設計のクリーンさ・境界規律** | ◎ | △ (元設計に引きずられる) | **◎ (モノレポのパッケージ境界で分離)** |
-| **ライセンスの明快さ** | ◎ | ○ | **◎ (Apache-2.0 / MIT のみで構成)** |
+| Required control                                            |        `a2aproject/a2a-js`         |         `newtro/delegateos`          |      `Cotal-AI/Cotal`       |          `GetBusbar/busbar`           | Delta this platform should add or integrate                                                                                            |
+| :---------------------------------------------------------- | :--------------------------------: | :----------------------------------: | :-------------------------: | :-----------------------------------: | :------------------------------------------------------------------------------------------------------------------------------------- |
+| **1. Cross-owner wire transport and AgentCard**             |     **Covered (the standard)**     |       Partial (A2A-compatible)       |    Covered (NATS + A2A)     |          Partial (A2A proxy)          | Conform to `@a2a-js/sdk`, plus X25519 end-to-end encryption on an untrusted Relay                                                      |
+| **2a. Attenuating Capability token**                        |        Missing (OAuth only)        |     **Covered (DCT / Biscuit)**      |    Weak (static JWT ACL)    |         Partial (tool grant)          | Integrate task-id binding and argument-schema checks into the `delegateos` DCT                                                         |
+| **2b. Five explicit HITL approval gates**                   | Weak (`input-required` state only) | Weak (acceptance-time adapter only)  | **Covered (`checkpoint`)**  |                 Weak                  | Five gates — contract acceptance, external side effect, budget overrun, redelegation, and acceptance — plus a signed `ApprovalReceipt` |
+| **2c. TaskContract and automatic acceptance pipeline**      | Weak (artifact send/receive only)  | **Covered (contract + five checks)** |            Weak             |                Missing                | A content-addressed artifact bundle plus an isolated verification sandbox                                                              |
+| **2d. Cost separation (BYOK + UsageReceipt)**               |              Missing               |   Partial (`maxBudget` slot only)    | Partial (BYOK per harness)  | **Covered (key hiding + budget cap)** | Token metering on the executor Gateway and a signed `UsageReceipt`                                                                     |
+| **2e. Isolated execution and a bilateral hash-chain audit** |              Missing               |    Partial (one-way attestation)     | Partial (JetStream history) |        Partial (audit webhook)        | Container/process isolation plus a **countersigned hash-chain ledger**                                                                 |
 
 ---
 
-## 4. 推奨アプローチCを採る場合の具体的な組込・差し替え設計
+## 3. Comparison of the three development approaches
 
-| モノレポ内の対象パッケージ | ベースにする既存OSS / SDK | そのまま活かす部分（Keep） | 差し替え・新規追加する部分（Replace / Add） |
-| :--- | :--- | :--- | :--- |
-| **`packages/core`** | `newtro/delegateos`<br>(MIT, TypeScript) | - `@noble/ed25519` + `canonicalize` (RFC 8785 JCS)<br>- 単調減衰Capability (`DCT`) の検証ロジック<br>- `TaskContract` & `VerificationEngine` (`schema_match`, `deterministic_check`) | - `TaskManifest` を当プロジェクトのJSON Schema (`spec/task-manifest.schema.json`) に統一<br>- `ApprovalReceipt` と `UsageReceipt` の署名型を追加 |
-| **`packages/ledger`** | 新規実装（軽量） | （`delegateos` の `Attestation` 型を流用） | - `prevEntryHash` と送受信双方の署名（`actorSignature` + `counterSignature`）を持つ追記専用ハッシュチェーン台帳を実装 |
-| **`packages/runtime`** | `@a2a-js/sdk` (Apache-2.0)<br>`@modelcontextprotocol/sdk` (MIT)<br>`delegateos` MCP middleware | - A2A Client/Server 通信ハンドラ<br>- MCP Tool Call のCapabilityインターセプター | - **5箇所のHITL承認ゲートエンジン**（`Cotal` の `checkpoint` 思想を参考にJSONポリシー＋署名承認を実装）<br>- **BYOK `QuotaMeter`**（`GetBusbar/busbar` 風のトークン上限遮断＋`UsageReceipt` 発行） |
-| **`packages/sandbox`** | 新規実装 | ー | - 受託タスクごとの隔離一時ディレクトリ・環境変数遮断・ネットワーク制限ランナー |
-| **`packages/relay`** | `@a2a-js/sdk` トランスポート + WebSocket | - A2A JSON-RPC / SSE メッセージ配送 | - Blind Relay化（署名エンベロープ検証＋M2でのX25519 E2E暗号化ルーティング） |
+### Approach A: full scratch (a private wire protocol and a private core)
+
+- **Summary**: Implement the transport envelope, the cryptographic core, the Relay, and the Runtime from zero in TypeScript, following [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+- **Advantage**: No unused code and no external dependencies. The design stays the purest and the simplest.
+- **Disadvantage**: An adapter is still required to speak to an existing ecosystem such as A2A, so M0–M1 takes longer.
+
+### Approach B: hard fork of a single OSS project (for example `a2a-js`, `Cotal`, or all of `delegateos`)
+
+- **Summary**: Fork an existing repository on GitHub and add or rewrite features inside its directory layout.
+- **Advantage**: A working codebase and its tests are available on day one.
+- **Disadvantage**:
+  - Forking `a2a-js` couples the security, contract, and sandbox layers to the internals of a transport SDK, so upstream A2A updates produce frequent merge conflicts.
+  - Forking `Cotal` requires a NATS server, which removes the option to run the smallest setup on a local or simple WebSocket Relay.
+
+### Approach C (recommended): a standards-compliant overlay plus a selective core fork
+
+- **Summary**:
+  1. **Use the standard SDKs for wire transport and tool connection without forking them (`@a2a-js/sdk` + `@modelcontextprotocol/sdk`).** Carry this platform's `TaskContract`, `CapabilityToken`, `UsageReceipt`, and `ApprovalReceipt` as extension metadata (or a signed envelope) on A2A `Message` / `Task` / `Artifact`.
+  2. **Take the expensive Capability attenuation, contract, acceptance, and JCS signature implementation (`@acp/core`) from the module structure of MIT-licensed `newtro/delegateos` (DCT, Contract, Verification, Attestation, MCP middleware), by vendoring it or forking it into the monorepo.** Concentrate new work on the missing BYOK `UsageReceipt`, the five HITL gates, the bilateral hash-chain ledger, and the isolated sandbox.
+- **Advantage**:
+  - Cuts development effort by about **50–60%**, and stays **interoperable with the Linux Foundation A2A ecosystem**.
+  - Because `@a2a-js/sdk` and `@modelcontextprotocol/sdk` are not forked, `pnpm update` follows upstream.
+  - Engineering time stays on the value this repository actually has to build: cross-owner distrust boundaries, HITL, BYOK cost proof, isolated execution, and a bilateral audit.
+
+### Comparison of the three approaches
+
+| Axis                                           |    A: full scratch     |   B: fork one whole repository    | C: standard SDK overlay plus selective core integration (recommended) |
+| :--------------------------------------------- | :--------------------: | :-------------------------------: | :-------------------------------------------------------------------: |
+| **Speed to an MVP**                            |     Slow to medium     |               Fast                |                 **Fast: reuse about 60% of the core**                 |
+| **A2A / MCP ecosystem compatibility**          | Needs a private bridge |              Partial              |                **Uses the official SDKs as they are**                 |
+| **Upstream tracking**                          |     Not applicable     |      Conflicts are frequent       |                   **SDK updates are `pnpm update`**                   |
+| **Design cleanliness and boundary discipline** |         Strong         | Pulled toward the original design |             **Separated by monorepo package boundaries**              |
+| **License clarity**                            |         Strong         |            Acceptable             |                      **Apache-2.0 and MIT only**                      |
+
+---
+
+## 4. Concrete keep / replace map if approach C is chosen
+
+| Monorepo package       | Existing OSS / SDK used as the base                                                            | Keep                                                                                                                                                                                                           | Replace or add                                                                                                                                                                                                  |
+| :--------------------- | :--------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`packages/core`**    | `newtro/delegateos`<br>(MIT, TypeScript)                                                       | - `@noble/ed25519` + `canonicalize` (RFC 8785 JCS)<br>- Verification logic for monotonic attenuating Capabilities (`DCT`)<br>- `TaskContract` and `VerificationEngine` (`schema_match`, `deterministic_check`) | - Align `TaskManifest` with this project's JSON Schema (`spec/task-manifest.schema.json`)<br>- Add signed types for `ApprovalReceipt` and `UsageReceipt`                                                        |
+| **`packages/ledger`**  | New, and small                                                                                 | (Reuse the `delegateos` `Attestation` type)                                                                                                                                                                    | - An append-only hash-chain ledger with `prevEntryHash` and signatures from both the sender and the receiver (`actorSignature` + `counterSignature`)                                                            |
+| **`packages/runtime`** | `@a2a-js/sdk` (Apache-2.0)<br>`@modelcontextprotocol/sdk` (MIT)<br>`delegateos` MCP middleware | - A2A client/server transport handlers<br>- A Capability interceptor on MCP tool calls                                                                                                                         | - **A five-gate HITL approval engine** (JSON policy plus a signed approval, following the `checkpoint` idea from `Cotal`)<br>- **A BYOK `QuotaMeter`** (a Busbar-style token cap, plus `UsageReceipt` issuance) |
+| **`packages/sandbox`** | New                                                                                            | —                                                                                                                                                                                                              | - A per-task runner with an isolated temporary directory, an environment cutoff, and a network limit                                                                                                            |
+| **`packages/relay`**   | `@a2a-js/sdk` transports + WebSocket                                                           | - A2A JSON-RPC / SSE message delivery                                                                                                                                                                          | - Turn it into a Blind Relay (signed-envelope verification, and X25519 end-to-end encrypted routing in M2)                                                                                                      |
