@@ -1,0 +1,785 @@
+// SPDX-License-Identifier: Apache-2.0
+import { existsSync } from 'node:fs';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  createContract,
+  createInviteToken,
+  createRelayAuthToken,
+  createSignedAgentCard,
+  digest,
+  generateKeyPair,
+  parseAndVerifyInviteToken,
+  signApproval,
+  signEnvelope,
+  signPayload,
+  signUsage,
+  validateOutput,
+  validateRelayEndpointUrl,
+  verifyContract,
+  verifyRelayAuthToken,
+  verifySigned,
+} from '../packages/core/src/index.js';
+import type {
+  Json,
+  KeyPair,
+  Signed,
+  SignedEnvelope,
+  TaskManifest,
+} from '../packages/core/src/index.js';
+import { InMemoryRelay, createRelayFetchHandler } from '../packages/relay/src/index.js';
+import {
+  ApprovalGate,
+  RequesterClient,
+  VerificationEngine,
+  buildTaskManifest,
+  createDelivery,
+} from '../packages/runtime/src/index.js';
+import type { Delivery } from '../packages/runtime/src/index.js';
+import {
+  ClaudeCodeAdapter,
+  CommandAgentAdapter,
+  SandboxAgentAdapter,
+  parseJsonDeliverable,
+  resolveCommand,
+  runCommand,
+} from '../packages/adapters/src/index.js';
+import { startCredentialProxy } from '../packages/adapters/src/credential-proxy.js';
+import type { AgentTaskContext, CommandRequest } from '../packages/adapters/src/index.js';
+import {
+  runContainerOrSubprocessSandbox,
+  runSandbox,
+  sanitizedEnvironment,
+} from '../packages/sandbox/src/index.js';
+
+const secretNames = [
+  'OPENAI_API_KEY',
+  'GITHUB_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'AWS_SECRET_ACCESS_KEY',
+] as const;
+const secretValues = Object.fromEntries(secretNames.map((name) => [name, `proof-secret-${name}`]));
+const cleanup: (() => Promise<unknown>)[] = [];
+afterEach(async () => {
+  for (const fn of cleanup.splice(0).reverse()) await fn();
+});
+
+function remember<T>(value: T, close: () => Promise<unknown>): T {
+  cleanup.push(close);
+  return value;
+}
+
+async function workspace(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'acp-proof-'));
+  return remember(dir, () => rm(dir, { recursive: true, force: true }));
+}
+
+function manifestFor(
+  owner: KeyPair,
+  worker: KeyPair,
+  outputSchema: TaskManifest['io']['outputSchema'] = {},
+): TaskManifest {
+  return buildTaskManifest({
+    ownerDid: owner.did,
+    workerDid: worker.did,
+    title: 'Security proof',
+    description: 'Adversarial task',
+    outputSchema,
+  });
+}
+
+async function taskContext(
+  input: Json,
+  manifest: TaskManifest,
+  reportIsolation?: (level: string) => void,
+): Promise<AgentTaskContext> {
+  return {
+    taskId: manifest.taskId,
+    manifest,
+    input,
+    workspaceDir: await workspace(),
+    signal: AbortSignal.timeout(15000),
+    callTool: async () => {
+      throw new Error('TOOL_DENIED');
+    },
+    reportUsage: () => {},
+    reportIsolation,
+  };
+}
+
+function withHostSecrets<T>(run: () => Promise<T>): Promise<T> {
+  const previous = Object.fromEntries(secretNames.map((name) => [name, process.env[name]]));
+  for (const name of secretNames) process.env[name] = secretValues[name];
+  return run().finally(() => {
+    for (const name of secretNames) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  });
+}
+
+function assertNoSecrets(text: string): void {
+  for (const value of Object.values(secretValues)) expect(text).not.toContain(value);
+}
+
+function flipSignature<T>(signed: Signed<T>): Signed<T> {
+  const copy = structuredClone(signed);
+  const body = copy.signature.signature;
+  // Flip a character that carries signature bits. The final base64url character
+  // can encode unused padding bits and is not a reliable one-byte mutation.
+  const index = body.indexOf(':') + 2;
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  const replacement = alphabet[(alphabet.indexOf(body[index]) + 1) % alphabet.length];
+  copy.signature.signature = body.slice(0, index) + replacement + body.slice(index + 1);
+  return copy;
+}
+
+function envelopeFor(sender: KeyPair, recipientDid: string, taskId = 'task_proof'): SignedEnvelope {
+  return signEnvelope(
+    { taskId, recipientDid, seq: 0, eventType: 'PING', payload: { taskId } },
+    sender,
+  );
+}
+
+describe('Proof 1: memory and environment secret exfiltration', () => {
+  it('keeps host secrets out of the command worker environment and task envelope', async () => {
+    await withHostSecrets(async () => {
+      const owner = generateKeyPair();
+      const worker = generateKeyPair();
+      const manifest = manifestFor(owner, worker);
+      const script = [
+        'let s="";',
+        'process.stdin.on("data",b=>s+=b);',
+        'process.stdin.on("end",()=>{',
+        `const names=${JSON.stringify([...secretNames])};`,
+        'const leaked=names.filter(name=>process.env[name]);',
+        'console.log(JSON.stringify({leaked,stdin:s,nodeOptions:process.env.NODE_OPTIONS??null}));',
+        '});',
+      ].join('');
+      const adapter = new CommandAgentAdapter({ command: [process.execPath, '-e', script] });
+      const input = { note: 'env dump', token: secretValues.OPENAI_API_KEY };
+      const context = await taskContext({ ...input, drop: secretValues.GITHUB_TOKEN }, manifest);
+      delete (context.input as { token?: string }).token;
+      context.input = { note: 'env dump' };
+      const output = await adapter.executeTask(context);
+      expect(output).toMatchObject({ leaked: [], nodeOptions: null });
+      const printed = JSON.stringify(output);
+      assertNoSecrets(printed);
+      expect(printed).toContain('env dump');
+      const env = sanitizedEnvironment(context.workspaceDir);
+      for (const name of secretNames) expect(env).not.toHaveProperty(name);
+      expect(env).not.toHaveProperty('NODE_OPTIONS');
+      expect(env).not.toHaveProperty('PATH');
+    });
+  });
+
+  it('does not expose process or host secrets to sandboxed guest code', async () => {
+    await withHostSecrets(async () => {
+      await expect(
+        runSandbox({
+          code: 'return process.env.OPENAI_API_KEY;',
+          input: { who: 'guest' },
+          timeoutMs: 2000,
+          onTool: async () => null,
+        }),
+      ).rejects.toThrow(/process is not defined/);
+      const echoed = await runSandbox({
+        code: 'return input;',
+        input: { who: 'guest' },
+        timeoutMs: 2000,
+        onTool: async () => null,
+      });
+      assertNoSecrets(JSON.stringify(echoed));
+      expect(echoed).toEqual({ who: 'guest' });
+    });
+  });
+
+  it('rejects forged, other-task, and closed credential handles', async () => {
+    const realKey = secretValues.OPENAI_API_KEY;
+    const otherKey = secretValues.GITHUB_TOKEN;
+    const seen: { authorization: string | null; body: string }[] = [];
+    const signal = AbortSignal.timeout(5000);
+    const proxy = await startCredentialProxy({
+      apiKey: realKey,
+      baseUrl: 'https://api.openai.com/v1',
+      style: 'openai',
+      signal,
+      fetch: async (_url, init) => {
+        seen.push({
+          authorization: new Headers(init?.headers).get('authorization'),
+          body: String(init?.body ?? ''),
+        });
+        return Response.json({ usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      },
+    });
+    const other = await startCredentialProxy({
+      apiKey: otherKey,
+      baseUrl: 'https://api.openai.com/v1',
+      style: 'openai',
+      signal,
+      fetch: async () => Response.json({ ok: true }),
+    });
+    cleanup.push(
+      () => proxy.close(),
+      () => other.close(),
+    );
+    const redeem = (token: string) =>
+      fetch(proxy.url + '/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + token, 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: 'task' }),
+      });
+    expect((await redeem('forged-handle')).status).toBe(401);
+    expect((await redeem(other.token)).status).toBe(401);
+    expect(other.token).not.toContain(otherKey);
+    expect(proxy.token).not.toContain(realKey);
+    const accepted = await redeem(proxy.token);
+    expect(accepted.status).toBe(200);
+    assertNoSecrets(await accepted.text());
+    expect(seen).toEqual([
+      { authorization: 'Bearer ' + realKey, body: JSON.stringify({ prompt: 'task' }) },
+    ]);
+    expect(seen[0].body).not.toContain(realKey);
+    await proxy.close();
+    await expect(redeem(proxy.token)).rejects.toThrow();
+  });
+
+  it('forwards only the task-scoped handle into a Claude subprocess', async () => {
+    await withHostSecrets(async () => {
+      const realKey = secretValues.ANTHROPIC_API_KEY;
+      const dir = await workspace();
+      const script = join(dir, 'mock-claude.cjs');
+      await writeFile(
+        script,
+        `#!${process.execPath}\n` +
+          'let input="";process.stdin.on("data",b=>input+=b);process.stdin.on("end",async()=>{' +
+          `const leaked=process.env.ANTHROPIC_API_KEY===${JSON.stringify(realKey)};` +
+          'const response=await fetch(process.env.ANTHROPIC_BASE_URL+"/v1/messages",{method:"POST",headers:{"x-api-key":process.env.ANTHROPIC_API_KEY,"content-type":"application/json"},body:"{}"});' +
+          'console.log(JSON.stringify({result:JSON.stringify({leaked,status:response.status}),usage:{input_tokens:1,output_tokens:1}}));' +
+          '});\n',
+        { mode: 0o700 },
+      );
+      let hostSaw = '';
+      const adapter = new ClaudeCodeAdapter({
+        binaryPath: script,
+        apiKey: realKey,
+        fetch: async (_url, init) => {
+          hostSaw = new Headers(init?.headers).get('x-api-key') ?? '';
+          return Response.json({ usage: { input_tokens: 1, output_tokens: 1 } });
+        },
+      });
+      const owner = generateKeyPair();
+      const worker = generateKeyPair();
+      const output = await adapter.executeTask(
+        await taskContext({ prompt: 'report' }, manifestFor(owner, worker)),
+      );
+      expect(output).toEqual({ leaked: false, status: 200 });
+      expect(hostSaw).toBe(realKey);
+      assertNoSecrets(JSON.stringify(output));
+    });
+  });
+});
+
+describe('Proof 2: command injection and path traversal', () => {
+  const payloads = [
+    '$(touch /tmp/pwn)',
+    '`id`',
+    '; rm -rf /',
+    '| cat /etc/passwd',
+    '../../etc/passwd',
+    '__proto__',
+  ];
+
+  it('passes adversarial argv through spawn without invoking a shell', async () => {
+    const marker = join(tmpdir(), `acp-proof-${crypto.randomUUID()}`);
+    const injected = [
+      `$(touch ${marker})`,
+      '`id`',
+      '; rm -rf /',
+      '| cat /etc/passwd',
+      '../../etc/passwd',
+    ];
+    const result = await runCommand({
+      command: process.execPath,
+      args: [
+        '-e',
+        'let s="";process.stdin.on("data",b=>s+=b);process.stdin.on("end",()=>console.log(JSON.stringify({argv:process.argv.slice(1),stdin:s})));',
+        ...injected,
+      ],
+      cwd: tmpdir(),
+      env: sanitizedEnvironment(tmpdir()),
+      input: injected.join('\n'),
+      signal: AbortSignal.timeout(5000),
+      timeoutMs: 5000,
+    });
+    expect(existsSync(marker)).toBe(false);
+    const parsed = JSON.parse(result.stdout) as { argv: string[]; stdin: string };
+    expect(parsed.argv).toEqual(injected);
+    expect(parsed.stdin).toBe(injected.join('\n'));
+    await expect(resolveCommand('../../etc/passwd')).rejects.toThrow(
+      'COMMAND_MUST_BE_ABSOLUTE_OR_ON_PATH',
+    );
+    await expect(resolveCommand('$(touch /tmp/pwn)')).rejects.toThrow(
+      'COMMAND_MUST_BE_ABSOLUTE_OR_ON_PATH',
+    );
+    await expect(resolveCommand('; rm -rf /')).rejects.toThrow(
+      'COMMAND_MUST_BE_ABSOLUTE_OR_ON_PATH',
+    );
+    await expect(resolveCommand('`id`')).rejects.toThrow('COMMAND_NOT_FOUND');
+  });
+
+  it('keeps adversarial task input on stdin and inside the workspace file', async () => {
+    const owner = generateKeyPair();
+    const worker = generateKeyPair();
+    const manifest = manifestFor(owner, worker);
+    const input = {
+      text: payloads.join(' '),
+      path: '../../etc/passwd',
+      __proto__: { admin: true },
+    };
+    const seen: CommandRequest[] = [];
+    const adapter = new CommandAgentAdapter({
+      command: [process.execPath, '-e', 'console.log(JSON.stringify({ok:true}))'],
+      runner: async (request) => {
+        seen.push(request);
+        return { stdout: JSON.stringify({ ok: true }), exitCode: 0 };
+      },
+    });
+    const context = await taskContext(input, manifest);
+    expect(await adapter.executeTask(context)).toEqual({ ok: true });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].command).toBe(process.execPath);
+    expect(seen[0].command).not.toBe('/bin/sh');
+    expect(seen[0].args.some((arg) => payloads.some((payload) => arg.includes(payload)))).toBe(
+      false,
+    );
+    expect(seen[0].input).toContain('../../etc/passwd');
+    expect(seen[0].input).toContain('$(touch /tmp/pwn)');
+    const files = await readdir(context.workspaceDir);
+    expect(files).toEqual(['input.json']);
+    const stored = await readFile(join(context.workspaceDir, 'input.json'), 'utf8');
+    expect(stored).toContain('../../etc/passwd');
+    expect(stored).not.toContain('/bin/sh');
+  });
+
+  it('rejects traversal and prototype-pollution shapes that fail the output schema', () => {
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      required: ['ok'],
+      properties: { ok: { type: 'boolean' } },
+    };
+    expect(validateOutput(schema, { ok: true, path: '../../etc/passwd' })).toBe(false);
+    expect(
+      validateOutput({ type: 'string', pattern: '^[A-Za-z0-9._-]+$' }, '../../etc/passwd'),
+    ).toBe(false);
+    expect(
+      validateOutput({ type: 'string', pattern: '^[A-Za-z0-9._-]+$' }, '$(touch /tmp/pwn)'),
+    ).toBe(false);
+    const parsed = JSON.parse('{"__proto__":{"admin":true},"ok":true}') as { ok: boolean };
+    expect(parseJsonDeliverable(JSON.stringify(parsed))).toMatchObject({ ok: true });
+    expect(({} as { admin?: boolean }).admin).toBeUndefined();
+    expect(Object.prototype).not.toHaveProperty('admin');
+    expect(validateOutput(schema, parsed)).toBe(false);
+    expect(({} as { admin?: boolean }).admin).toBeUndefined();
+  });
+});
+
+describe('Proof 3: cross-session state bleed and isolation downgrade', () => {
+  it('rejects cross-session relay polls and does not mix concurrent inboxes', async () => {
+    const alice = generateKeyPair();
+    const bob = generateKeyPair();
+    const eve = generateKeyPair();
+    const relay = new InMemoryRelay({ requireAuth: true });
+    const toBob = envelopeFor(alice, bob.did, 'task_bob');
+    const toEve = envelopeFor(alice, eve.did, 'task_eve');
+    await Promise.all([
+      Promise.resolve().then(() => relay.send(toBob)),
+      Promise.resolve().then(() => relay.send(toEve)),
+    ]);
+    expect(() => relay.receive(bob.did, createRelayAuthToken(eve))).toThrow('RELAY_UNAUTHORIZED');
+    expect(() => relay.receive(eve.did, createRelayAuthToken(bob))).toThrow('RELAY_UNAUTHORIZED');
+    const [bobMail, eveMail] = await Promise.all([
+      Promise.resolve().then(() => relay.receive(bob.did, createRelayAuthToken(bob))),
+      Promise.resolve().then(() => relay.receive(eve.did, createRelayAuthToken(eve))),
+    ]);
+    expect(bobMail).toEqual(toBob);
+    expect(eveMail).toEqual(toEve);
+    expect(relay.receive(bob.did, createRelayAuthToken(bob))).toBeUndefined();
+    expect(relay.receive(eve.did, createRelayAuthToken(eve))).toBeUndefined();
+    expect(() => relay.send(toBob)).toThrow('REPLAYED_ENVELOPE');
+    const handler = createRelayFetchHandler({ relay });
+    const later = envelopeFor(alice, bob.did, 'task_bob_later');
+    relay.send(later);
+    const denied = await handler(
+      new Request('https://relay.example/envelopes?recipient=' + encodeURIComponent(bob.did), {
+        headers: { authorization: 'Bearer ' + createRelayAuthToken(eve) },
+      }),
+    );
+    expect(denied.status).toBe(401);
+    const allowed = await handler(
+      new Request('https://relay.example/envelopes?recipient=' + encodeURIComponent(bob.did), {
+        headers: { authorization: 'Bearer ' + createRelayAuthToken(bob) },
+      }),
+    );
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toEqual(later);
+  });
+
+  it('reports the runtime isolation level instead of the task claim', async () => {
+    const claimed = await runContainerOrSubprocessSandbox({
+      isolationLevel: 'oci_container',
+      runtime: null,
+      timeoutMs: 2000,
+      input: { value: 1 },
+      code: 'return { effectiveIsolationLevel: "oci_container", claim: "container" };',
+      onTool: async () => null,
+    });
+    expect(claimed.effectiveIsolationLevel).toBe('subprocess_restricted');
+    expect(claimed.output).toEqual({
+      effectiveIsolationLevel: 'oci_container',
+      claim: 'container',
+    });
+    const owner = generateKeyPair();
+    const worker = generateKeyPair();
+    const manifest = manifestFor(owner, worker);
+    manifest.sandboxPolicy.isolationLevel = 'subprocess_restricted';
+    let reported = '';
+    const output = await new SandboxAgentAdapter(
+      'return { effectiveIsolationLevel: "container" };',
+    ).executeTask(
+      await taskContext({ n: 1 }, manifest, (level) => {
+        reported = level;
+      }),
+    );
+    expect(output).toEqual({ effectiveIsolationLevel: 'container' });
+    expect(reported).toBe('subprocess_restricted');
+  });
+
+  it('rejects an attested isolation level below the contract requirement', async () => {
+    const owner = generateKeyPair();
+    const worker = generateKeyPair();
+    const { contract, envelope, gate, approval } = await signedDelivery(owner, worker, {
+      isolation: 'subprocess_restricted',
+      requireOci: true,
+    });
+    const engine = new VerificationEngine();
+    const downgraded = await engine.verify(contract, envelope, gate, approval);
+    expect(downgraded.accepted).toBe(false);
+    expect(downgraded.reason).toContain('ISOLATION_LEVEL_MISMATCH');
+    for (const lie of ['container', 'subprocess', 'host_adapter']) {
+      const forged = await signedDelivery(owner, worker, { isolation: lie, requireOci: true });
+      const result = await engine.verify(
+        forged.contract,
+        forged.envelope,
+        forged.gate,
+        forged.approval,
+      );
+      expect(result.accepted).toBe(false);
+      expect(result.reason).toContain('ISOLATION_LEVEL_MISMATCH');
+    }
+    const honest = await signedDelivery(owner, worker, {
+      isolation: 'oci_container',
+      requireOci: true,
+    });
+    expect(
+      (await engine.verify(honest.contract, honest.envelope, honest.gate, honest.approval))
+        .accepted,
+    ).toBe(true);
+    const flipped = structuredClone(honest.envelope);
+    flipped.payload.payload = flipSignature(
+      (flipped.payload.payload as unknown as Delivery).attestation,
+    ) as unknown as Json;
+    const broken = signEnvelope(
+      {
+        taskId: honest.contract.manifest.taskId,
+        recipientDid: owner.did,
+        seq: 1,
+        eventType: 'DELIVER',
+        payload: flipped.payload.payload as Json,
+      },
+      worker,
+    );
+    expect(
+      (await engine.verify(honest.contract, broken, honest.gate, honest.approval)).accepted,
+    ).toBe(false);
+  });
+});
+
+describe('Proof 4: resource exhaustion and SSRF', () => {
+  it('rejects oversized payloads, queue floods, and extra recipients', () => {
+    const alice = generateKeyPair();
+    const bob = generateKeyPair();
+    const relay = new InMemoryRelay({ maxQueues: 1 });
+    const oversized = signEnvelope(
+      {
+        taskId: 'task_big',
+        recipientDid: bob.did,
+        seq: 0,
+        eventType: 'PING',
+        payload: 'x'.repeat(1048576),
+      },
+      alice,
+    );
+    expect(Buffer.byteLength(JSON.stringify(oversized))).toBeGreaterThan(1048576);
+    expect(() => relay.send(oversized)).toThrow('RELAY_CAPACITY');
+    expect(relay.snapshot().seen).toEqual([]);
+    for (let i = 0; i < 1000; i++) relay.send(envelopeFor(alice, bob.did, 'task_flood_' + i));
+    expect(() => relay.send(envelopeFor(alice, bob.did, 'task_flood_extra'))).toThrow(
+      'RELAY_CAPACITY',
+    );
+    expect(() => relay.send(envelopeFor(alice, generateKeyPair().did, 'task_other'))).toThrow(
+      'RELAY_CAPACITY',
+    );
+  });
+
+  it('rejects nonce replay inside the FIFO retention window and stays bounded', () => {
+    const bob = generateKeyPair();
+    const relay = new InMemoryRelay({ maxAuthSeenEntries: 2 });
+    const first = createRelayAuthToken(bob, { nonce: 'nonce-1' });
+    const second = createRelayAuthToken(bob, { nonce: 'nonce-2' });
+    const third = createRelayAuthToken(bob, { nonce: 'nonce-3' });
+    expect(relay.authenticate(bob.did, first)).toBe(true);
+    expect(relay.authenticate(bob.did, first)).toBe(false);
+    expect(relay.authenticate(bob.did, second)).toBe(true);
+    expect(relay.authenticate(bob.did, second)).toBe(false);
+    expect(relay.snapshot().authSeen).toHaveLength(2);
+    expect(relay.authenticate(bob.did, third)).toBe(true);
+    expect(relay.snapshot().authSeen).toHaveLength(2);
+    expect(relay.authenticate(bob.did, third)).toBe(false);
+    expect(relay.authenticate(bob.did, second)).toBe(false);
+  });
+
+  it('rejects metadata, loopback, file, and non-HTTP provider relay targets', async () => {
+    const alice = generateKeyPair();
+    const bob = generateKeyPair();
+    for (const url of ['http://169.254.169.254', 'http://169.254.169.254/latest/meta-data']) {
+      expect(() => validateRelayEndpointUrl(url)).toThrow('SSRF_BLOCKED_RELAY_URL');
+      expect(() => validateRelayEndpointUrl(url, { allowPrivateRelay: false })).toThrow(
+        'SSRF_BLOCKED_RELAY_URL',
+      );
+    }
+    expect(() =>
+      validateRelayEndpointUrl('http://127.0.0.1', { allowPrivateRelay: false }),
+    ).toThrow('SSRF_BLOCKED_RELAY_URL');
+    expect(() => validateRelayEndpointUrl('file:///etc/passwd')).toThrow('SSRF_BLOCKED_RELAY_URL');
+    const metadataCard = createSignedAgentCard(
+      { name: 'Metadata', agentDid: bob.did, relayEndpoint: 'http://169.254.169.254', skills: [] },
+      bob,
+    );
+    const loopbackCard = createSignedAgentCard(
+      { name: 'Loopback', agentDid: bob.did, relayEndpoint: 'http://127.0.0.1', skills: [] },
+      bob,
+    );
+    const metadataInvite = createInviteToken({ agentCard: metadataCard }, bob);
+    const loopbackInvite = createInviteToken({ agentCard: loopbackCard }, bob);
+    expect(() => parseAndVerifyInviteToken(metadataInvite)).toThrow('SSRF_BLOCKED_RELAY_URL');
+    expect(() =>
+      parseAndVerifyInviteToken(loopbackInvite, Date.now(), { allowPrivateRelay: false }),
+    ).toThrow('SSRF_BLOCKED_RELAY_URL');
+    const client = new RequesterClient({ owner: alice, allowPrivateRelay: false });
+    await expect(
+      client.delegate({
+        to: metadataInvite,
+        title: 'SSRF',
+        description: 'metadata',
+        input: {},
+      }),
+    ).rejects.toThrow('SSRF_BLOCKED_RELAY_URL');
+    await expect(
+      client.delegate({
+        to: bob.did,
+        relay: 'file:///etc/passwd',
+        title: 'SSRF',
+        description: 'file',
+        input: {},
+      }),
+    ).rejects.toThrow('SSRF_BLOCKED_RELAY_URL');
+    await expect(
+      startCredentialProxy({
+        apiKey: 'synthetic',
+        baseUrl: 'file:///etc/passwd',
+        style: 'openai',
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).rejects.toThrow('INVALID_PROVIDER_URL');
+  });
+});
+
+describe('Proof 5: cryptographic envelope and artifact tampering', () => {
+  it('rejects one-field and one-byte edits to a signed contract', () => {
+    const owner = generateKeyPair();
+    const worker = generateKeyPair();
+    const manifest = manifestFor(owner, worker);
+    const proposal = signPayload(manifest, owner);
+    const contract = createContract(manifest, proposal, worker);
+    expect(verifyContract(contract)).toBe(true);
+    expect(contract.proposal.signature.canonicalization).toBe('RFC8785-JCS');
+    const budget = structuredClone(contract);
+    budget.manifest.budget.maxInputTokens += 1;
+    expect(verifyContract(budget)).toBe(false);
+    const scope = structuredClone(contract);
+    scope.manifest.sandboxPolicy.isolationLevel = 'oci_container';
+    expect(verifyContract(scope)).toBe(false);
+    const resigned = structuredClone(contract);
+    resigned.proposal = flipSignature(resigned.proposal);
+    expect(verifySigned(resigned.proposal, owner.did)).toBe(false);
+    expect(verifyContract(resigned)).toBe(false);
+    const edited = structuredClone(proposal);
+    edited.payload.budget.maxWallClockSeconds += 1;
+    expect(digest(edited.payload)).not.toBe(edited.signature.payloadDigest);
+    expect(verifySigned(edited, owner.did)).toBe(false);
+  });
+
+  it('rejects artifact-hash and usage-receipt edits, and accepts the unmodified delivery', async () => {
+    const owner = generateKeyPair();
+    const worker = generateKeyPair();
+    const honest = await signedDelivery(owner, worker, {
+      isolation: 'subprocess_restricted',
+      requireOci: false,
+    });
+    const engine = new VerificationEngine();
+    expect(
+      (await engine.verify(honest.contract, honest.envelope, honest.gate, honest.approval))
+        .accepted,
+    ).toBe(true);
+    const delivery = honest.envelope.payload.payload as unknown as Delivery;
+    const changedData = structuredClone(delivery);
+    (changedData.artifact.payload.data as { ok: boolean }).ok = false;
+    expect(
+      (
+        await engine.verify(
+          honest.contract,
+          rewrap(honest, changedData, worker, 1),
+          new ApprovalGate(owner.did, { requiredGates: [], autoApprove: [] }),
+          signApproval(honest.contract.manifest.taskId, 'final_verification', changedData, owner),
+        )
+      ).accepted,
+    ).toBe(false);
+    const changedDigest = structuredClone(delivery);
+    changedDigest.artifact.payload.digest =
+      changedDigest.artifact.payload.digest.slice(0, -1) +
+      (changedDigest.artifact.payload.digest.endsWith('a') ? 'b' : 'a');
+    expect(verifySigned(changedDigest.artifact, worker.did)).toBe(false);
+    const changedUsage = structuredClone(delivery);
+    changedUsage.usage.payload.inputTokens += 1;
+    expect(verifySigned(changedUsage.usage, worker.did)).toBe(false);
+    expect(
+      (
+        await engine.verify(
+          honest.contract,
+          rewrap(honest, changedUsage, worker, 2),
+          honest.gate,
+          honest.approval,
+        )
+      ).accepted,
+    ).toBe(false);
+  });
+
+  it('rejects stale and one-byte-modified RelayAuth tokens', () => {
+    const bob = generateKeyPair();
+    const eve = generateKeyPair();
+    const fresh = createRelayAuthToken(bob);
+    expect(verifyRelayAuthToken(fresh, bob.did).valid).toBe(true);
+    const stale = createRelayAuthToken(bob, {
+      now: new Date(Date.now() - 300001).toISOString(),
+    });
+    expect(verifyRelayAuthToken(stale, bob.did)).toEqual({
+      valid: false,
+      error: 'RELAY_UNAUTHORIZED',
+    });
+    const future = createRelayAuthToken(bob, {
+      now: new Date(Date.now() + 600000).toISOString(),
+    });
+    expect(verifyRelayAuthToken(future, bob.did).valid).toBe(false);
+    const decoded = JSON.parse(Buffer.from(fresh, 'base64url').toString('utf8')) as Signed<{
+      timestamp: string;
+    }>;
+    const flipped = Buffer.from(JSON.stringify(flipSignature(decoded))).toString('base64url');
+    expect(verifyRelayAuthToken(flipped, bob.did).valid).toBe(false);
+    expect(verifyRelayAuthToken(createRelayAuthToken(eve), bob.did).valid).toBe(false);
+    const relay = new InMemoryRelay({ requireAuth: true });
+    expect(relay.authenticate(bob.did, fresh)).toBe(true);
+    expect(relay.authenticate(bob.did, fresh)).toBe(false);
+    expect(relay.authenticate(bob.did, stale)).toBe(false);
+  });
+});
+
+async function signedDelivery(
+  owner: KeyPair,
+  worker: KeyPair,
+  options: { isolation: string; requireOci: boolean },
+): Promise<{
+  contract: ReturnType<typeof createContract>;
+  envelope: SignedEnvelope;
+  gate: ApprovalGate;
+  approval: ReturnType<typeof signApproval>;
+}> {
+  const manifest = manifestFor(owner, worker, {
+    type: 'object',
+    additionalProperties: false,
+    required: ['ok'],
+    properties: { ok: { type: 'boolean' } },
+  });
+  if (options.requireOci) manifest.sandboxPolicy.isolationLevel = 'oci_container';
+  const contract = createContract(manifest, signPayload(manifest, owner), worker);
+  const usage = signUsage(
+    {
+      type: 'UsageReceipt',
+      taskId: manifest.taskId,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      toolCalls: 0,
+      wallTimeMs: 0,
+      halted: false,
+    },
+    worker,
+  );
+  const delivery = createDelivery(
+    manifest.taskId,
+    contract.contractDigest,
+    { ok: true },
+    usage,
+    worker,
+    {
+      effectiveIsolationLevel: options.isolation,
+    },
+  );
+  const envelope = signEnvelope(
+    {
+      taskId: manifest.taskId,
+      recipientDid: owner.did,
+      seq: 0,
+      eventType: 'DELIVER',
+      payload: delivery as unknown as Json,
+    },
+    worker,
+  );
+  return {
+    contract,
+    envelope,
+    gate: new ApprovalGate(owner.did, { requiredGates: [], autoApprove: [] }),
+    approval: signApproval(manifest.taskId, 'final_verification', delivery, owner),
+  };
+}
+
+function rewrap(
+  honest: { contract: ReturnType<typeof createContract> },
+  delivery: Delivery,
+  worker: KeyPair,
+  seq: number,
+): SignedEnvelope {
+  return signEnvelope(
+    {
+      taskId: honest.contract.manifest.taskId,
+      recipientDid: honest.contract.manifest.requester.ownerDid,
+      seq,
+      eventType: 'DELIVER',
+      payload: delivery as unknown as Json,
+    },
+    worker,
+  );
+}
