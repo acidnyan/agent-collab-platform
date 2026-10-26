@@ -175,9 +175,12 @@ export class InMemoryRelay {
     };
   }
   async wait(did: string, ms: number, signal?: AbortSignal): Promise<void> {
-    if (this.queues.get(did)?.length || signal?.aborted || ms <= 0) return;
+    if (signal?.aborted || ms <= 0 || this.queues.get(did)?.length) return;
     await new Promise<void>((resolve) => {
+      let settled = false;
       const done = () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         off();
         signal?.removeEventListener('abort', done);
@@ -186,7 +189,8 @@ export class InMemoryRelay {
       const off = this.subscribe(did, done),
         timer = setTimeout(done, ms);
       signal?.addEventListener('abort', done, { once: true });
-      if (signal?.aborted) done();
+      // Cover the gap between the length check and listener installation.
+      if (signal?.aborted || this.queues.get(did)?.length) done();
     });
   }
   snapshot(): RelaySnapshot {
@@ -426,11 +430,14 @@ export function createRelayFetchHandler(
           const e = receive();
           return e ? json(e) : empty(204);
         }
-        await relay.wait(recipient, Math.min(ms!, 30000), request.signal);
-        const envelopes: SignedEnvelope[] = [];
-        let e;
-        while ((e = receive())) envelopes.push(e);
-        return json({ envelopes });
+        const ready: SignedEnvelope[] = [];
+        let queued: SignedEnvelope | undefined;
+        while ((queued = receive())) ready.push(queued);
+        if (!ready.length) {
+          await relay.wait(recipient, Math.min(ms!, 30000), request.signal);
+          while ((queued = receive())) ready.push(queued);
+        }
+        return json({ envelopes: ready });
       }
       return json({ error: 'NOT_FOUND' }, 404);
     } catch (error) {

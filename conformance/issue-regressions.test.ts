@@ -722,6 +722,40 @@ describe('issue 18: http backpressure disconnect cancels the reader', () => {
 });
 
 describe('issue 20: requester relay URL switch', () => {
+  it('returns an already queued envelope without sleeping for waitMs', async () => {
+    const server = await startLocalRelay();
+    try {
+      const owner = generateKeyPair();
+      const peer = generateKeyPair();
+      server.relay.send(
+        signEnvelope(
+          {
+            taskId: 'task_ready',
+            recipientDid: peer.did,
+            seq: 0,
+            eventType: 'PING',
+            payload: { label: 'ready' },
+          },
+          owner,
+        ),
+      );
+      const started = Date.now();
+      const response = await fetch(
+        server.url + '/envelopes?recipient=' + encodeURIComponent(peer.did) + '&waitMs=1000',
+        { headers: { authorization: 'Bearer ' + createRelayAuthToken(peer) } },
+      );
+      const elapsedMs = Date.now() - started;
+      const body = (await response.json()) as {
+        envelopes: Array<{ payload: { payload: { label: string } } }>;
+      };
+      expect(response.status).toBe(200);
+      expect(elapsedMs).toBeLessThan(200);
+      expect(body.envelopes.map((envelope) => envelope.payload.payload.label)).toEqual(['ready']);
+    } finally {
+      await server.close();
+    }
+  });
+
   it('settles delegates on two relay URLs from one requester', async () => {
     const servers = [await startLocalRelay(), await startLocalRelay()];
     const workers: WorkerNode[] = [];

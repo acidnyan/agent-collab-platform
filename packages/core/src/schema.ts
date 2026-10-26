@@ -13,10 +13,14 @@ export function loadSchema(name: string): Schema {
   if (!/^[a-z-]+$/.test(name)) throw new Error('INVALID_SCHEMA_NAME');
   return JSON.parse(readFileSync(new URL(name + '.schema.json', specDirectory), 'utf8')) as Schema;
 }
+let cachedRegistry: ReturnType<typeof createAjv> | undefined;
+/** Spec files are static. Rebuilding Ajv for every envelope check dominates a session. */
 export function schemaRegistry() {
+  if (cachedRegistry) return cachedRegistry;
   const ajv = createAjv();
   for (const f of readdirSync(specDirectory).filter((f) => f.endsWith('.schema.json')))
     ajv.addSchema(loadSchema(f.slice(0, -12)), f.slice(0, -12));
+  cachedRegistry = ajv;
   return ajv;
 }
 export function validateSchema(name: string, value: unknown): void {
