@@ -161,16 +161,24 @@ class RecipientInbox {
   }
 }
 const recipientInboxes = new WeakMap<object, Map<string, RecipientInbox>>();
-function recipientInbox(source: object, relay: RelayTransport, did: string): RecipientInbox {
+function recipientInbox(
+  source: object,
+  relay: RelayTransport,
+  did: string,
+  relayUrl?: string,
+): RecipientInbox {
+  // String relays include the URL so one client can switch servers. The same URL still shares
+  // one inbox. Object relays stay keyed only by owner DID.
+  const key = relayUrl === undefined ? did : did + '\0' + relayUrl;
   let byDid = recipientInboxes.get(source);
   if (!byDid) {
     byDid = new Map();
     recipientInboxes.set(source, byDid);
   }
-  let inbox = byDid.get(did);
+  let inbox = byDid.get(key);
   if (!inbox) {
     inbox = new RecipientInbox(relay, did);
-    byDid.set(did, inbox);
+    byDid.set(key, inbox);
   }
   return inbox;
 }
@@ -570,11 +578,10 @@ export class RequesterClient {
       });
     const relay = transport(relayOption, this.options.owner),
       owner = this.options.owner,
-      inbox = recipientInbox(
-        typeof relayOption === 'string' ? this : relayOption,
-        relay,
-        owner.did,
-      );
+      inbox =
+        typeof relayOption === 'string'
+          ? recipientInbox(this, relay, owner.did, relayOption.replace(/\/$/, ''))
+          : recipientInbox(relayOption, relay, owner.did);
     const cards = !invite && relay.discover ? await relay.discover() : [];
     if (cards.some((c) => !verifySignedAgentCard(c))) throw new Error('INVALID_AGENT_CARD');
     const card = cards.find(

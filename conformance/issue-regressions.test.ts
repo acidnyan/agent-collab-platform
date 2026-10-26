@@ -720,3 +720,146 @@ describe('issue 18: http backpressure disconnect cancels the reader', () => {
     ]);
   });
 });
+
+describe('issue 20: requester relay URL switch', () => {
+  it('settles delegates on two relay URLs from one requester', async () => {
+    const servers = [await startLocalRelay(), await startLocalRelay()];
+    const workers: WorkerNode[] = [];
+    const running: Array<Promise<unknown>> = [];
+    const requesterKey = generateKeyPair();
+    const requester = new RequesterClient({
+      owner: requesterKey,
+      timeoutMs: 2000,
+      approvalProvider: new PolicyAutoApprovalProvider(requesterKey),
+    });
+    try {
+      for (const server of servers) {
+        const owner = generateKeyPair();
+        const worker = new WorkerNode({
+          owner,
+          relay: server.url,
+          timeoutMs: 2000,
+          adapter: {
+            id: 'echo',
+            name: 'echo',
+            skills: [],
+            executeTask: async (context) => context.input,
+          },
+          approvalProvider: new PolicyAutoApprovalProvider(owner),
+        });
+        workers.push(worker);
+        running.push(worker.start());
+      }
+      async function call(client: RequesterClient, index: number) {
+        try {
+          const result = await client.delegate({
+            to: workers[index]!.invite(),
+            title: 'relay switch',
+            description: 'synthetic',
+            input: { index },
+          });
+          return { relay: index, state: result.state };
+        } catch (error) {
+          return { relay: index, error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      const relaySwitch = [await call(requester, 0), await call(requester, 1)];
+      const fresh = new RequesterClient({
+        owner: requesterKey,
+        timeoutMs: 2000,
+        approvalProvider: new PolicyAutoApprovalProvider(requesterKey),
+      });
+      const relaySwitchFreshControl = await call(fresh, 1);
+      expect(relaySwitch).toEqual([
+        { relay: 0, state: 'SETTLED' },
+        { relay: 1, state: 'SETTLED' },
+      ]);
+      expect(relaySwitchFreshControl).toEqual({ relay: 1, state: 'SETTLED' });
+      const concurrent = await Promise.all([call(requester, 0), call(requester, 1)]);
+      expect(concurrent).toEqual([
+        { relay: 0, state: 'SETTLED' },
+        { relay: 1, state: 'SETTLED' },
+      ]);
+      const sameUrl = await Promise.all([call(requester, 0), call(requester, 0)]);
+      expect(sameUrl).toEqual([
+        { relay: 0, state: 'SETTLED' },
+        { relay: 0, state: 'SETTLED' },
+      ]);
+    } finally {
+      for (const worker of workers) worker.stop();
+      await Promise.allSettled(running);
+      for (const server of servers) await server.close();
+    }
+  });
+});
+
+describe('issue 21: durable long-poll wakes on a concurrent post', () => {
+  it('returns the posted envelope before waitMs elapses', async () => {
+    const data = new Map<string, unknown>();
+    const state = {
+      storage: {
+        get: async <T>(key: string): Promise<T | undefined> => data.get(key) as T | undefined,
+        put: async (key: string, value: unknown) => {
+          data.set(key, value);
+        },
+        delete: async (key: string) => data.delete(key),
+      },
+      blockConcurrencyWhile: async <T>(fn: () => Promise<T>) => fn(),
+    };
+    const object = new RelayDurableObject(state);
+    const owner = generateKeyPair();
+    const peer = generateKeyPair();
+    function receiveRequest() {
+      return new Request(
+        'https://relay.local/envelopes?recipient=' + encodeURIComponent(peer.did) + '&waitMs=200',
+        { headers: { authorization: 'Bearer ' + createRelayAuthToken(peer) } },
+      );
+    }
+    const started = Date.now();
+    const poll = object.fetch(receiveRequest()).then(async (response) => ({
+      status: response.status,
+      elapsedMs: Date.now() - started,
+      body:
+        response.status === 200
+          ? (
+              (await response.json()) as {
+                envelopes: Array<{ payload: { payload: { label: string } } }>;
+              }
+            ).envelopes.map((envelope) => envelope.payload.payload.label)
+          : null,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const postStarted = Date.now();
+    const send = object
+      .fetch(
+        new Request('https://relay.local/envelopes', {
+          method: 'POST',
+          body: JSON.stringify(
+            signEnvelope(
+              {
+                taskId: 'task_longpoll',
+                recipientDid: peer.did,
+                seq: 0,
+                eventType: 'PING',
+                payload: { label: 'longpoll' },
+              },
+              owner,
+            ),
+          ),
+        }),
+      )
+      .then((response) => ({ status: response.status, elapsedMs: Date.now() - postStarted }));
+    const result = { poll: await poll, send: await send };
+    const next = await object.fetch(receiveRequest());
+    const nextBody = (
+      (await next.json()) as { envelopes: Array<{ payload: { payload: { label: string } } }> }
+    ).envelopes.map((envelope) => envelope.payload.payload.label);
+    expect(result.send.status).toBe(202);
+    expect(result.send.elapsedMs).toBeLessThan(200);
+    expect(result.poll.status).toBe(200);
+    expect(result.poll.elapsedMs).toBeLessThan(200);
+    expect(result.poll.body).toEqual(['longpoll']);
+    expect(next.status).toBe(200);
+    expect(nextBody).toEqual([]);
+  });
+});

@@ -250,6 +250,49 @@ export function relayHttpHeaders(kind: 'json' | 'empty' | 'sse' = 'json'): Recor
     ...(kind === 'sse' ? { 'content-type': 'text/event-stream', 'x-accel-buffering': 'no' } : {}),
   };
 }
+function relayJson(value: unknown, status = 200): Response {
+  return Response.json(value, { status, headers: relayHttpHeaders('json') });
+}
+export function relayErrorResponse(error: unknown): Response {
+  return error instanceof Error && error.message === 'RELAY_UNAUTHORIZED'
+    ? relayJson({ error: 'RELAY_UNAUTHORIZED' }, 401)
+    : relayJson({ error: String(error) }, 400);
+}
+export type DurableLongPoll =
+  | { mode: 'response'; response: Response }
+  | {
+      mode: 'wait';
+      recipient: string;
+      waitMs: number;
+      receive: () => SignedEnvelope | undefined;
+    };
+/**
+ * Authenticate a long-poll and pop envelopes that are already queued.
+ * The caller waits outside the durable-object lock when the inbox is empty.
+ */
+export function beginDurableLongPoll(relay: InMemoryRelay, request: Request): DurableLongPoll {
+  try {
+    const url = new URL(request.url);
+    const recipient = url.searchParams.get('recipient') ?? '';
+    resolveDid(recipient);
+    const ms = Number(url.searchParams.get('waitMs'));
+    if (!url.searchParams.has('waitMs') || !Number.isFinite(ms) || ms < 0)
+      throw new Error('INVALID_WAIT');
+    const token =
+      request.headers.get('authorization')?.match(/^Bearer (\S+)$/i)?.[1] ??
+      request.headers.get('x-acp-relay-auth') ??
+      url.searchParams.get('auth') ??
+      undefined;
+    const receive = relay.openInbox(recipient, token, 'receive');
+    const buffered: SignedEnvelope[] = [];
+    let envelope: SignedEnvelope | undefined;
+    while ((envelope = receive())) buffered.push(envelope);
+    if (buffered.length) return { mode: 'response', response: relayJson({ envelopes: buffered }) };
+    return { mode: 'wait', recipient, waitMs: Math.min(ms, 30000), receive };
+  } catch (error) {
+    return { mode: 'response', response: relayErrorResponse(error) };
+  }
+}
 export function createRelayFetchHandler(
   options: RelayFetchOptions = {},
 ): (request: Request) => Promise<Response> {
