@@ -1730,3 +1730,134 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
     );
   });
 });
+
+describe('issue 35: invalid reportProgress poisons the session', () => {
+  it('keeps a caught INVALID_PROGRESS from settling and still stops a gated budget overrun', async () => {
+    for (const mode of ['gated-valid-over', 'invalid-caught-over'] as const) {
+      const owner = generateKeyPair();
+      const key = generateKeyPair();
+      const relay = new InMemoryRelay();
+      let backendCalls = 0;
+      let progressSeen = false;
+      let held = false;
+      let release: () => void = () => undefined;
+      let entered: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const send = relay.send.bind(relay);
+      relay.send = async (envelope) => {
+        if (mode === 'gated-valid-over' && envelope.payload.eventType === 'PROGRESS')
+          progressSeen = true;
+        if (
+          mode === 'gated-valid-over' &&
+          progressSeen &&
+          !held &&
+          envelope.payload.eventType === 'AUDIT_ACK' &&
+          envelope.payload.senderDid === owner.did
+        ) {
+          held = true;
+          entered();
+          await gate;
+        }
+        return send(envelope);
+      };
+      const worker = new WorkerNode({
+        owner: key,
+        relay,
+        timeoutMs: 1500,
+        approvalProvider: new PolicyAutoApprovalProvider(key),
+        tools: { read: { resource: () => 'mcp://synthetic/read', readOnly: true } },
+        toolBackend: {
+          callTool: async () => {
+            backendCalls += 1;
+            return { content: [] };
+          },
+        },
+        adapter: {
+          id: 'boundary',
+          name: 'boundary',
+          skills: [],
+          executeTask: async (ctx) => {
+            if (mode === 'gated-valid-over') {
+              void Promise.resolve(
+                ctx.reportProgress?.({ step: 'first', metrics: { inputTokens: 1 } }),
+              ).catch(() => undefined);
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              try {
+                await Promise.race([
+                  reached,
+                  new Promise((_, reject) => {
+                    timer = setTimeout(() => reject(new Error('GATE_TIMEOUT')), 1000);
+                  }),
+                ]);
+              } finally {
+                clearTimeout(timer);
+              }
+            }
+            void Promise.resolve(
+              ctx.reportProgress?.({
+                step: mode === 'invalid-caught-over' ? '' : 'over',
+                metrics: { inputTokens: 11 },
+              }),
+            ).catch(() => undefined);
+            try {
+              await ctx.callTool?.('read', {});
+            } finally {
+              release();
+            }
+            return { ok: true };
+          },
+        },
+      });
+      const summarize = (pending: Promise<unknown>): Promise<{ state?: string; error?: string }> =>
+        pending.then(
+          (value) => ({ state: (value as { state?: string } | undefined)?.state }),
+          (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
+        );
+      const pending = summarize(worker.start({ once: true }));
+      const client = new RequesterClient({
+        owner,
+        relay,
+        timeoutMs: 1500,
+        approvalProvider: new PolicyAutoApprovalProvider(owner),
+      });
+      const requester = await summarize(
+        client.delegate({
+          to: worker.invite(),
+          title: 'boundary',
+          description: 'synthetic counter',
+          input: {},
+          budget: { maxInputTokens: 10 },
+          capabilities: [
+            {
+              capabilityId: 'cap_synthetic_read',
+              resource: 'mcp://synthetic/read',
+              allowedTools: ['read'],
+              maxInvocations: 2,
+              argConstraints: { type: 'object' },
+              expiresAt: new Date(Date.now() + 60000).toISOString(),
+            },
+          ],
+        }),
+      );
+      release();
+      const workerResult = await pending;
+      worker.stop();
+      if (mode === 'gated-valid-over') {
+        expect(held).toBe(true);
+        expect(backendCalls).toBe(0);
+        expect(requester.error).toBe('PEER_REJECTED: {"code":"BUDGET"}');
+        expect(workerResult.error).toContain('EXECUTION_ABORTED: BUDGET_EXCEEDED:');
+      } else {
+        expect(held).toBe(false);
+        expect(backendCalls).toBe(1);
+        expect(requester.error).toBe('PEER_REJECTED: {"code":"INVALID"}');
+        expect(workerResult.error).toBe('INVALID_PROGRESS');
+      }
+    }
+  });
+});

@@ -65,6 +65,8 @@ Capability の証明は、根から葉へ並んだ署名付きトークンの配
 
 監査本体のフィールドは `taskId`、0 始まりの `seq`、`prevEntryHash`（起源では null）、`actorDid`、`receiverDid`、`eventType`、`payload` です。`entryHash = digest(body)` です。`actorSignature` は本体に署名し、`counterSignature` はそのハッシュ、タスク、双方を束縛する署名付き AckReceipt です。最終の署名付きチェックポイントは件数、head、行為者を固定し、相手がもう一度署名します。JSONL は `{"entry": ...}` レコードのあとに、1件の `{"checkpoint": ...}` レコードが続きます。バンドルは `{entries, checkpoint}` です。オフライン検証にはチェックポイントが必要です。より古い有効なバンドルへの巻き戻しを検出するには、独立して入手した最新の head が必要です。
 
+妥当な `reportProgress` は途中の `metrics` を含められます。その使用量は、進捗フレームをキューへ入れる前にセッションのクォータへ計上されます。不正な `reportProgress` ペイロード（`INVALID_PROGRESS`）は、その `metrics` を適用しません。返された Promise は直ちに拒否され、セッションは粘着的な失敗を記録するため、その後の成果物で `SETTLED` にはなりません。アダプタが Promise 拒否を catch しても、依頼者は `PEER_REJECTED: {"code":"INVALID"}` を観測し、ワーカーは `INVALID_PROGRESS` で失敗します。
+
 A2A の AgentCard、Task、Message、Artifact は SDK のワイヤ形を保ち、署名付き ACP エンベロープの中に載ります。ブリッジは、インストール済みの A2A SDK 0.3 のワイヤプロファイルを使います。ACP の契約とレシートは、A2A を書き換えるのではなく、オーバーレイのペイロードです。MCP の `tools/call` の要求と結果は公式 SDK を使い、サンドボックスの外で物理的にプロキシされます。未知のツールと、メタデータの無い迂回は拒否します。
 
 ## M2/M3 追加のディスカバリとセッションプロファイル

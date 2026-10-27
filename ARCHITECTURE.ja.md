@@ -133,7 +133,7 @@ stateDiagram-v2
 
 ### 進捗、取り消し、失効、クォーラム
 
-`PROGRESS` は通常のセッションイベントです。ワーカーは依頼者へ暗号化し、双方が監査項目に相互署名し、申告された途中の使用量は `QuotaMeter` に計上されます。`CANCEL` は `CANCELLED` への署名付き遷移です。ワーカーはタスクの `AbortSignal` を中断し、サンドボックスの子プロセスを `SIGTERM` のあと `SIGKILL` で止めてから、双方のログを封印します。
+`PROGRESS` は通常のセッションイベントです。ワーカーは依頼者へ暗号化し、双方が監査項目に相互署名し、妥当な報告に含まれる途中の使用量は `QuotaMeter` に計上されます。不正な `reportProgress` ペイロード（`INVALID_PROGRESS`。空の `step` や数値でない `percent` など）は、その `metrics` をクォータ会計へ適用しません。呼び出しは直ちに拒否され、セッション失敗が粘着的に記録されます。ワーカーのアダプタがその Promise 拒否を catch しても、セッションは `INVALID_PROGRESS`（`PEER_REJECTED: {"code":"INVALID"}`）で拒否され、`SETTLED` にはなりません。`CANCEL` は `CANCELLED` への署名付き遷移です。ワーカーはタスクの `AbortSignal` を中断し、サンドボックスの子プロセスを `SIGTERM` のあと `SIGKILL` で止めてから、双方のログを封印します。
 
 招待と能力の失効は、タスク単位の `revokeTask` とは別です。`RevocationNotice` は Ed25519 の JCS 声明です。ワーカーは `ACCEPT` の前に招待トークンを検査します。`CapabilityGuard` はツール呼び出しの前に能力 ID とトークンダイジェストを検査し、`TOKEN_REVOKED` を投げます。
 
