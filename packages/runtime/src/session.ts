@@ -43,7 +43,7 @@ import type {
 } from '@acp/core';
 import { verifyAudit, type AuditBundle } from '@acp/ledger';
 import { HttpRelayClient } from '@acp/relay';
-import type { RelayTransport } from '@acp/relay';
+import type { RelayClientSecurityOptions, RelayTransport } from '@acp/relay';
 import type {
   AgentAdapter,
   AgentTaskContext,
@@ -111,9 +111,15 @@ function validateAcceptance(acceptance: WorkerAcceptancePolicy): void {
   )
     throw new Error('INVALID_REQUESTER_DID');
 }
-function transport(relay: RelayTransport | string, owner: KeyPair): RelayTransport {
+function transport(
+  relay: RelayTransport | string,
+  owner: KeyPair,
+  security?: RelayClientSecurityOptions,
+): RelayTransport {
   const client: RelayTransport =
-    typeof relay === 'string' ? new HttpRelayClient(relay.replace(/\/$/, ''), owner) : relay;
+    typeof relay === 'string'
+      ? new HttpRelayClient(relay.replace(/\/$/, ''), owner, security)
+      : relay;
   client.setRecipientKey?.(owner);
   return client.withRecipient?.(owner) ?? client;
 }
@@ -253,6 +259,9 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   toolBackend?: ToolBackend;
   revocation?: RevocationList;
   onEvent?: (event: string, taskId: string) => void;
+  /** Opt in to loopback and RFC1918 relays. Network invites stay blocked by default. */
+  allowPrivateRelay?: boolean;
+  lookup?: RelayClientSecurityOptions['lookup'];
 }
 interface Proposal {
   proposal: Signed<TaskManifest>;
@@ -274,7 +283,10 @@ export class WorkerNode {
   constructor(readonly options: WorkerNodeOptions) {
     this.acceptance = acceptanceFrom(options);
     validateAcceptance(this.acceptance);
-    this.relay = transport(options.relay, options.owner);
+    this.relay = transport(options.relay, options.owner, {
+      allowPrivateRelay: options.allowPrivateRelay,
+      lookup: options.lookup,
+    });
     this.approvalProvider =
       options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner);
     const agentDid = options.agentDid ?? options.agentKey?.did ?? options.owner.did;
@@ -285,7 +297,7 @@ export class WorkerNode {
         relayEndpoint:
           typeof options.relay === 'string'
             ? options.relay
-            : (options.relayUrl ?? 'http://in-memory.local'),
+            : (options.relayUrl ?? 'http://in-memory.invalid'),
         skills: options.adapter.skills,
       },
       options.owner,
@@ -800,7 +812,10 @@ export class WorkerNode {
     const token = data.inviteToken;
     if (!registry || typeof token !== 'string' || token.length === 0) return;
     registry.assertNotRevoked('invite', token);
-    registry.assertNotRevoked('invite', inviteRevocationId(token));
+    registry.assertNotRevoked(
+      'invite',
+      inviteRevocationId(token, { allowPrivateRelay: this.options.allowPrivateRelay }),
+    );
   }
 }
 interface CancelPayload {
@@ -847,6 +862,8 @@ export interface RequesterClientOptions {
   auditPath?: string;
   timeoutMs?: number;
   allowPrivateRelay?: boolean;
+  /** DNS resolver used before a string relay URL is dialed. */
+  lookup?: RelayClientSecurityOptions['lookup'];
 }
 export interface DelegateOptions {
   to: string;
@@ -928,7 +945,10 @@ export class RequesterClient {
       validateRelayEndpointUrl(relayOption.url, {
         allowPrivateRelay: this.options.allowPrivateRelay,
       });
-    const relay = transport(relayOption, this.options.owner),
+    const relay = transport(relayOption, this.options.owner, {
+        allowPrivateRelay: this.options.allowPrivateRelay,
+        lookup: this.options.lookup,
+      }),
       owner = this.options.owner,
       inbox =
         typeof relayOption === 'string'
@@ -1140,6 +1160,8 @@ export class RequesterClient {
     await canonicalizeDiscoveredWorkers(resolved, {
       relay: this.options.relay,
       owner: this.options.owner,
+      allowPrivateRelay: this.options.allowPrivateRelay,
+      lookup: this.options.lookup,
     });
     const seenWorkers = new Set<string>();
     for (const worker of resolved) {
@@ -1309,7 +1331,12 @@ function verifiedWorkerDid(bundle: AuditBundle, expectedDid: string): string {
 }
 async function canonicalizeDiscoveredWorkers(
   targets: Array<{ workerDid: string; inviteToken?: string; relayUrl?: string }>,
-  options: { relay?: RelayTransport | string; owner: KeyPair },
+  options: {
+    relay?: RelayTransport | string;
+    owner: KeyPair;
+    allowPrivateRelay?: boolean;
+    lookup?: RelayClientSecurityOptions['lookup'];
+  },
 ): Promise<void> {
   const pending = targets.filter((target) => !target.inviteToken);
   if (pending.length === 0) return;
@@ -1324,7 +1351,10 @@ async function canonicalizeDiscoveredWorkers(
   await Promise.all(
     [...relays.entries()].map(async ([relayOption, group]) => {
       try {
-        const relay = transport(relayOption, options.owner);
+        const relay = transport(relayOption, options.owner, {
+          allowPrivateRelay: options.allowPrivateRelay,
+          lookup: options.lookup,
+        });
         if (!relay.discover) return;
         const cards = await relay.discover();
         if (!Array.isArray(cards) || cards.some((card) => !verifySignedAgentCard(card))) return;

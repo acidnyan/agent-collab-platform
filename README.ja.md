@@ -150,7 +150,7 @@ pnpm acp relay start --port 8787 --host 127.0.0.1
 ```sh
 pnpm acp keygen /tmp/bob.private.json
 pnpm acp worker start --key /tmp/bob.private.json \
-  --relay http://127.0.0.1:8787 --adapter sandbox \
+  --relay http://127.0.0.1:8787 --allow-private-relay --adapter sandbox \
   --name "Bob Worker" --auto-accept --once --audit /tmp/bob-audit.jsonl
 ```
 
@@ -168,13 +168,13 @@ pnpm acp worker start --key /tmp/bob.private.json \
 pnpm acp keygen /tmp/alice.private.json
 # プロンプトが出たら Bob のトークン全体を貼り付ける
 read -r BOB_INVITE
-pnpm acp delegate --key /tmp/alice.private.json --to "$BOB_INVITE" \
+pnpm acp delegate --key /tmp/alice.private.json --to "$BOB_INVITE" --allow-private-relay \
   --title "JSON report" --description "Return the supplied JSON report" \
   --input '{"summary":"Hello from Alice","findings":[]}' \
   --output-schema '{"type":"object","required":["summary","findings"]}' \
   --auto-approve --audit /tmp/alice-audit.jsonl --out /tmp/report.json
 pnpm acp audit-verify /tmp/alice-audit.jsonl
-pnpm acp discover --relay http://127.0.0.1:8787
+pnpm acp discover --relay http://127.0.0.1:8787 --allow-private-relay
 ```
 
 期待する結果は、双方の `SETTLED`、JSON の成果物、監査ステータス `VALID` です。Alice は署名・ダイジェスト・予算、JSON Schema、登録済みの隔離チェックを検証し、最後に署名付きの最終承認を取ります。`--auto-approve` は最終検収をポリシー承認にする明示的な選択です。人間が確認するときは外してください。`acp://invite?token=...` も受け付けます。招待の代わりに `--to <Bob の DID> --relay <URL>` も使えます。Bob は手元の `/tmp/bob-audit.jsonl` を自分で検証できます。
@@ -226,7 +226,7 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 
 HTTP の受信、SSE ストリーム、WebSocket の受信と購読には、受信者が新しく署名した `RelayAuth` トークンが必要です。`WorkerNode`、`RequesterClient`、CLI は自動で署名します。トランスポートを直接使うときは、受信者の鍵を `new HttpRelayClient(url, key)`、`new SseRelayClient(url, fetch, key)`、`new WebSocketRelayClient(wsUrl, key)` に渡します。HTTP / SSE は第3引数に非同期のトークン生成関数も受け付け、WebSocket は第2引数で受け付けます。生の HTTP では `createRelayAuthToken(key, { action })` を `Authorization: Bearer <token>`、`x-acp-relay-auth`、または `auth` クエリに載せて送れます。操作に合わせて `receive`、`stream`、`subscribe` を使います。トークンは時計のずれ5分で期限切れになり、ノンスは境界付きの再生キャッシュに残っているあいだ一度だけ使えます。`InMemoryRelay.receive(did)` は既定ではトークンなしで使えます。そこでも要求するときは `{ requireAuth: true }` で構築します。
 
-招待の接続先は、メタデータアドレスと解釈できないアドレスを常に拒否します。`parseAndVerifyInviteToken(uri, Date.now(), { allowPrivateRelay: false })` と `RequesterClient` の `allowPrivateRelay: false` は、プライベートアドレスとループバックも拒否します。ローカル中継器は既定では有効です。
+招待の接続先は、`allowPrivateRelay: true` を明示しない限り、プライベート、ループバック、リンクローカル、メタデータ、未指定アドレスを拒否します。`parseAndVerifyInviteToken` と `RequesterClient` の既定はこの拒否です。`169.254.169.254`、`0.0.0.0/8`、その他のメタデータと未指定範囲は、プライベート中継を許可しても拒否します。自分で起動したループバック中継に限って、`worker`、`delegate`、`discover`、`mcp-server` に `--allow-private-relay` を渡します。Node クライアントは接続前にホスト名を解決し、検証済みアドレスへソケットを固定します。
 
 プロセスを分けたコマンドアダプタの自動デモもあります。
 

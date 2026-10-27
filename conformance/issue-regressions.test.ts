@@ -769,6 +769,7 @@ describe('issue 20: requester relay URL switch', () => {
     const requester = new RequesterClient({
       owner: requesterKey,
       timeoutMs: 2000,
+      allowPrivateRelay: true,
       approvalProvider: new PolicyAutoApprovalProvider(requesterKey),
     });
     try {
@@ -777,6 +778,7 @@ describe('issue 20: requester relay URL switch', () => {
         const worker = new WorkerNode({
           owner,
           relay: server.url,
+          allowPrivateRelay: true,
           timeoutMs: 2000,
           adapter: {
             id: 'echo',
@@ -806,6 +808,7 @@ describe('issue 20: requester relay URL switch', () => {
       const fresh = new RequesterClient({
         owner: requesterKey,
         timeoutMs: 2000,
+        allowPrivateRelay: true,
         approvalProvider: new PolicyAutoApprovalProvider(requesterKey),
       });
       const relaySwitchFreshControl = await call(fresh, 1);
@@ -1313,7 +1316,9 @@ describe('issue 30: MCP invite expiry preserves an explicit zero', () => {
     ).toThrow('INVALID_INVITE_EXPIRY');
     const accepted = await call(60);
     expect(accepted.isError).toBe(false);
-    const invite = parseAndVerifyInviteToken(accepted.value.inviteToken!);
+    const invite = parseAndVerifyInviteToken(accepted.value.inviteToken!, Date.now(), {
+      allowPrivateRelay: true,
+    });
     expect((Date.parse(invite.expiresAt) - Date.parse(invite.issuedAt)) / 1000).toBe(60);
     const multi = await server.handle({
       jsonrpc: '2.0',

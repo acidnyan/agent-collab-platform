@@ -436,7 +436,7 @@ describe.each(['receive', 'subscribe'] as const)('M3.1 WebSocket %s authenticati
 it('forwards Node headers and auto-signs fresh HTTP, SSE and WebSocket requests', async () => {
   const server = await startLocalRelay();
   cleanup.push(server.close);
-  const client = new HttpRelayClient(server.url, bob),
+  const client = new HttpRelayClient(server.url, bob, { allowPrivateRelay: true }),
     e = envelope();
   await client.send(e);
   expect(await client.receive(bob.did)).toEqual(e);
@@ -447,17 +447,22 @@ it('forwards Node headers and auto-signs fresh HTTP, SSE and WebSocket requests'
     headers: { 'x-acp-relay-auth': createRelayAuthToken(bob), accept: 'application/json' },
   });
   expect(await response.json()).toEqual(extra);
-  const sse = new SseRelayClient(server.url, fetch, (did, action) => {
-    expect(did).toBe(bob.did);
-    return createRelayAuthToken(bob, { action });
-  });
+  const sse = new SseRelayClient(
+    server.url,
+    fetch,
+    (did, action) => {
+      expect(did).toBe(bob.did);
+      return createRelayAuthToken(bob, { action });
+    },
+    { allowPrivateRelay: true },
+  );
   const iterator = sse.stream(bob.did);
   const pending = iterator.next();
   const live = envelope();
   await client.send(live);
   expect((await pending).value).toEqual(live);
   await iterator.return(undefined);
-  const ws = new WebSocketRelayClient(server.wsUrl, bob);
+  const ws = new WebSocketRelayClient(server.wsUrl, bob, { allowPrivateRelay: true });
   cleanup.push(() => ws.close());
   const next = envelope();
   await ws.send(next);
@@ -815,6 +820,8 @@ const alwaysBlocked = [
   '[::]',
   '[::ffff:169.254.169.254]',
   '[::ffff:0:0]',
+  '[fe80::1]',
+  '[febf::1]',
 ];
 const privateHosts = [
   'localhost',
@@ -832,8 +839,6 @@ const privateHosts = [
   '[0:0:0:0:0:0:0:1]',
   '[fc00::1]',
   '[fd12::1]',
-  '[fe80::1]',
-  '[febf::1]',
   '[::ffff:127.0.0.1]',
   'relay.local',
   'service.internal',
@@ -845,11 +850,14 @@ describe('M3.1 invite SSRF guard', () => {
         validateRelayEndpointUrl('http://' + host + '/relay', { allowPrivateRelay }),
       ).toThrow('SSRF_BLOCKED_RELAY_URL');
   });
-  it.each(privateHosts)('blocks private %s only under the strict policy', (host) => {
-    expect(() => validateRelayEndpointUrl('http://' + host)).not.toThrow();
+  it.each(privateHosts)('blocks private %s unless allowPrivateRelay is true', (host) => {
+    expect(() => validateRelayEndpointUrl('http://' + host)).toThrow('SSRF_BLOCKED_RELAY_URL');
     expect(() => validateRelayEndpointUrl('http://' + host, { allowPrivateRelay: false })).toThrow(
       'SSRF_BLOCKED_RELAY_URL',
     );
+    expect(() =>
+      validateRelayEndpointUrl('http://' + host, { allowPrivateRelay: true }),
+    ).not.toThrow();
   });
   it.each(['http:', 'https:', 'ws:', 'wss:'])('accepts public %s endpoints', (scheme) => {
     for (const host of [
@@ -884,9 +892,11 @@ describe('M3.1 invite SSRF guard', () => {
       expect(() => parseAndVerifyInviteToken(invite, Date.now(), strict)).toThrow(
         'SSRF_BLOCKED_RELAY_URL',
       );
-      if (relayUrl.includes('169.254'))
-        expect(() => parseAndVerifyInviteToken(invite)).toThrow('SSRF_BLOCKED_RELAY_URL');
-      else expect(parseAndVerifyInviteToken(invite).relayUrl).toBe(relayUrl);
+      expect(() => parseAndVerifyInviteToken(invite)).toThrow('SSRF_BLOCKED_RELAY_URL');
+      if (!relayUrl.includes('169.254'))
+        expect(
+          parseAndVerifyInviteToken(invite, Date.now(), { allowPrivateRelay: true }).relayUrl,
+        ).toBe(relayUrl);
       const client = new RequesterClient({ owner: alice, ...strict });
       await expect(
         client.delegate({ to: invite, title: 'Blocked', description: 'SSRF test', input: {} }),

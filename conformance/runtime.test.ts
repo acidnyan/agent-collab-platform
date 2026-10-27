@@ -361,8 +361,8 @@ describe('A2A and blind relay wire integration', () => {
       const server = await startLocalRelay(),
         client =
           transport === 'http'
-            ? new HttpRelayClient(server.url, other)
-            : new WebSocketRelayClient(server.wsUrl, other);
+            ? new HttpRelayClient(server.url, other, { allowPrivateRelay: true })
+            : new WebSocketRelayClient(server.wsUrl, other, { allowPrivateRelay: true });
       try {
         const e = signEnvelope(
           {

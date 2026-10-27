@@ -17,6 +17,8 @@ export interface AcpMcpServerOptions {
   name?: string;
   /** Signs agentDid on acp_create_invite when that DID is not the server owner. */
   agentKey?: KeyPair;
+  /** Opt in to loopback and RFC1918 relays. Untrusted invites stay blocked by default. */
+  allowPrivateRelay?: boolean;
 }
 
 interface RpcRequest {
@@ -264,6 +266,7 @@ export class AcpMcpServer {
     return new RequesterClient({
       owner: this.options.owner,
       relay: selected,
+      allowPrivateRelay: this.options.allowPrivateRelay,
       approvalProvider: new PolicyAutoApprovalProvider(this.options.owner),
     });
   }

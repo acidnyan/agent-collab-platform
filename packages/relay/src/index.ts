@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { verifyEnvelope, createRelayAuthToken } from '@acp/core';
+import { verifyEnvelope, createRelayAuthToken, validateRelayEndpointUrl } from '@acp/core';
 import type { SignedEnvelope, KeyPair, RelayAuthAction } from '@acp/core';
 import {
   DEFAULT_MAX_ENVELOPE_BYTES,
@@ -9,7 +9,16 @@ import {
   createRelayFetchHandler,
   relayHttpHeaders,
 } from './fetch.js';
+import { createPinnedRelayFetch, resolveAndValidateRelayEndpoint } from './ssrf.js';
+import type { RelayClientSecurityOptions } from './ssrf.js';
 export * from './fetch.js';
+export { createPinnedRelayFetch, resolveAndValidateRelayEndpoint } from './ssrf.js';
+export type {
+  RelayClientSecurityOptions,
+  RelayLookup,
+  ResolvedAddress,
+  ResolvedRelayEndpoint,
+} from './ssrf.js';
 export {
   createSignedAgentCard,
   verifySignedAgentCard,
@@ -226,16 +235,70 @@ export interface RelayTransport {
     | import('@acp/core').SignedAgentCard[]
     | Promise<import('@acp/core').SignedAgentCard[]>;
 }
+const nativeFetch = globalThis.fetch;
+function isKeyPair(value: unknown): value is KeyPair {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    'did' in value &&
+    'privateKey' in value &&
+    typeof (value as KeyPair).did === 'string' &&
+    typeof (value as KeyPair).privateKey === 'string'
+  );
+}
+function splitRelayArgs(
+  second?: typeof fetch | KeyPair | RelayClientSecurityOptions,
+  third?: RelayAuthSource | RelayClientSecurityOptions,
+  fourth?: RelayClientSecurityOptions,
+): { fetcher: typeof fetch; auth?: RelayAuthSource; security: RelayClientSecurityOptions } {
+  let fetcher: typeof fetch = fetch;
+  let auth: RelayAuthSource | undefined;
+  let security: RelayClientSecurityOptions = {};
+  if (typeof second === 'function') fetcher = second;
+  else if (isKeyPair(second)) auth = second;
+  else if (second) security = { ...second };
+  if (typeof third === 'function' || isKeyPair(third)) auth = third;
+  else if (third) security = { ...security, ...third };
+  if (fourth) security = { ...security, ...fourth };
+  return { fetcher, auth, security };
+}
 export class HttpRelayClient extends RelayCredentials implements RelayTransport {
   private buffered = new Map<string, SignedEnvelope[]>();
+  private readonly baseFetcher: typeof fetch;
+  private readonly security: RelayClientSecurityOptions;
+  private transportPromise?: Promise<typeof fetch>;
   readonly fetcher: typeof fetch;
   constructor(
     readonly url: string,
-    fetcherOrKey: typeof fetch | KeyPair = fetch,
-    authSource?: RelayAuthSource,
+    fetcherOrKey: typeof fetch | KeyPair | RelayClientSecurityOptions = fetch,
+    authOrOptions?: RelayAuthSource | RelayClientSecurityOptions,
+    options?: RelayClientSecurityOptions,
   ) {
-    super(typeof fetcherOrKey === 'function' ? authSource : fetcherOrKey);
-    this.fetcher = typeof fetcherOrKey === 'function' ? fetcherOrKey : fetch;
+    const parsed = splitRelayArgs(fetcherOrKey, authOrOptions, options);
+    super(parsed.auth);
+    this.baseFetcher = parsed.fetcher;
+    this.security = parsed.security;
+    this.fetcher = ((input: RequestInfo | URL, init?: RequestInit) =>
+      this.dispatch(input, init)) as typeof fetch;
+  }
+  private async dispatch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const transport = await this.prepare();
+    return transport(input, init);
+  }
+  private prepare(): Promise<typeof fetch> {
+    // Keep a rejected resolution cached so a later lookup cannot rebind the target.
+    this.transportPromise ??= this.buildTransport();
+    return this.transportPromise;
+  }
+  private async buildTransport(): Promise<typeof fetch> {
+    const custom = this.baseFetcher !== nativeFetch;
+    if (custom && !this.security.lookup) {
+      validateRelayEndpointUrl(this.url, { allowPrivateRelay: this.security.allowPrivateRelay });
+      return this.baseFetcher;
+    }
+    const resolved = await resolveAndValidateRelayEndpoint(this.url, this.security);
+    if (custom) return this.baseFetcher;
+    return createPinnedRelayFetch(resolved);
   }
   async send(envelope: SignedEnvelope): Promise<void> {
     const result = await this.fetcher(this.url + '/envelopes', {
@@ -394,28 +457,71 @@ export class SseRelayClient extends HttpRelayClient {
     }
   }
 }
+function socketIsOpen(socket: WebSocket | undefined): boolean {
+  return socket?.readyState === WebSocket.OPEN;
+}
 export class WebSocketRelayClient extends RelayCredentials {
-  private socket: WebSocket;
+  private socket?: WebSocket;
   private pending = false;
-  constructor(url: string, authSource?: RelayAuthSource) {
-    super(authSource);
-    this.socket = new WebSocket(url);
+  private stopped = false;
+  private opening?: Promise<void>;
+  private readonly security: RelayClientSecurityOptions;
+  constructor(
+    readonly url: string,
+    authOrOptions?: RelayAuthSource | RelayClientSecurityOptions,
+    options?: RelayClientSecurityOptions,
+  ) {
+    const parsed = splitRelayArgs(undefined, authOrOptions, options);
+    super(parsed.auth);
+    this.security = parsed.security;
+  }
+  private requireSocket(): WebSocket {
+    if (!this.socket) throw new Error('RELAY_CLOSED');
+    return this.socket;
+  }
+  private async open(): Promise<void> {
+    const resolved = await resolveAndValidateRelayEndpoint(this.url, this.security);
+    if (this.stopped) return;
+    const hostname = resolved.url.hostname.replace(/^\[|\]$/g, '');
+    const secure = resolved.url.protocol === 'wss:';
+    const wsOptions = {
+      lookup: resolved.lookup,
+      ...(secure ? { servername: hostname } : {}),
+    };
+    const socket = new WebSocket(this.url, wsOptions);
+    this.socket = socket;
+    if (this.stopped) {
+      socket.close();
+      return;
+    }
+    if (socket.readyState === WebSocket.OPEN) return;
+    await new Promise<void>((resolve, reject) => {
+      const fail = (error: Error) => reject(error);
+      socket.once('open', () => {
+        socket.off('error', fail);
+        resolve();
+      });
+      socket.once('error', fail);
+    });
   }
   async ready(): Promise<void> {
-    if (this.socket.readyState === WebSocket.OPEN) return;
-    await new Promise<void>((resolve, reject) => {
-      this.socket.once('open', resolve);
-      this.socket.once('error', reject);
-    });
+    if (this.stopped) throw new Error('RELAY_CLOSED');
+    // Read readyState through a helper so the early check does not exclude OPEN later.
+    if (!socketIsOpen(this.socket)) {
+      this.opening ??= this.open();
+      await this.opening;
+    }
+    if (this.stopped || !socketIsOpen(this.socket)) throw new Error('RELAY_CLOSED');
   }
   private async request(body: unknown): Promise<{ error?: string; envelope?: SignedEnvelope }> {
     await this.ready();
     if (this.pending) throw new Error('CONCURRENT_RELAY_REQUEST');
     this.pending = true;
     try {
+      const socket = this.requireSocket();
       return await new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
-          this.socket.removeListener('message', receive);
+          socket.removeListener('message', receive);
           reject(new Error('RELAY_TIMEOUT'));
         }, 5000);
         const receive = (raw: import('ws').RawData) => {
@@ -427,8 +533,8 @@ export class WebSocketRelayClient extends RelayCredentials {
             reject(e);
           }
         };
-        this.socket.once('message', receive);
-        this.socket.send(JSON.stringify(body));
+        socket.once('message', receive);
+        socket.send(JSON.stringify(body));
       });
     } finally {
       this.pending = false;
@@ -478,12 +584,13 @@ export class WebSocketRelayClient extends RelayCredentials {
         wake();
       };
     const abort = () => wake();
-    this.socket.on('message', receive);
-    this.socket.once('close', close);
-    this.socket.once('error', error);
+    const socket = this.requireSocket();
+    socket.on('message', receive);
+    socket.once('close', close);
+    socket.once('error', error);
     signal?.addEventListener('abort', abort, { once: true });
     try {
-      this.socket.send(JSON.stringify({ method: 'subscribe', recipientDid, authToken }));
+      socket.send(JSON.stringify({ method: 'subscribe', recipientDid, authToken }));
       while (!signal?.aborted) {
         if (failure) throw failure;
         if (queue.length) {
@@ -496,20 +603,22 @@ export class WebSocketRelayClient extends RelayCredentials {
         });
       }
     } finally {
-      this.socket.off('message', receive);
-      this.socket.off('close', close);
-      this.socket.off('error', error);
+      socket.off('message', receive);
+      socket.off('close', close);
+      socket.off('error', error);
       signal?.removeEventListener('abort', abort);
-      if (this.socket.readyState === WebSocket.OPEN)
-        this.socket.send(JSON.stringify({ method: 'unsubscribe' }));
+      if (socket.readyState === WebSocket.OPEN)
+        socket.send(JSON.stringify({ method: 'unsubscribe' }));
       this.pending = false;
     }
   }
   async close(): Promise<void> {
-    if (this.socket.readyState === WebSocket.CLOSED) return;
+    this.stopped = true;
+    const socket = this.socket;
+    if (!socket || socket.readyState === WebSocket.CLOSED) return;
     await new Promise<void>((resolve) => {
-      this.socket.once('close', resolve);
-      this.socket.close();
+      socket.once('close', resolve);
+      socket.close();
     });
   }
 }

@@ -23,8 +23,11 @@ export interface RevocationList {
 }
 
 /** Stable invite target id: JCS SHA-256 of the verified invite payload. */
-export function inviteRevocationId(token: string): string {
-  return digest(parseAndVerifyInviteToken(token));
+export function inviteRevocationId(
+  token: string,
+  options: { allowPrivateRelay?: boolean } = {},
+): string {
+  return digest(parseAndVerifyInviteToken(token, Date.now(), options));
 }
 
 export function createRevocationNotice(

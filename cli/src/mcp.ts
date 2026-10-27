@@ -15,7 +15,7 @@ function flags(args: string[]): Map<string, string | true> {
   return out;
 }
 
-/** `acp mcp-server [--key <file>] [--relay URL]` speaks MCP over stdio. */
+/** `acp mcp-server [--key <file>] [--relay URL] [--allow-private-relay]` speaks MCP over stdio. */
 export async function mcpServerCommand(args: string[]): Promise<void> {
   const parsed = flags(args);
   const relay = parsed.get('--relay');
@@ -23,6 +23,7 @@ export async function mcpServerCommand(args: string[]): Promise<void> {
   const server = new AcpMcpServer({
     owner,
     relay: typeof relay === 'string' ? relay : undefined,
+    allowPrivateRelay: parsed.has('--allow-private-relay'),
   });
   await server.serve(process.stdin, process.stdout);
 }
@@ -36,6 +37,6 @@ function resolveOwner(parsed: Map<string, string | true>): KeyPair {
   if (!parsed.has('--key')) return generateKeyPair();
   const keyFile = parsed.get('--key');
   if (typeof keyFile !== 'string')
-    throw new Error('Usage: acp mcp-server [--key <file>] [--relay URL]');
+    throw new Error('Usage: acp mcp-server [--key <file>] [--relay URL] [--allow-private-relay]');
   return JSON.parse(readFileSync(keyFile, 'utf8')) as KeyPair;
 }

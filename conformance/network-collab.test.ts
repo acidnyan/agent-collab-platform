@@ -70,7 +70,10 @@ function bridge() {
   const handler = createRelayFetchHandler();
   const fetcher: typeof fetch = async (input, init) =>
     handler(input instanceof Request && !init ? input : new Request(input, init));
-  return { fetcher, client: new HttpRelayClient('http://relay.local', fetcher) };
+  return {
+    fetcher,
+    client: new HttpRelayClient('http://relay.local', fetcher, { allowPrivateRelay: true }),
+  };
 }
 async function network() {
   if (process.env.ACP_TEST_FETCH_BRIDGE === '1') {
@@ -81,7 +84,7 @@ async function network() {
     const server = await startLocalRelay();
     cleanup.push(server.close);
     return {
-      client: new HttpRelayClient(server.url),
+      client: new HttpRelayClient(server.url, { allowPrivateRelay: true }),
       fetcher: fetch,
       url: server.url,
       wsUrl: server.wsUrl,
@@ -138,6 +141,7 @@ async function session(
   const requester = new RequesterClient({
     owner: alice,
     relay: client,
+    allowPrivateRelay: true,
     verificationEngine: engine,
     approvalProvider: requesterApproval ?? auto(alice),
     auditPath: join(dir, 'alice.jsonl'),
@@ -354,7 +358,9 @@ describe('WP-8 signed discovery, invite and relay transports', () => {
     expect((await fetcher(url + '/health')).status).toBe(200);
     for (const format of ['acp', 'acp-invite'] as const) {
       const token = createInviteToken({ agentCard: card, format }, owner);
-      expect(parseAndVerifyInviteToken(token).ownerDid).toBe(owner.did);
+      expect(parseAndVerifyInviteToken(token, Date.now(), { allowPrivateRelay: true }).ownerDid).toBe(
+        owner.did,
+      );
       expect(() => parseAndVerifyInviteToken(token, Date.now() + 7200000)).toThrow(/INVITE/);
     }
     const token = createInviteToken({ agentCard: card }, owner);
@@ -405,7 +411,7 @@ describe('WP-8 signed discovery, invite and relay transports', () => {
       a = generateKeyPair(),
       b = generateKeyPair(),
       controller = new AbortController();
-    const client = new SseRelayClient(url, fetcher, b),
+    const client = new SseRelayClient(url, fetcher, b, { allowPrivateRelay: true }),
       iterator = client.stream(b.did, controller.signal);
     const pending = iterator.next();
     const e = signEnvelope(
@@ -428,7 +434,7 @@ describe('WP-8 signed discovery, invite and relay transports', () => {
     if (!n.wsUrl) return;
     const a = generateKeyPair(),
       b = generateKeyPair();
-    const client = new WebSocketRelayClient(n.wsUrl, b);
+    const client = new WebSocketRelayClient(n.wsUrl, b, { allowPrivateRelay: true });
     cleanup.push(() => client.close());
     const e = signEnvelope(
       { taskId: 'task_socket01', recipientDid: b.did, seq: 0, eventType: 'PING', payload: {} },
@@ -675,7 +681,7 @@ it('WP-11 CLI: invite, discover, worker --once, delegate, audit-verify', async (
         '--relay',
         n.url,
       ]);
-      await networkCommand('discover', ['--relay', n.url]);
+      await networkCommand('discover', ['--relay', n.url, '--allow-private-relay']);
       await Promise.all([
         networkCommand('worker', [
           'start',
@@ -683,6 +689,7 @@ it('WP-11 CLI: invite, discover, worker --once, delegate, audit-verify', async (
           join(dir, 'bob.private.json'),
           '--relay',
           n.url,
+          '--allow-private-relay',
           '--adapter',
           'sandbox',
           '--auto-accept',
@@ -698,6 +705,7 @@ it('WP-11 CLI: invite, discover, worker --once, delegate, audit-verify', async (
           bob.did,
           '--relay',
           n.url,
+          '--allow-private-relay',
           '--title',
           'Echo',
           '--description',
@@ -720,7 +728,9 @@ it('WP-11 CLI: invite, discover, worker --once, delegate, audit-verify', async (
     const invite = (
       await cli(['invite', 'create', '--key', join(dir, 'bob.private.json'), '--relay', n.url]).done
     ).trim();
-    expect(parseAndVerifyInviteToken(invite).ownerDid).toBe(bob.did);
+    expect(parseAndVerifyInviteToken(invite, Date.now(), { allowPrivateRelay: true }).ownerDid).toBe(
+      bob.did,
+    );
     let ready!: (line: string) => void;
     const token = new Promise<string>((resolve) => {
       ready = resolve;
@@ -733,6 +743,7 @@ it('WP-11 CLI: invite, discover, worker --once, delegate, audit-verify', async (
         join(dir, 'bob.private.json'),
         '--relay',
         n.url,
+        '--allow-private-relay',
         '--adapter',
         'sandbox',
         '--auto-accept',
@@ -752,7 +763,9 @@ it('WP-11 CLI: invite, discover, worker --once, delegate, audit-verify', async (
       await worker.done.catch(() => {});
     });
     const workerInvite = await token;
-    const found = JSON.parse(await cli(['discover', '--relay', n.url]).done);
+    const found = JSON.parse(
+      await cli(['discover', '--relay', n.url, '--allow-private-relay']).done,
+    );
     expect(found[0].payload.ownerDid).toBe(bob.did);
     const output = await cli([
       'delegate',
@@ -760,6 +773,7 @@ it('WP-11 CLI: invite, discover, worker --once, delegate, audit-verify', async (
       join(dir, 'alice.private.json'),
       '--to',
       workerInvite,
+      '--allow-private-relay',
       '--title',
       'Echo',
       '--description',
@@ -786,8 +800,8 @@ it('completes a full session using persistent SSE transport', async () => {
   const n = await network(),
     alice = generateKeyPair(),
     bob = generateKeyPair();
-  const aTransport = new SseRelayClient(n.url, n.fetcher),
-    bTransport = new SseRelayClient(n.url, n.fetcher);
+  const aTransport = new SseRelayClient(n.url, n.fetcher, { allowPrivateRelay: true }),
+    bTransport = new SseRelayClient(n.url, n.fetcher, { allowPrivateRelay: true });
   cleanup.push(
     () => aTransport.close(),
     () => bTransport.close(),
@@ -802,6 +816,7 @@ it('completes a full session using persistent SSE transport', async () => {
   const client = new RequesterClient({
     owner: alice,
     relay: aTransport,
+    allowPrivateRelay: true,
     approvalProvider: auto(alice),
   });
   const [w, r] = await Promise.all([

@@ -150,7 +150,7 @@ Then pass `--relay http://127.0.0.1:8787` in the terminals below. Loopback is re
 ```sh
 pnpm acp keygen /tmp/bob.private.json
 pnpm acp worker start --key /tmp/bob.private.json \
-  --relay http://127.0.0.1:8787 --adapter sandbox \
+  --relay http://127.0.0.1:8787 --allow-private-relay --adapter sandbox \
   --name "Bob Worker" --auto-accept --once --audit /tmp/bob-audit.jsonl
 ```
 
@@ -168,13 +168,13 @@ Copy the printed `acp-invite:...` line. This local example echoes the JSON input
 pnpm acp keygen /tmp/alice.private.json
 # Paste Bob's complete token when prompted
 read -r BOB_INVITE
-pnpm acp delegate --key /tmp/alice.private.json --to "$BOB_INVITE" \
+pnpm acp delegate --key /tmp/alice.private.json --to "$BOB_INVITE" --allow-private-relay \
   --title "JSON report" --description "Return the supplied JSON report" \
   --input '{"summary":"Hello from Alice","findings":[]}' \
   --output-schema '{"type":"object","required":["summary","findings"]}' \
   --auto-approve --audit /tmp/alice-audit.jsonl --out /tmp/report.json
 pnpm acp audit-verify /tmp/alice-audit.jsonl
-pnpm acp discover --relay http://127.0.0.1:8787
+pnpm acp discover --relay http://127.0.0.1:8787 --allow-private-relay
 ```
 
 Expected: `SETTLED`, a JSON deliverable, and audit status `VALID` on both owners. Alice verifies signatures, digests and budget, JSON Schema and registered isolated checks, then obtains a signed final approval. `--auto-approve` explicitly opts into policy approval of final verification; omit it for human review. `acp://invite?token=...` is also accepted. Alternatively, use `--to <Bob DID> --relay <URL>`. Bob can verify his own `/tmp/bob-audit.jsonl` locally.
@@ -226,7 +226,7 @@ A worker reports `PROGRESS` (`percent`, `step`, `message`, and intermediate toke
 
 HTTP receives, SSE streams and WebSocket receives/subscriptions require a fresh recipient-signed `RelayAuth` token. `WorkerNode`, `RequesterClient` and the CLI sign automatically. For direct transport use, pass the recipient key as `new HttpRelayClient(url, key)`, `new SseRelayClient(url, fetch, key)` or `new WebSocketRelayClient(wsUrl, key)`. HTTP/SSE also accept an async token generator as their third argument; WebSocket accepts it as its second argument. Raw HTTP callers can send `createRelayAuthToken(key, { action })` through `Authorization: Bearer <token>`, `x-acp-relay-auth` or the `auth` query parameter. Use `receive`, `stream` or `subscribe` to match the operation. Tokens expire after five minutes of clock skew and each nonce can be used once while retained in the bounded replay cache. Direct `InMemoryRelay.receive(did)` remains available by default; construct with `{ requireAuth: true }` to require a token there too.
 
-Invite endpoints always block metadata and unspecified addresses. `parseAndVerifyInviteToken(uri, Date.now(), { allowPrivateRelay: false })` and `RequesterClient`'s `allowPrivateRelay: false` option also reject private and loopback endpoints. Local relays remain enabled by default.
+Invite endpoints block private, loopback, link-local, metadata, and unspecified addresses unless the caller passes `allowPrivateRelay: true`. `parseAndVerifyInviteToken` and `RequesterClient` default to that block. `169.254.169.254`, `0.0.0.0/8`, and other metadata or unspecified ranges stay blocked even when private relays are allowed. Pass `--allow-private-relay` on `worker`, `delegate`, `discover`, and `mcp-server` only for a loopback relay you started yourself. Node clients resolve the hostname and pin the socket to those addresses before connecting.
 
 A fully automated **separate-process command-adapter demo** is also available:
 

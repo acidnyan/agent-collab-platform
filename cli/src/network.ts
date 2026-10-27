@@ -106,6 +106,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     throw new Error('Expected ' + command + ' start');
   if (command === 'invite' && sub !== 'create') throw new Error('Expected invite create');
   const f = flags(args);
+  const allowPrivateRelay = f.has('--allow-private-relay');
   if (command === 'relay') {
     const port = Number(text(f, 'port', '8787'));
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('INVALID_PORT');
@@ -120,7 +121,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     return;
   }
   if (command === 'discover') {
-    const client = new HttpRelayClient(text(f, 'relay'));
+    const client = new HttpRelayClient(text(f, 'relay'), { allowPrivateRelay });
     console.log(JSON.stringify(await client.discover(), null, 2));
     return;
   }
@@ -173,7 +174,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     }
     const worker = new WorkerNode({
       owner: key,
-      relay: new HttpRelayClient(text(f, 'relay'), key),
+      relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay }),
       relayUrl: text(f, 'relay'),
       adapter,
       name: text(f, 'name', adapter.name),
@@ -181,6 +182,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
       onEvent: (event, taskId) => console.error(JSON.stringify({ event, taskId })),
       ...acceptance,
+      allowPrivateRelay,
     });
     if (acceptance.publishToRegistry) await worker.register();
     console.log(worker.invite());
@@ -205,9 +207,12 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     }
     const client = new RequesterClient({
       owner: key,
-      ...(f.has('--relay') ? { relay: new HttpRelayClient(text(f, 'relay'), key) } : {}),
+      ...(f.has('--relay')
+        ? { relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay }) }
+        : {}),
       approvalProvider: approval(key, automatic),
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
+      allowPrivateRelay,
     });
     const result = await client.delegate({
       to: text(f, 'to'),
