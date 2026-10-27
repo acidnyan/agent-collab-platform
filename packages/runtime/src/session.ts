@@ -508,12 +508,19 @@ export class WorkerNode {
         signal: executionSignal,
         reportUsage: (delta) => gateway!.quota.recordMetrics(delta),
         reportProgress: (progress) => {
+          // An invalid payload poisons the session even when the adapter catches the rejection.
+          // Its metrics are not charged.
+          const invalidProgress = (): Promise<never> => {
+            const error = new Error('INVALID_PROGRESS');
+            progressFailure ??= error;
+            return Promise.reject(error);
+          };
           // Validate and charge quota before returning, so a later call on this turn
           // observes BUDGET_EXCEEDED without waiting for the wire queue.
           if (!progress || typeof progress.step !== 'string' || progress.step.length === 0)
-            return Promise.reject(new Error('INVALID_PROGRESS'));
+            return invalidProgress();
           if (progress.percent !== undefined && typeof progress.percent !== 'number')
-            return Promise.reject(new Error('INVALID_PROGRESS'));
+            return invalidProgress();
           let metricsError: unknown;
           if (progress.metrics) {
             const delta: {
@@ -633,7 +640,13 @@ export class WorkerNode {
         wireFailureSent = true;
         await wire.rawSend('ERROR', { code: safeError(progressFailure ?? e) }).catch(() => {});
       }
-      if (progressFailure instanceof Error) throw progressFailure;
+      // A quota abort already surfaces as EXECUTION_ABORTED. Keep that error.
+      // A caught INVALID_PROGRESS still fails the session with the sticky error.
+      if (
+        progressFailure instanceof Error &&
+        !(e instanceof Error && e.message.startsWith('EXECUTION_ABORTED'))
+      )
+        throw progressFailure;
       throw e;
     } finally {
       gateway?.close();

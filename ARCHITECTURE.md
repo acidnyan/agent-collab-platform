@@ -133,7 +133,7 @@ stateDiagram-v2
 
 ### Live progress, cancellation, revocation, and quorum
 
-`PROGRESS` is an ordinary session event. The worker encrypts it to the requester, both sides countersign the audit entry, and `QuotaMeter` charges any reported intermediate usage. `CANCEL` is a signed transition to `CANCELLED`. The worker aborts the task `AbortSignal` and terminates the sandbox child (`SIGTERM`, then `SIGKILL`) before sealing the bilateral log.
+`PROGRESS` is an ordinary session event. The worker encrypts it to the requester, both sides countersign the audit entry, and `QuotaMeter` charges any reported intermediate usage from a valid report. An invalid `reportProgress` payload (`INVALID_PROGRESS`, such as an empty `step` or a non-numeric `percent`) does not apply its `metrics` to quota accounting. The call rejects immediately and records a sticky session failure, so the session is rejected with `INVALID_PROGRESS` (`PEER_REJECTED: {"code":"INVALID"}`) even when the worker adapter catches that promise. `CANCEL` is a signed transition to `CANCELLED`. The worker aborts the task `AbortSignal` and terminates the sandbox child (`SIGTERM`, then `SIGKILL`) before sealing the bilateral log.
 
 Invite and capability revocation are separate from task-scoped `revokeTask`. A `RevocationNotice` is an Ed25519 JCS statement. The worker checks invite tokens before `ACCEPT`. `CapabilityGuard` checks capability ids and token digests before a tool call and throws `TOKEN_REVOKED`.
 
