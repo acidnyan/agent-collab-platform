@@ -194,13 +194,26 @@ function emptyUsage(): UsageSnapshot {
   return { seen: false };
 }
 
-async function readUpstream(result: Response, response: ServerResponse): Promise<UsageSnapshot> {
+interface UpstreamRead {
+  snapshot: UsageSnapshot;
+  /** Set when the copy stopped before a clean EOF. Usage already parsed is still returned. */
+  error?: unknown;
+}
+
+/**
+ * Copy the provider body to the client and collect usage.
+ * `reader.read()` and `response.write()` can fail after valid SSE or JSON
+ * usage has already been forwarded. That failure must not drop the snapshot:
+ * the caller accounts it once, then surfaces the stream error.
+ */
+async function readUpstream(result: Response, response: ServerResponse): Promise<UpstreamRead> {
   const reader = result.body?.getReader();
-  if (!reader) return emptyUsage();
+  if (!reader) return { snapshot: emptyUsage() };
   const contentType = (result.headers.get('content-type') ?? '').toLowerCase();
   const sse = contentType.includes('text/event-stream');
   const parser = sse ? new SseUsageParser() : undefined;
   const jsonChunks: Buffer[] = [];
+  let error: unknown;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -209,13 +222,31 @@ async function readUpstream(result: Response, response: ServerResponse): Promise
       const bytes = Buffer.from(value);
       if (parser) parser.push(bytes);
       else jsonChunks.push(bytes);
-      if (!response.destroyed) response.write(bytes);
+      if (response.destroyed || response.writableEnded) {
+        error = new Error('DOWNSTREAM_WRITE_FAILED');
+        break;
+      }
+      try {
+        response.write(bytes);
+      } catch (caught) {
+        error = caught;
+        break;
+      }
     }
+  } catch (caught) {
+    error = caught;
   } finally {
     await reader.cancel().catch(() => undefined);
   }
-  if (parser) return parser.finish();
-  return usageFromJson(Buffer.concat(jsonChunks).toString('utf8'));
+  let snapshot = emptyUsage();
+  try {
+    snapshot = parser
+      ? parser.finish()
+      : usageFromJson(Buffer.concat(jsonChunks).toString('utf8'));
+  } catch (caught) {
+    error ??= caught;
+  }
+  return error === undefined ? { snapshot } : { snapshot, error };
 }
 
 function deny(
@@ -338,13 +369,18 @@ export async function startCredentialProxy(
       response.writeHead(result.status, {
         'content-type': result.headers.get('content-type') ?? 'application/json',
       });
-      const snapshot = await readUpstream(result, response);
-      account(snapshot);
+      const upstreamBody = await readUpstream(result, response);
+      account(upstreamBody.snapshot);
+      if (upstreamBody.error) throw upstreamBody.error;
       if (!response.writableEnded) response.end();
     } catch {
-      if (!response.headersSent) response.writeHead(502);
-      if (!response.writableEnded)
-        response.end(JSON.stringify({ error: 'PROVIDER_REQUEST_FAILED' }));
+      try {
+        if (!response.headersSent) response.writeHead(502);
+        if (!response.writableEnded)
+          response.end(JSON.stringify({ error: 'PROVIDER_REQUEST_FAILED' }));
+      } catch {
+        // The client socket can already be gone when the upstream stream fails.
+      }
     }
   });
   await new Promise<void>((resolve, reject) => {
