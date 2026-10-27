@@ -164,9 +164,13 @@ replace/remove these markers before running. Choose one adapter name.
 
    Success means `SETTLED`, a saved deliverable, and `"valid":true` from
    audit-verify. Signature/hash integrity does not replace semantic review of
-   the work. Optionally pass a second positional trust-anchor JSON file with
-   `taskId`, two `actors` DIDs, and an independently obtained `head` to detect
-   truncation. Report failures without claiming success or silently retrying
+   the work. Without a trust anchor, `statusLabel` is
+   `VALID (no trust anchor: truncation not checked)` (`status` stays `VALID`).
+   Optionally pass a second positional trust-anchor JSON file with `taskId`, two
+   `actors` DIDs, and an independently obtained `head` to detect truncation, or
+   pass `--expect-final-state`, `--expect-last-hash`, and `--expect-entry-count`.
+   A match reports `statusLabel` `VALID` with `trustAnchorVerified` and
+   `truncationChecked`. Report failures without claiming success or silently retrying
    paid work; preserve the audit log. 成果物の検収と監査検証の両方を行い、
    エラー・承認拒否はオーナーに報告します。
 

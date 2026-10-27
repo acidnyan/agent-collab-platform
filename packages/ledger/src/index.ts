@@ -159,10 +159,145 @@ export class BilateralLedger {
     return { entries, checkpoint };
   }
 }
+/** External pin for the bilateral checkpoint. `head` is the checkpoint head. */
+export interface AuditTrustAnchor {
+  taskId?: string;
+  actors?: [string, string];
+  head?: string;
+  expectedFinalState?: string;
+  expectedLastEntryHash?: string;
+  expectedEntryCount?: number;
+}
+export interface AuditVerificationOptions extends AuditTrustAnchor {
+  trustAnchor?: AuditTrustAnchor;
+}
+export interface AuditVerificationResult {
+  valid: boolean;
+  status: 'VALID' | 'INVALID';
+  statusLabel: string;
+  trustAnchorVerified: boolean;
+  truncationChecked: boolean;
+  reason?: string;
+}
+/**
+ * Intact chain with no external anchor. A hash chain cannot tell a complete
+ * older log from the current one, so tail truncation is not checked.
+ */
+export const AUDIT_VALID_WITHOUT_TRUST_ANCHOR =
+  'VALID (no trust anchor: truncation not checked)';
+function hasText(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+function textField(primary: string | undefined, fallback: string | undefined): string | undefined {
+  if (hasText(primary)) return primary;
+  if (hasText(fallback)) return fallback;
+  return undefined;
+}
+function anchorSupplied(options?: AuditVerificationOptions): boolean {
+  if (!options) return false;
+  return [options, options.trustAnchor].some((part) => {
+    if (!part) return false;
+    return (
+      part.taskId !== undefined ||
+      part.actors !== undefined ||
+      hasText(part.head) ||
+      hasText(part.expectedFinalState) ||
+      hasText(part.expectedLastEntryHash) ||
+      typeof part.expectedEntryCount === 'number'
+    );
+  });
+}
+function sameAnchorField(left: unknown, right: unknown): boolean {
+  if (left === undefined || right === undefined) return true;
+  return digest(left) === digest(right);
+}
+function resolveAnchor(options?: AuditVerificationOptions): AuditTrustAnchor {
+  const nested = options?.trustAnchor;
+  if (
+    options &&
+    nested &&
+    (!sameAnchorField(options.taskId, nested.taskId) ||
+      !sameAnchorField(options.actors, nested.actors) ||
+      !sameAnchorField(options.head, nested.head) ||
+      !sameAnchorField(options.expectedFinalState, nested.expectedFinalState) ||
+      !sameAnchorField(options.expectedLastEntryHash, nested.expectedLastEntryHash) ||
+      !sameAnchorField(options.expectedEntryCount, nested.expectedEntryCount))
+  )
+    throw new Error('trust anchor');
+  return {
+    taskId: options?.taskId ?? nested?.taskId,
+    actors: options?.actors ?? nested?.actors,
+    head: textField(options?.head, nested?.head),
+    expectedFinalState: textField(options?.expectedFinalState, nested?.expectedFinalState),
+    expectedLastEntryHash: textField(options?.expectedLastEntryHash, nested?.expectedLastEntryHash),
+    expectedEntryCount: options?.expectedEntryCount ?? nested?.expectedEntryCount,
+  };
+}
+function assertTrustAnchor(
+  anchor: AuditTrustAnchor,
+  checkpoint: Checkpoint,
+  entries: AuditEntry[],
+): void {
+  if (anchor.taskId !== undefined && anchor.taskId !== checkpoint.taskId)
+    throw new Error('trust anchor');
+  if (anchor.actors !== undefined) {
+    if (
+      !Array.isArray(anchor.actors) ||
+      anchor.actors.length !== 2 ||
+      digest(anchor.actors) !== digest(checkpoint.actors)
+    )
+      throw new Error('trust anchor');
+  }
+  const last = entries.at(-1)?.entryHash ?? null;
+  if (anchor.head !== undefined && anchor.head !== checkpoint.head) throw new Error('trust anchor');
+  if (anchor.expectedLastEntryHash !== undefined && anchor.expectedLastEntryHash !== last)
+    throw new Error('trust anchor');
+  if (anchor.expectedEntryCount !== undefined) {
+    if (
+      typeof anchor.expectedEntryCount !== 'number' ||
+      !Number.isSafeInteger(anchor.expectedEntryCount) ||
+      anchor.expectedEntryCount < 0 ||
+      anchor.expectedEntryCount !== checkpoint.count
+    )
+      throw new Error('trust anchor');
+  }
+  if (
+    anchor.expectedFinalState !== undefined &&
+    entries.at(-1)?.body.eventType !== anchor.expectedFinalState
+  )
+    throw new Error('trust anchor');
+}
+function auditResult(supplied: boolean, error?: unknown): AuditVerificationResult {
+  if (error !== undefined)
+    return {
+      valid: false,
+      status: 'INVALID',
+      statusLabel: 'INVALID',
+      trustAnchorVerified: false,
+      truncationChecked: supplied,
+      reason: String(error),
+    };
+  if (!supplied)
+    return {
+      valid: true,
+      status: 'VALID',
+      statusLabel: AUDIT_VALID_WITHOUT_TRUST_ANCHOR,
+      trustAnchorVerified: false,
+      truncationChecked: false,
+    };
+  return {
+    valid: true,
+    status: 'VALID',
+    statusLabel: 'VALID',
+    trustAnchorVerified: true,
+    truncationChecked: true,
+  };
+}
 export function verifyAudit(
   bundle: AuditBundle,
-  expected?: { taskId: string; actors: [string, string]; head?: string },
-): { valid: boolean; status: 'VALID' | 'INVALID'; reason?: string } {
+  expected?: AuditVerificationOptions,
+): AuditVerificationResult {
+  const supplied = anchorSupplied(expected);
   try {
     const { entries, checkpoint } = bundle,
       c = checkpoint.actor.payload;
@@ -180,13 +315,7 @@ export function verifyAudit(
       c.head !== (entries.at(-1)?.entryHash ?? null)
     )
       throw new Error('checkpoint');
-    if (
-      expected &&
-      (expected.taskId !== c.taskId ||
-        digest(expected.actors) !== digest(c.actors) ||
-        (expected.head && expected.head !== c.head))
-    )
-      throw new Error('trust anchor');
+    assertTrustAnchor(resolveAnchor(expected), c, entries);
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i],
         b = e.body,
@@ -209,8 +338,8 @@ export function verifyAudit(
       )
         throw new Error('entry ' + i);
     }
-    return { valid: true, status: 'VALID' };
+    return auditResult(supplied);
   } catch (e) {
-    return { valid: false, status: 'INVALID', reason: String(e) };
+    return auditResult(supplied, e);
   }
 }

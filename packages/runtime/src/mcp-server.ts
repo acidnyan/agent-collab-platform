@@ -10,7 +10,7 @@ import {
 } from '@acp/core';
 import type { BudgetSpec, Invite, Json, KeyPair, Schema } from '@acp/core';
 import { RevocationRegistry } from '@acp/core';
-import type { AuditBundle } from '@acp/ledger';
+import type { AuditBundle, AuditVerificationOptions } from '@acp/ledger';
 import { verifyAudit } from '@acp/ledger';
 import type { RelayTransport } from '@acp/relay';
 import type { Readable, Writable } from 'node:stream';
@@ -211,11 +211,18 @@ const tools: Array<{ name: string; description: string; inputSchema: Json }> = [
   },
   {
     name: 'acp_verify_audit_bundle',
-    description: 'Verify a bilateral AuditBundle and return the verification report.',
+    description:
+      'Verify a bilateral AuditBundle and return the verification report. Without expectedFinalState, expectedLastEntryHash, expectedEntryCount, or anchor, a valid result does not check tail truncation and statusLabel says so.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
-      properties: { bundle: { type: 'object' }, anchor: { type: 'object' } },
+      properties: {
+        bundle: { type: 'object' },
+        anchor: { type: 'object' },
+        expectedFinalState: { type: 'string' },
+        expectedLastEntryHash: { type: 'string' },
+        expectedEntryCount: { type: 'integer', minimum: 0 },
+      },
       required: ['bundle'],
     },
   },
@@ -577,11 +584,47 @@ export class AcpMcpServer {
   }
   private verifyBundle(args: Record<string, unknown>): Json {
     const bundle = args.bundle as AuditBundle;
-    if (!bundle || typeof bundle !== 'object') throw new RpcError(-32602, 'Invalid params');
-    const anchor = args.anchor as
-      | { taskId: string; actors: [string, string]; head?: string }
-      | undefined;
-    const report = verifyAudit(bundle, anchor);
+    if (!bundle || typeof bundle !== 'object' || Array.isArray(bundle))
+      throw new RpcError(-32602, 'Invalid params');
+    const options: AuditVerificationOptions = {};
+    let anchored = false;
+    if (args.anchor !== undefined) {
+      if (!args.anchor || typeof args.anchor !== 'object' || Array.isArray(args.anchor))
+        throw new RpcError(-32602, 'Invalid params');
+      const anchor = args.anchor as AuditVerificationOptions;
+      // The legacy anchor object still pins taskId and actors, as before.
+      options.trustAnchor = anchor;
+      options.taskId = typeof anchor.taskId === 'string' ? anchor.taskId : '';
+      options.actors =
+        Array.isArray(anchor.actors) && anchor.actors.length === 2
+          ? (anchor.actors as [string, string])
+          : ['', ''];
+      if (typeof anchor.head === 'string') options.head = anchor.head;
+      anchored = true;
+    }
+    if (args.expectedFinalState !== undefined) {
+      if (typeof args.expectedFinalState !== 'string' || args.expectedFinalState.length === 0)
+        throw new RpcError(-32602, 'Invalid params');
+      options.expectedFinalState = args.expectedFinalState;
+      anchored = true;
+    }
+    if (args.expectedLastEntryHash !== undefined) {
+      if (typeof args.expectedLastEntryHash !== 'string' || args.expectedLastEntryHash.length === 0)
+        throw new RpcError(-32602, 'Invalid params');
+      options.expectedLastEntryHash = args.expectedLastEntryHash;
+      anchored = true;
+    }
+    if (args.expectedEntryCount !== undefined) {
+      if (
+        typeof args.expectedEntryCount !== 'number' ||
+        !Number.isSafeInteger(args.expectedEntryCount) ||
+        args.expectedEntryCount < 0
+      )
+        throw new RpcError(-32602, 'Invalid params');
+      options.expectedEntryCount = args.expectedEntryCount;
+      anchored = true;
+    }
+    const report = verifyAudit(bundle, anchored ? options : undefined);
     return report as unknown as Json;
   }
   private createInvite(args: Record<string, unknown>): Json {

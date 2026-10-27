@@ -4,11 +4,66 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { generateKeyPair, validateSchema, signApproval } from '@acp/core';
 import type { KeyPair, Gate } from '@acp/core';
 import { parseJsonl, verifyAudit } from '@acp/ledger';
-import type { AuditBundle } from '@acp/ledger';
+import type { AuditBundle, AuditVerificationOptions } from '@acp/ledger';
 import { runDemo } from '@acp/two-owner-demo';
 import { networkCommand } from './network.js';
 import { mcpServerCommand } from './mcp.js';
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as unknown;
+const AUDIT_VERIFY_USAGE =
+  'Usage: acp audit-verify <audit.jsonl|bundle.json> [trust-anchor.json] ' +
+  '[--expect-final-state <state>] [--expect-last-hash <hash>] [--expect-entry-count <n>]';
+function auditVerifyFlag(args: string[], index: number, name: string): string {
+  const value = args[index + 1];
+  if (!value || value.startsWith('--')) throw new Error('Missing ' + name);
+  return value;
+}
+function parseAuditVerifyArgs(args: string[]): {
+  input: string;
+  anchorPath?: string;
+  expectedFinalState?: string;
+  expectedLastEntryHash?: string;
+  expectedEntryCount?: number;
+} {
+  const positionals: string[] = [];
+  let expectedFinalState: string | undefined;
+  let expectedLastEntryHash: string | undefined;
+  let expectedEntryCount: number | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--expect-final-state') {
+      if (expectedFinalState !== undefined) throw new Error('Duplicate option: ' + arg);
+      expectedFinalState = auditVerifyFlag(args, i, arg);
+      i++;
+      continue;
+    }
+    if (arg === '--expect-last-hash') {
+      if (expectedLastEntryHash !== undefined) throw new Error('Duplicate option: ' + arg);
+      expectedLastEntryHash = auditVerifyFlag(args, i, arg);
+      i++;
+      continue;
+    }
+    if (arg === '--expect-entry-count') {
+      if (expectedEntryCount !== undefined) throw new Error('Duplicate option: ' + arg);
+      const raw = auditVerifyFlag(args, i, arg);
+      if (!/^(0|[1-9]\d*)$/.test(raw)) throw new Error('INVALID_EXPECT_ENTRY_COUNT');
+      const parsed = Number(raw);
+      if (!Number.isSafeInteger(parsed)) throw new Error('INVALID_EXPECT_ENTRY_COUNT');
+      expectedEntryCount = parsed;
+      i++;
+      continue;
+    }
+    if (arg.startsWith('--')) throw new Error('Unknown option: ' + arg);
+    positionals.push(arg);
+  }
+  if (positionals.length < 1 || positionals.length > 2) throw new Error(AUDIT_VERIFY_USAGE);
+  return {
+    input: positionals[0],
+    anchorPath: positionals[1],
+    expectedFinalState,
+    expectedLastEntryHash,
+    expectedEntryCount,
+  };
+}
 function save(path: string, value: unknown, privateFile = false) {
   writeFileSync(path, JSON.stringify(value, null, 2) + '\n', {
     mode: privateFile ? 0o600 : 0o644,
@@ -71,16 +126,37 @@ async function main(args: string[]) {
       break;
     }
     case 'audit-verify': {
-      if (!rest[0])
-        throw new Error('Usage: acp audit-verify <audit.jsonl|bundle.json> [trust-anchor.json]');
-      const input = readFileSync(rest[0], 'utf8');
-      const bundle = rest[0].endsWith('.jsonl')
+      const parsed = parseAuditVerifyArgs(rest);
+      const input = readFileSync(parsed.input, 'utf8');
+      const bundle = parsed.input.endsWith('.jsonl')
         ? parseJsonl(input)
         : (JSON.parse(input) as AuditBundle);
-      const anchor = rest[1]
-        ? (read(rest[1]) as { taskId: string; actors: [string, string]; head?: string })
-        : undefined;
-      const result = verifyAudit(bundle, anchor);
+      const options: AuditVerificationOptions = {};
+      if (parsed.anchorPath) {
+        const file = read(parsed.anchorPath) as AuditVerificationOptions;
+        if (!file || typeof file !== 'object' || Array.isArray(file))
+          throw new Error('INVALID_TRUST_ANCHOR');
+        // A positional trust-anchor file still pins taskId and actors, as before.
+        options.trustAnchor = file;
+        options.taskId = typeof file.taskId === 'string' ? file.taskId : '';
+        options.actors =
+          Array.isArray(file.actors) && file.actors.length === 2
+            ? (file.actors as [string, string])
+            : ['', ''];
+        if (typeof file.head === 'string') options.head = file.head;
+      }
+      if (parsed.expectedFinalState !== undefined)
+        options.expectedFinalState = parsed.expectedFinalState;
+      if (parsed.expectedLastEntryHash !== undefined)
+        options.expectedLastEntryHash = parsed.expectedLastEntryHash;
+      if (parsed.expectedEntryCount !== undefined)
+        options.expectedEntryCount = parsed.expectedEntryCount;
+      const anchored =
+        parsed.anchorPath !== undefined ||
+        parsed.expectedFinalState !== undefined ||
+        parsed.expectedLastEntryHash !== undefined ||
+        parsed.expectedEntryCount !== undefined;
+      const result = verifyAudit(bundle, anchored ? options : undefined);
       console.log(JSON.stringify(result));
       if (!result.valid) process.exitCode = 1;
       break;

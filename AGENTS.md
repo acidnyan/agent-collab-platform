@@ -165,8 +165,13 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    Expect `SETTLED`, the deliverable file, and `"valid":true` from audit-verify.
    Audit verification checks signatures and hash-chain integrity; it does not
    replace review of whether the deliverable meets the owner's requirements.
-   An optional second positional trust-anchor JSON file can pin `taskId`, the
-   two `actors` DIDs, and an independently obtained `head` against truncation.
+   Without a trust anchor, `status` stays `VALID` and `statusLabel` is
+   `VALID (no trust anchor: truncation not checked)`. An optional second positional
+   trust-anchor JSON file can pin `taskId`, the two `actors` DIDs, and an
+   independently obtained `head` against truncation. `--expect-final-state <state>`,
+   `--expect-last-hash <hash>`, and `--expect-entry-count <n>` pin the same tail.
+   A match sets `trustAnchorVerified` and `truncationChecked` and `statusLabel`
+   to `VALID`.
    監査はオフラインで検証できます。成果物の内容の検収もオーナーと行います。
    On errors or rejected approval, report the failure and preserve the log;
    do not claim settlement or silently retry paid work.

@@ -113,6 +113,16 @@ HKDF-SHA256 の salt は 12 バイトの AES-GCM nonce である。info は、�
 | リレーが進捗フレームを読む | `PROGRESS` は `SessionWire` のペイロード暗号を使う。イベント種別は見える。本文は直列化した封筒に現れない。 | `Proof 11: encrypted progress and Byzantine quorum` の keeps PROGRESS plaintext off the relay |
 | 1 人のワーカーが別の検証済み出力を返す | `delegateMulti({ mode: 'quorum' })` は RFC 8785 JCS の SHA-256 で出力をまとめる。一致した正直なダイジェストが勝つ。少数派を含む検証済み受領は残る。 | 同じ証明の outvotes a poisoned worker |
 
+## 監査ログの末尾切断
+
+脅威: 運用者が `acp audit-verify` の `VALID` を、そのファイルが最新のログである証拠だと受け取る。より古いが内部整合した双方監査束（自分のチェックポイントを持つ接頭辞）も同じように検証を通る。ハッシュ鎖だけでは最新の head を特定できない。
+
+| 脅威クラス | アーキテクチャ上の制御 | テスト |
+| --- | --- | --- |
+| 末尾切断を最新ログと取り違える | `packages/ledger/src/index.ts` の `verifyAudit` は、`expectedLastEntryHash`、`expectedEntryCount`、`expectedFinalState`、`head`、`taskId` / `actors`、または `trustAnchor` が渡されて一致しない限り、`statusLabel` を `VALID (no trust anchor: truncation not checked)` にし、`trustAnchorVerified` と `truncationChecked` を false にする。`acp audit-verify` は位置引数のトラストアンカーに加え、`--expect-final-state`、`--expect-last-hash`、`--expect-entry-count` を受ける。`acp_verify_audit_bundle` も同じフィールドを受ける。一致しない接頭辞は `INVALID` になる。 | `conformance/p2-12-audit-verify-trust-anchor-notice.test.ts`（`pnpm test`） |
+
+この確認は `pnpm test` に含まれる。`pnpm test:security-proof` には含まれない。
+
 ビルド済みのチェックアウト（Node.js 22、pnpm 10）で、リポジトリ直下から次を実行してください。
 
 ```sh

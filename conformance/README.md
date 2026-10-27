@@ -39,6 +39,14 @@ key was derived with header-only info, or whose ephemeral public key or recipien
 key context was altered, is rejected with `ENVELOPE_DECRYPTION_FAILED`. An
 encrypted session still settles with a `VALID` audit bundle.
 
+`p2-12-audit-verify-trust-anchor-notice.test.ts` checks that `verifyAudit` and
+`acp audit-verify` report `VALID (no trust anchor: truncation not checked)` when
+no external anchor is supplied. `--expect-final-state`, `--expect-last-hash`,
+and `--expect-entry-count` (and the same fields on `verifyAudit` and
+`acp_verify_audit_bundle`) set `trustAnchorVerified` and `truncationChecked`
+and reject a truncated prefix whose anchor does not match. `status` stays
+`VALID` or `INVALID` so existing callers that read that field keep working.
+
 `p2-10-relay-error-sanitization.test.ts` checks that HTTP and WebSocket relay
 errors return an allowlisted protocol code. An unexpected storage or runtime
 exception becomes `RELAY_INTERNAL_ERROR` (HTTP 500 on the fetch handler) and the

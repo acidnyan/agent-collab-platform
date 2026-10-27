@@ -179,7 +179,7 @@ pnpm acp audit-verify /tmp/alice-audit.jsonl
 pnpm acp discover --relay http://127.0.0.1:8787 --allow-private-relay
 ```
 
-Expected: `SETTLED`, a JSON deliverable, and audit status `VALID` on both owners. Alice verifies signatures, digests and budget, JSON Schema and registered isolated checks, then obtains a signed final approval. `--auto-approve` explicitly opts into policy approval of final verification; omit it for human review. `acp://invite?token=...` is also accepted. Alternatively, use `--to <Bob DID> --relay <URL>`. Bob can verify his own `/tmp/bob-audit.jsonl` locally.
+Expected: `SETTLED`, a JSON deliverable, and `"valid":true` with `"status":"VALID"` on both owners. Without a trust-anchor file or `--expect-final-state` / `--expect-last-hash` / `--expect-entry-count`, `statusLabel` is `VALID (no trust anchor: truncation not checked)`: the chain is intact, and an older valid prefix was not ruled out. Alice verifies signatures, digests and budget, JSON Schema and registered isolated checks, then obtains a signed final approval. `--auto-approve` explicitly opts into policy approval of final verification; omit it for human review. `acp://invite?token=...` is also accepted. Alternatively, use `--to <Bob DID> --relay <URL>`. Bob can verify his own `/tmp/bob-audit.jsonl` locally.
 
 **Choose an adapter**
 
@@ -212,7 +212,7 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 | -------------------------- | ----------------------------------------------------------------------------------------------- |
 | `acp_delegate_task`        | Verified deliverable, `taskId`, status, and audit summary                                      |
 | `acp_delegate_multi`       | `race` or `quorum` delegation across workers                                                    |
-| `acp_verify_audit_bundle`  | Cryptographic verification report for an `AuditBundle`                                         |
+| `acp_verify_audit_bundle`  | Cryptographic verification report, including whether a trust anchor checked truncation          |
 | `acp_create_invite`        | Signed `acp-invite` token                                                                       |
 | `acp_revoke_token`         | Signed `RevocationNotice`                                                                       |
 
@@ -301,7 +301,16 @@ pnpm acp validate approval-receipt /tmp/approval.json
 pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
 ```
 
-The approval target file contains the exact JSON action being approved. The trust anchor file has `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }`; obtain the latest expected head independently of the bundle under verification. The built CLI is also available as `node cli/dist/index.js <command>` and its workspace binary is `acp`.
+The approval target file contains the exact JSON action being approved. A positional trust-anchor file has `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }`; obtain `head` independently of the bundle under verification. `acp audit-verify` also accepts `--expect-final-state <state>`, `--expect-last-hash <hash>`, and `--expect-entry-count <n>`. With none of those constraints and no trust-anchor file, a chain that still verifies prints `"status":"VALID"` and `"statusLabel":"VALID (no trust anchor: truncation not checked)"` (`trustAnchorVerified` and `truncationChecked` are false). That label means an older valid prefix was not ruled out. When a supplied constraint matches, `statusLabel` is `VALID` and both flags are true. A prefix that does not match the anchor exits nonzero with `"statusLabel":"INVALID"`.
+
+```sh
+pnpm acp audit-verify /tmp/alice-audit.jsonl \
+  --expect-final-state SETTLED \
+  --expect-last-hash sha256:<hex> \
+  --expect-entry-count <n>
+```
+
+The built CLI is also available as `node cli/dist/index.js <command>` and its workspace binary is `acp`.
 
 Read the [demo walkthrough](examples/two-owner-demo/README.md), [wire rules](spec/README.md), [conformance suite](conformance/README.md), [M1 security model](docs/security-model.md), and [security proofs](SECURITY_PROOF.md). M1 uses signed relay envelopes and the restricted JavaScript subprocess driver. M2/M3 adds optional hardened OCI execution and end-to-end payload encryption. The root code is Apache-2.0; adapted DelegateOS portions retain MIT attribution in [NOTICE](NOTICE).
 
