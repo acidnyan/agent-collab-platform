@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFileSync } from 'node:fs';
 import type { KeyPair } from '@acp/core';
+import { generateKeyPair } from '@acp/core';
 import { AcpMcpServer } from '@acp/runtime';
 
 function flags(args: string[]): Map<string, string | true> {
@@ -14,17 +15,27 @@ function flags(args: string[]): Map<string, string | true> {
   return out;
 }
 
-/** `acp mcp-server --key <file> [--relay URL]` speaks MCP over stdio. */
+/** `acp mcp-server [--key <file>] [--relay URL]` speaks MCP over stdio. */
 export async function mcpServerCommand(args: string[]): Promise<void> {
   const parsed = flags(args);
-  const keyFile = parsed.get('--key');
-  if (typeof keyFile !== 'string')
-    throw new Error('Usage: acp mcp-server --key <file> [--relay URL]');
   const relay = parsed.get('--relay');
-  const owner = JSON.parse(readFileSync(keyFile, 'utf8')) as KeyPair;
+  const owner = resolveOwner(parsed);
   const server = new AcpMcpServer({
     owner,
     relay: typeof relay === 'string' ? relay : undefined,
   });
   await server.serve(process.stdin, process.stdout);
+}
+
+/**
+ * Load `--key <file>` when it is present. Omitting `--key` mints an in-memory
+ * Ed25519 identity so MCP scanners can call `initialize` and `tools/list`
+ * without a persisted owner key. `--key` with no path is still a usage error.
+ */
+function resolveOwner(parsed: Map<string, string | true>): KeyPair {
+  if (!parsed.has('--key')) return generateKeyPair();
+  const keyFile = parsed.get('--key');
+  if (typeof keyFile !== 'string')
+    throw new Error('Usage: acp mcp-server [--key <file>] [--relay URL]');
+  return JSON.parse(readFileSync(keyFile, 'utf8')) as KeyPair;
 }
