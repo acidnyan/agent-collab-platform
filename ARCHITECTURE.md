@@ -361,14 +361,36 @@ Node `startLocalRelay` serves the same routes plus WebSocket support. The edge
 entry point supports HTTP/SSE/long polling; Node provides WebSocket upgrades.
 
 `detectDockerRuntime` prefers a functional Podman, then Docker.
-`runContainerOrSubprocessSandbox` selects OCI for manifest `oci_container`, or
-falls back to the Node permission-restricted sandbox when no runtime exists.
-OCI disables network access, uses a read-only root filesystem, drops all
-capabilities, enables no-new-privileges, and bounds PID count and memory.
-`ExecutionAttestation.effectiveIsolationLevel` records what ran. Container
-execution failures are not retried in a weaker sandbox. Command/CLI adapters are
-trusted host executables with environment and workspace hygiene, not the
-restricted JavaScript sandbox; attestations identify that distinction.
+`runContainerOrSubprocessSandbox` selects OCI when the manifest sets
+`isolationLevel: 'oci_container'` and a runtime exists. Otherwise it runs
+`subprocess_restricted` and reports that string on
+`ExecutionAttestation.effectiveIsolationLevel`. `VerificationEngine` rejects an
+`oci_container` contract whose attestation is not `oci_container`, unless
+`sandboxPolicy.allowSubprocessFallback` is true.
+
+`subprocess_restricted` is a separate OS process with a sanitized environment
+(no inherited credentials or `NODE_OPTIONS`), a temporary scratch directory, a
+timeout followed by SIGTERM then SIGKILL, and an output byte cap.
+`detectNodePermissionFlag` selects `--permission` on Node.js >= 22.13 and on
+Node.js 23+, or `--experimental-permission` on earlier Node.js 20 and 22
+releases. `resolveNodePermissionArgs` pairs the chosen flag with `--allow-fs-read`
+and `--allow-fs-write` for the scratch directory. That permission model restricts
+filesystem, child-process, worker-thread, and native-addon access. It does not
+block `fetch`, `node:net`, `node:http`, `node:https`, `node:dns`, or `node:dgram`,
+and it is not a kernel network namespace. Task code is evaluated with `node:vm`
+in that same process. Node.js documents that `node:vm` is not a security mechanism
+against untrusted code. Hiding `process`, `require`, `globalThis.fetch`,
+and `WebSocket` from the guest only shrinks the API surface.
+
+Untrusted third-party code requires `oci_container`
+(`isolationLevel: 'oci_container'`). That path runs Podman or Docker with
+`--network none`, `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`,
+and PID and memory limits. Container execution failures are not retried in the
+weaker sandbox. `sandboxBoundary` on the attestation records `nodePermissionFlag`,
+`permissionModelActive`, and `kernelNetworkIsolated` (true only for `oci_container`).
+Command/CLI adapters are trusted host executables with environment and workspace
+hygiene, not the restricted JavaScript sandbox; attestations identify that
+distinction.
 
 The original schemas, exports and 169 M0/M1 conformance tests are retained.
 Session payloads are encrypted to the recipient `did:key` with ephemeral X25519,

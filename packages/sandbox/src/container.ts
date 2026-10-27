@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import type { Json } from '@acp/core';
 import { runSandbox, sandboxWrapper, sanitizedEnvironment, terminateSubprocess } from './index.js';
 import type { SandboxOptions } from './index.js';
+import { OCI_CONTAINER_BOUNDARY, subprocessSandboxBoundary } from './permission.js';
+import type { SandboxBoundaryMetadata } from './permission.js';
 export type DockerRuntime = 'docker' | 'podman';
 export type RuntimeProbe = (binary: string, args: string[]) => Promise<boolean>;
 export async function detectDockerRuntime(
@@ -43,7 +45,14 @@ export interface HybridSandboxOptions extends SandboxOptions {
 export interface SandboxResult {
   output: Json;
   effectiveIsolationLevel: 'oci_container' | 'subprocess_restricted';
+  /** Host-reported boundary. Task code cannot choose this object. */
+  sandboxBoundary: SandboxBoundaryMetadata;
 }
+/**
+ * OCI argv for untrusted code. Kernel isolation is `--network none`, a read-only
+ * root filesystem, `--cap-drop ALL`, and `--security-opt no-new-privileges`, plus
+ * PID and memory limits. Node's `--permission` model is not this boundary.
+ */
 export function containerArguments(
   directory: string,
   image = 'node:22-bookworm-slim',
@@ -106,7 +115,12 @@ export async function runContainerOrSubprocessSandbox(
         : options.runtime
       : undefined;
   if (!runtime)
-    return { output: await runSandbox(options), effectiveIsolationLevel: 'subprocess_restricted' };
+    return {
+      output: await runSandbox(options),
+      effectiveIsolationLevel: 'subprocess_restricted',
+      // Same flag choice `runSandbox` passes. Network stays open at the kernel.
+      sandboxBoundary: subprocessSandboxBoundary(),
+    };
   const directory = await mkdtemp(join(tmpdir(), 'acp-oci-')),
     name = 'acp-' + randomUUID();
   try {
@@ -197,7 +211,11 @@ export async function runContainerOrSubprocessSandbox(
         });
       });
     });
-    return { output, effectiveIsolationLevel: 'oci_container' };
+    return {
+      output,
+      effectiveIsolationLevel: 'oci_container',
+      sandboxBoundary: OCI_CONTAINER_BOUNDARY,
+    };
   } finally {
     await new Promise<void>((resolve) =>
       execFile(

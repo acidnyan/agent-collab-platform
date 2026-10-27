@@ -5,6 +5,21 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import type { Json } from '@acp/core';
+import { resolveNodePermissionArgs } from './permission.js';
+import type { NodePermissionProbe } from './permission.js';
+export type {
+  NodePermissionFlag,
+  NodePermissionProbe,
+  ResolvedNodePermission,
+  SandboxBoundaryMetadata,
+} from './permission.js';
+export {
+  OCI_CONTAINER_BOUNDARY,
+  detectNodePermissionFlag,
+  prefersStableNodePermissionFlag,
+  resolveNodePermissionArgs,
+  subprocessSandboxBoundary,
+} from './permission.js';
 export interface SandboxOptions {
   code: string;
   input?: Json;
@@ -13,11 +28,19 @@ export interface SandboxOptions {
   onUsage?: (inputTokens: number, outputTokens: number) => void;
   signal?: AbortSignal;
 }
-// This trusted wrapper is the only code with access to Node APIs. VM values cross
-// the process boundary as JSON, never as host functions, objects or credentials.
+// The parent process is the only one that holds owner keys and tool handlers.
+// Task values cross that process boundary as JSON. Inside the child, `node:vm`
+// evaluates task source in a null-prototype context. Node.js documents that
+// `node:vm` is not a security mechanism: code that escapes the context runs as
+// this child. `--permission` / `--experimental-permission` can deny filesystem,
+// child-process, worker, and addon access. They do not deny network syscalls
+// (`fetch`, `node:net`, `node:http`, `node:https`, `node:dns`, `node:dgram`).
+// Deleting the Web globals below only hides those names in the wrapper.
 export const sandboxWrapper = String.raw`
 const vm = require('node:vm');
 const fs = require('node:fs');
+try { delete globalThis.fetch; } catch { /* name may be non-configurable */ }
+try { delete globalThis.WebSocket; } catch { /* name may be non-configurable */ }
 const config = JSON.parse(fs.readFileSync('task.json', 'utf8'));
 const context = vm.createContext(Object.create(null), { codeGeneration: { strings: false, wasm: false }, microtaskMode: 'afterEvaluate' });
 const bootstrap = 'globalThis.queue=[]; globalThis.waiters=new Map(); globalThis.serial=0; globalThis.finished=false; globalThis.callTool=(name,args)=>new Promise((resolve,reject)=>{const id=++serial;waiters.set(id,{resolve,reject});queue.push({id,name,args});}); globalThis.reportUsage=(inputTokens,outputTokens)=>callTool("$usage",{inputTokens,outputTokens}); globalThis.input=JSON.parse(' + JSON.stringify(JSON.stringify(config.input)) + ');';
@@ -40,6 +63,24 @@ export function sanitizedEnvironment(directory: string): NodeJS.ProcessEnv {
   // provider keys, SSH sockets and inherited PATH never enter the worker.
   return { LANG: 'C.UTF-8', TZ: 'UTC', HOME: directory, TMPDIR: directory };
 }
+/**
+ * Argv after `process.execPath` for a `subprocess_restricted` child.
+ * Permission-model flags come from `resolveNodePermissionArgs`. `--no-addons`
+ * stays even when this Node binary supports neither permission flag.
+ */
+export function buildRestrictedSubprocessArgv(
+  directory: string,
+  entry: string,
+  probe?: NodePermissionProbe,
+): string[] {
+  return [
+    ...resolveNodePermissionArgs(directory, probe).args,
+    '--no-addons',
+    '--disable-proto=throw',
+    '--max-old-space-size=64',
+    entry,
+  ];
+}
 /** SIGTERM, then SIGKILL if the child is still alive. `killed` is true after either signal. */
 export function terminateSubprocess(subprocess: {
   exitCode: number | null;
@@ -52,6 +93,13 @@ export function terminateSubprocess(subprocess: {
   }, 40);
   timer.unref?.();
 }
+/**
+ * `subprocess_restricted` runner. Separate OS process, sanitized environment,
+ * scratch directory, timeout then SIGKILL, and an output byte cap. Node's
+ * permission model is applied when `detectNodePermissionFlag` finds a flag.
+ * `node:vm` inside the child is not a security mechanism, and the permission
+ * model does not block network syscalls. Untrusted code needs `oci_container`.
+ */
 export async function runSandbox(options: SandboxOptions): Promise<Json> {
   if (
     !Number.isSafeInteger(options.timeoutMs) ||
@@ -76,15 +124,7 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
     return await new Promise<Json>((resolve, reject) => {
       const subprocess = spawn(
         process.execPath,
-        [
-          '--experimental-permission',
-          '--allow-fs-read=' + directory,
-          '--allow-fs-write=' + directory,
-          '--no-addons',
-          '--disable-proto=throw',
-          '--max-old-space-size=64',
-          join(directory, 'runner.cjs'),
-        ],
+        buildRestrictedSubprocessArgv(directory, join(directory, 'runner.cjs')),
         {
           cwd: directory,
           env: sanitizedEnvironment(directory),
@@ -131,6 +171,7 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
               error?: string;
               value?: Json;
             };
+            // Output byte cap for one IPC message from the child.
             if (JSON.stringify(m).length > 1048576)
               return finish(new Error('SANDBOX_MESSAGE_LIMIT'));
             if (m.type === 'done') return finish(m.error ? new Error(m.error) : undefined, m.value);

@@ -42,6 +42,7 @@ import type {
   Invite,
 } from '@acp/core';
 import { verifyAudit, type AuditBundle } from '@acp/ledger';
+import type { SandboxBoundaryMetadata } from '@acp/sandbox';
 import { HttpRelayClient } from '@acp/relay';
 import type { RelayClientSecurityOptions, RelayTransport } from '@acp/relay';
 import type {
@@ -652,6 +653,7 @@ export class WorkerNode {
         cancelController.signal,
       ]);
       let effectiveIsolationLevel = 'host_adapter';
+      let sandboxBoundary: SandboxBoundaryMetadata | undefined;
       // Concurrent reportProgress calls must not put two PROGRESS frames on the wire
       // before the first bilateral ACK. The queue also keeps DELIVER behind them.
       const enqueueProgress = (operation: () => Promise<void>, force = false): Promise<void> => {
@@ -734,8 +736,9 @@ export class WorkerNode {
             await wire.sendEvent('PROGRESS', progress);
           });
         },
-        reportIsolation: (level) => {
+        reportIsolation: (level, boundary) => {
           effectiveIsolationLevel = level;
+          sandboxBoundary = boundary;
         },
         callTool: async (tool, args) => {
           executionSignal.throwIfAborted();
@@ -773,7 +776,10 @@ export class WorkerNode {
         output,
         gateway.quota.receipt(this.options.owner),
         this.options.owner,
-        { effectiveIsolationLevel },
+        {
+          effectiveIsolationLevel,
+          ...(sandboxBoundary ? { sandboxBoundary } : {}),
+        },
       );
       const transition = gateway.transition('DELIVER');
       await wire.sendEvent('DELIVER', { ...delivery, transition });

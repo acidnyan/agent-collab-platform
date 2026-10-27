@@ -19,7 +19,7 @@ pnpm test:security-proof
 | 脅威                                         | 制御                                                                                                                                                                                                                              | テスト                                                                      |
 | -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | コマンドワーカーがホスト環境をダンプする     | `packages/sandbox/src/index.ts` の `sanitizedEnvironment` が許可リストを新規に作る。`packages/adapters/src/command.ts` の `CommandAgentAdapter.executeCommand` は、そのリストに `PATH` と `TASK_INPUT_FILE` だけを足して渡す。    | `Proof 1: memory and environment secret exfiltration` の command worker env |
-| ゲスト JavaScript が `process` を読む        | `runSandbox` はタスクコードをプロトタイプ無しの `vm` で評価する。Node API はラッパープロセス側だけが持つ。                                                                                                                        | 同じ証明の sandbox guest                                                    |
+| ゲスト JavaScript が `process` を読む        | `runSandbox` はタスクコードをプロトタイプ無しの `node:vm` で評価するので、そのスクリプトは `process` を受け取らない。Node.js の文書では `node:vm` はセキュリティ機構ではない。ホストの秘密は、`sanitizedEnvironment` が子プロセスへコピーしないことで外に出さない。 | 同じ証明の sandbox guest                                                    |
 | 本物のプロバイダー鍵と、タスク単位のハンドル | `packages/adapters/src/credential-proxy.ts` の `startCredentialProxy` がランダムなループバックトークンを発行する。`ClaudeCodeAdapter.executeTask` は子プロセスへそのトークンだけを置き、本物の鍵はホストの `fetch` にだけ付ける。 | 同じ証明の credential proxy と Claude adapter                               |
 | 偽造・別タスク・クローズ済みハンドル         | プロキシは `Authorization` / `x-api-key` をそのタスクのトークンと比較し、`close()` までしか待たない。                                                                                                                             | 同じ証明の forged, other-task, and closed handles                           |
 | リレーのエラー本文がパスやトークンを漏らす   | `packages/relay/src/fetch.ts` の `sanitizeRelayErrorCode` と `mapRelayError` は、許可リストのプロトコルコードだけを返す。`startLocalRelay` は Node HTTP の catch と WebSocket の `message` catch に同じフィルタを使う。それ以外の例外は HTTP 500 `RELAY_INTERNAL_ERROR`。壊れた JSON と不正な URL は HTTP 400 `INVALID_REQUEST`。 | `conformance/p2-10-relay-error-sanitization.test.ts` |
@@ -49,7 +49,15 @@ LLM の CLI アダプタ（`claude`、`codex`、`openai`）も、遠隔のピア
 | タスクコードが隔離レベルを自分で名乗る | `packages/sandbox/src/container.ts` と `packages/adapters/src/sandbox.ts` の `runContainerOrSubprocessSandbox` / `SandboxAgentAdapter` は、実行経路から `effectiveIsolationLevel` を決める。`runtime: null` は `subprocess_restricted` に落ち、その文字列を報告する。          | 同じ証明の runner label                                                            |
 | 契約より低い隔離の証明                 | `packages/runtime/src/verifier.ts` の `VerificationEngine.verify` は、`oci_container` 契約の署名付き証明が `oci_container` でなければ拒否する。例外は `sandboxPolicy.allowSubprocessFallback: true`（`ISOLATION_LEVEL_MISMATCH`）。署名の1バイト改ざんでは主張を上げられない。 | 同じ証明の verifier                                                                |
 
-依頼側が信頼するのは、ホストが報告したレベルに対するワーカーの署名です。信頼できないタスク出力そのものはレベルではありません。`packages/runtime/src/session.ts` は `reportIsolation` を署名付き証明へコピーします。
+依頼側が信頼するのは、ホストが報告したレベルに対するワーカーの署名です。信頼できないタスク出力そのものはレベルではありません。`packages/runtime/src/session.ts` は `reportIsolation` を署名付き証明へコピーします。サンドボックス実行器が渡した `sandboxBoundary` も、そのとき一緒に入ります。
+
+### 子プロセスの境界と OCI
+
+`subprocess_restricted` は別の OS プロセスです。環境変数は許可リストだけ（資格情報や `NODE_OPTIONS` は渡さない）、作業ディレクトリは一時スクラッチで、時間切れのあと SIGTERM と SIGKILL、出力にはバイト上限があります。`detectNodePermissionFlag` は Node.js 22.13 以上と Node.js 23 以降では `--permission` を、それより前の Node.js 20 / 22 では `--experimental-permission` を選びます。`resolveNodePermissionArgs` はそのフラグと、スクラッチディレクトリだけを対象にした `--allow-fs-read` と `--allow-fs-write` を組にします。どちらのフラグも無いバイナリでは `--allow-fs-*` を付けず、`sandboxBoundary.permissionModelActive` は偽です。この権限モデルはファイルシステム、子プロセス、ワーカースレッド、ネイティブアドオンを制限します。`fetch`、`node:net`、`node:http`、`node:https`、`node:dns`、`node:dgram` は止めません。カーネルのネットワーク名前空間でもありません。
+
+タスクコードは同じプロセスの `node:vm` で評価します。Node.js の文書は、`node:vm` は信頼できないコードに対するセキュリティ機構ではないと述べています。プロトタイプ無しのコンテキストから `process` や `require` を外すこと、ラッパーで `globalThis.fetch` と `WebSocket` を消すことは、ゲストから見える API を狭めるだけです。
+
+信頼できない第三者コードの実行には `oci_container` が必要です。呼び出し側は `isolationLevel: 'oci_container'` を指定します（適合テストのヘルパーはこれを `requireOci: true` と呼びます）。その経路は Podman または Docker で `--network none`、`--read-only`、`--cap-drop ALL`、`--security-opt no-new-privileges`、PID とメモリの上限を付けます。`ExecutionAttestation.effectiveIsolationLevel` は実際に走った経路です。契約が `oci_container` を要求し、`allowSubprocessFallback` が真でないとき、`VerificationEngine` はそれより低い証明を拒否します。`sandboxBoundary.kernelNetworkIsolated` が真になるのは `oci_container` だけです。その経路では Node の権限フラグではなくコンテナ実行器が境界なので、`permissionModelActive` は偽です。フラグ選択とこの記述は `conformance/p2-13-sandbox-boundary-accuracy.test.ts` が固定します。
 
 ### 証明 4 — リソース枯渇と SSRF
 
