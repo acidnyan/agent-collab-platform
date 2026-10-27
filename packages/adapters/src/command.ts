@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { access, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join } from 'node:path';
-import { startCredentialProxy } from './credential-proxy.js';
+import { startCredentialProxy, type CredentialProxyHandle } from './credential-proxy.js';
 import { sanitizedEnvironment } from '@acp/sandbox';
 import type { Json, AgentSkill } from '@acp/core';
 import type { AgentAdapter, AgentTaskContext } from '@acp/runtime';
@@ -188,6 +188,11 @@ export interface CliOptions {
   apiKeyEnv?: string;
   baseUrl?: string;
   fetch?: typeof fetch;
+  /**
+   * Maximum provider requests the credential proxy will forward for one task.
+   * When omitted, the proxy uses the task budget's tool-invocation cap, or 16.
+   */
+  maxRequests?: number;
 }
 const CLAUDE_PERMISSION_MODES = [
   'acceptEdits',
@@ -287,7 +292,14 @@ export function resolveCodexCliCommand(options: CodexAdapterOptions = {}): Resol
 function commandList(resolved: ResolvedCliCommand): string[] {
   return [resolved.command, ...resolved.args];
 }
-function usage(context: AgentTaskContext, value: Record<string, unknown>) {
+function usage(
+  context: AgentTaskContext,
+  value: Record<string, unknown>,
+  meteredByProxy = false,
+) {
+  // The proxy already charged this task from the provider response.
+  // Stdout repeats those totals and must not be recorded again.
+  if (meteredByProxy) return;
   const inputTokens = Number(value.input_tokens ?? value.prompt_tokens ?? 0),
     outputTokens = Number(value.output_tokens ?? value.completion_tokens ?? 0);
   context.reportUsage({
@@ -298,7 +310,13 @@ function usage(context: AgentTaskContext, value: Record<string, unknown>) {
 }
 abstract class ProviderCliAdapter extends CommandAgentAdapter {
   protected cliOptions: CliOptions = {};
+  /** Set while the task's provider traffic is going through the credential proxy. */
+  protected activeProxy?: CredentialProxyHandle;
   protected abstract providerStyle: 'openai' | 'anthropic';
+  /** Stdout usage repeats totals the proxy has already recorded. */
+  protected proxyAlreadyMetered(): boolean {
+    return (this.activeProxy?.responsesMetered ?? 0) > 0;
+  }
   protected override encodeInput(context: AgentTaskContext): string {
     return JSON.stringify({
       title: context.manifest.task.title,
@@ -309,6 +327,7 @@ abstract class ProviderCliAdapter extends CommandAgentAdapter {
     });
   }
   override async executeTask(context: AgentTaskContext): Promise<Json> {
+    this.activeProxy = undefined;
     const anthropic = this.providerStyle === 'anthropic';
     const key =
       this.cliOptions.apiKey ??
@@ -325,7 +344,11 @@ abstract class ProviderCliAdapter extends CommandAgentAdapter {
       style: this.providerStyle,
       signal: context.signal,
       fetch: this.cliOptions.fetch,
+      budget: context.manifest.budget,
+      reportUsage: (metrics) => context.reportUsage(metrics),
+      maxRequests: this.cliOptions.maxRequests,
     });
+    this.activeProxy = proxy;
     try {
       return await this.executeCommand(
         context,
@@ -338,6 +361,7 @@ abstract class ProviderCliAdapter extends CommandAgentAdapter {
           : { OPENAI_BASE_URL: proxy.url + '/v1', OPENAI_API_KEY: proxy.token },
       );
     } finally {
+      this.activeProxy = undefined;
       await proxy.close();
     }
   }
@@ -358,7 +382,7 @@ export class ClaudeCodeAdapter extends ProviderCliAdapter {
     const value = parseJsonDeliverable(stdout) as Record<string, Json>;
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       if (value.usage && typeof value.usage === 'object')
-        usage(context, value.usage as Record<string, unknown>);
+        usage(context, value.usage as Record<string, unknown>, this.proxyAlreadyMetered());
       if (value.is_error === true) throw new Error('CLAUDE_TASK_FAILED');
       if ('structured_output' in value) return parseJsonDeliverable(value.structured_output);
       if ('result' in value) return parseJsonDeliverable(value.result);
@@ -390,7 +414,7 @@ export class CodexCliAdapter extends ProviderCliAdapter {
     }
     if (direct && typeof direct === 'object' && !Array.isArray(direct) && !('type' in direct)) {
       if (direct.usage && typeof direct.usage === 'object')
-        usage(context, direct.usage as Record<string, unknown>);
+        usage(context, direct.usage as Record<string, unknown>, this.proxyAlreadyMetered());
       return 'result' in direct ? parseJsonDeliverable(direct.result) : direct;
     }
     let result: Json | undefined;
@@ -403,7 +427,7 @@ export class CodexCliAdapter extends ProviderCliAdapter {
       };
       if (event.type === 'turn.failed' || event.type === 'error')
         throw new Error('CODEX_TASK_FAILED');
-      if (event.usage) usage(context, event.usage);
+      if (event.usage) usage(context, event.usage, this.proxyAlreadyMetered());
       if (event.item?.type === 'agent_message' && event.item.text)
         result = parseJsonDeliverable(event.item.text);
       if (event.result !== undefined) result = parseJsonDeliverable(event.result);
