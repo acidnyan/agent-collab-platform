@@ -1,0 +1,3 @@
+# Git for Windows defaults to core.autocrlf=true. Force LF so conformance
+# snapshots and shebangs match on ubuntu-latest, macos-latest, and windows-latest.
+* text=auto eol=lf

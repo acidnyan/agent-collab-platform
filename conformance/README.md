@@ -39,6 +39,12 @@ key was derived with header-only info, or whose ephemeral public key or recipien
 key context was altered, is rejected with `ENVELOPE_DECRYPTION_FAILED`. An
 encrypted session still settles with a `VALID` audit bundle.
 
+`p2-15-ci-hardening.test.ts` checks that `.github/workflows/conformance.yml`
+sets workflow `permissions: contents: read`, runs the conformance job on
+`ubuntu-latest`, `macos-latest`, and `windows-latest`, and pins every `uses:`
+action to a 40-character commit SHA. It also checks that `.github/dependabot.yml`
+schedules weekly updates for the `github-actions` and `npm` ecosystems.
+
 `p2-14-security-proof-scope-notice.test.ts` checks that `SECURITY_PROOF.md` and
 `SECURITY_PROOF.ja.md` keep their language-switcher links and, within the first
 30 lines, state that each "Proof" section maps a threat class to an enforcement

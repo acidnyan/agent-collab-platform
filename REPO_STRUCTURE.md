@@ -237,7 +237,7 @@ The mapping below is for building on existing permissive-license (Apache-2.0 / M
 | WP-9 approval/isolation        | `packages/runtime/src/approval-providers.ts`, `packages/sandbox/src/container.ts`             | Interactive streams, signed webhook, policy sensitive gates, OCI detection/fallback                               |
 | WP-10 orchestrator/CLI         | `packages/runtime/src/session.ts`, `session-audit.ts`, `cli/src/network.ts`                   | Separate-owner key custody, protocol transitions, per-event AckReceipts and countersigned checkpoint              |
 | WP-11 network conformance/demo | `conformance/network-collab.test.ts`, `examples/network-collab/run.mjs`                       | Actual TCP sessions and separate CLI processes; automatic fetch bridge under EPERM/EACCES                         |
-| WP-12 onboarding/CI            | `README.md`, `.github/workflows/ci.yml`                                                       | Node 22 + pnpm frozen install, build, schema validation, tests, original demo                                     |
+| WP-12 onboarding/CI            | `README.md`, `.github/workflows/conformance.yml`                                              | Node 22 + pnpm frozen install, build, schema validation, tests, and the original demo on Ubuntu, macOS, and Windows |
 
 Dependency direction is `adapters → runtime → relay/core/ledger/sandbox`;
 `cli → adapters/runtime/relay` and the original examples remain supported.
