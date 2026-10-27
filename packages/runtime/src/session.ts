@@ -397,6 +397,10 @@ export class WorkerNode {
     const cancelController = new AbortController();
     wire.earlyCancel = () => cancelController.abort('CANCELLED');
     let gateway: OwnerGateway | undefined, workspace: string | undefined;
+    // Progress metrics are applied synchronously. The tail only serializes wire frames.
+    let progressTail: Promise<void> = Promise.resolve();
+    let progressFailure: unknown;
+    let wireFailureSent = false;
     try {
       await wire.receiveEvent('PROPOSE', first);
       this.assertInviteActive(data);
@@ -478,13 +482,13 @@ export class WorkerNode {
       let effectiveIsolationLevel = 'host_adapter';
       // Concurrent reportProgress calls must not put two PROGRESS frames on the wire
       // before the first bilateral ACK. The queue also keeps DELIVER behind them.
-      let progressTail: Promise<void> = Promise.resolve();
-      let progressFailure: unknown;
-      const enqueueProgress = (operation: () => Promise<void>): Promise<void> => {
+      const enqueueProgress = (operation: () => Promise<void>, force = false): Promise<void> => {
         const run = progressTail.then(async () => {
-          if (progressFailure) throw progressFailure;
-          if (executionSignal.aborted)
-            throw new Error('EXECUTION_ABORTED: ' + String(executionSignal.reason));
+          if (!force) {
+            if (progressFailure) throw progressFailure;
+            if (executionSignal.aborted)
+              throw new Error('EXECUTION_ABORTED: ' + String(executionSignal.reason));
+          }
           await operation();
         });
         progressTail = run.then(
@@ -503,31 +507,54 @@ export class WorkerNode {
         workspaceDir: workspace,
         signal: executionSignal,
         reportUsage: (delta) => gateway!.quota.recordMetrics(delta),
-        reportProgress: (progress) =>
-          enqueueProgress(async () => {
-            if (!progress || typeof progress.step !== 'string' || progress.step.length === 0)
-              throw new Error('INVALID_PROGRESS');
-            if (progress.percent !== undefined && typeof progress.percent !== 'number')
-              throw new Error('INVALID_PROGRESS');
-            if (progress.metrics) {
-              const delta: {
-                inputTokens?: number;
-                outputTokens?: number;
-                toolCalls?: number;
-                wallTimeMs?: number;
-              } = {};
-              if (progress.metrics.inputTokens !== undefined)
-                delta.inputTokens = progress.metrics.inputTokens;
-              if (progress.metrics.outputTokens !== undefined)
-                delta.outputTokens = progress.metrics.outputTokens;
-              if (progress.metrics.toolInvocations !== undefined)
-                delta.toolCalls = progress.metrics.toolInvocations;
-              if (progress.metrics.elapsedMs !== undefined)
-                delta.wallTimeMs = progress.metrics.elapsedMs;
-              if (Object.keys(delta).length > 0) gateway!.quota.recordMetrics(delta);
+        reportProgress: (progress) => {
+          // Validate and charge quota before returning, so a later call on this turn
+          // observes BUDGET_EXCEEDED without waiting for the wire queue.
+          if (!progress || typeof progress.step !== 'string' || progress.step.length === 0)
+            return Promise.reject(new Error('INVALID_PROGRESS'));
+          if (progress.percent !== undefined && typeof progress.percent !== 'number')
+            return Promise.reject(new Error('INVALID_PROGRESS'));
+          let metricsError: unknown;
+          if (progress.metrics) {
+            const delta: {
+              inputTokens?: number;
+              outputTokens?: number;
+              toolCalls?: number;
+              wallTimeMs?: number;
+            } = {};
+            if (progress.metrics.inputTokens !== undefined)
+              delta.inputTokens = progress.metrics.inputTokens;
+            if (progress.metrics.outputTokens !== undefined)
+              delta.outputTokens = progress.metrics.outputTokens;
+            if (progress.metrics.toolInvocations !== undefined)
+              delta.toolCalls = progress.metrics.toolInvocations;
+            if (progress.metrics.elapsedMs !== undefined)
+              delta.wallTimeMs = progress.metrics.elapsedMs;
+            if (Object.keys(delta).length > 0) {
+              try {
+                gateway!.quota.recordMetrics(delta);
+              } catch (error) {
+                metricsError = error;
+              }
             }
+          }
+          if (metricsError) {
+            progressFailure ??= metricsError;
+            const code = safeError(metricsError);
+            return enqueueProgress(async () => {
+              // Wait until any in-flight PROGRESS handshake finishes, then reject the session.
+              wireFailureSent = true;
+              await wire.rawSend('ERROR', { code });
+              throw metricsError;
+            }, true);
+          }
+          return enqueueProgress(async () => {
+            if (progressFailure) throw progressFailure;
+            if (executionSignal.aborted)
+              throw new Error('EXECUTION_ABORTED: ' + String(executionSignal.reason));
             await wire.sendEvent('PROGRESS', progress);
-          }),
+          });
+        },
         reportIsolation: (level) => {
           effectiveIsolationLevel = level;
         },
@@ -601,7 +628,12 @@ export class WorkerNode {
           throw inner;
         }
       }
-      await wire.rawSend('ERROR', { code: safeError(e) }).catch(() => {});
+      await progressTail;
+      if (!wireFailureSent) {
+        wireFailureSent = true;
+        await wire.rawSend('ERROR', { code: safeError(progressFailure ?? e) }).catch(() => {});
+      }
+      if (progressFailure instanceof Error) throw progressFailure;
       throw e;
     } finally {
       gateway?.close();
@@ -946,6 +978,10 @@ export class RequesterClient {
     const resolved = options.workers.map((worker) =>
       resolveWorkerTarget(worker, this.options.allowPrivateRelay),
     );
+    await canonicalizeDiscoveredWorkers(resolved, {
+      relay: this.options.relay,
+      owner: this.options.owner,
+    });
     const seenWorkers = new Set<string>();
     for (const worker of resolved) {
       if (seenWorkers.has(worker.workerDid)) throw new Error('DUPLICATE_WORKER_TARGET');
@@ -1104,12 +1140,48 @@ function verifiedWorkerDid(bundle: AuditBundle, expectedDid: string): string {
   const actors = bundle.checkpoint.actor.payload.actors;
   if (
     !worker ||
-    worker.agentDid !== expectedDid ||
+    (worker.agentDid !== expectedDid && worker.ownerDid !== expectedDid) ||
     !actors.includes(worker.ownerDid) ||
     !verifySigned(bundle.checkpoint.actor, actors[0])
   )
     throw new Error('WORKER_DID_MISMATCH');
+  // Receipts and quorum use the card's agentDid, even when the caller addressed the owner DID.
   return worker.agentDid;
+}
+async function canonicalizeDiscoveredWorkers(
+  targets: Array<{ workerDid: string; inviteToken?: string; relayUrl?: string }>,
+  options: { relay?: RelayTransport | string; owner: KeyPair },
+): Promise<void> {
+  const pending = targets.filter((target) => !target.inviteToken);
+  if (pending.length === 0) return;
+  const relays = new Map<RelayTransport | string, typeof pending>();
+  for (const target of pending) {
+    const relay = target.relayUrl ?? options.relay;
+    if (!relay) continue;
+    const group = relays.get(relay) ?? [];
+    group.push(target);
+    relays.set(relay, group);
+  }
+  await Promise.all(
+    [...relays.entries()].map(async ([relayOption, group]) => {
+      try {
+        const relay = transport(relayOption, options.owner);
+        if (!relay.discover) return;
+        const cards = await relay.discover();
+        if (!Array.isArray(cards) || cards.some((card) => !verifySignedAgentCard(card))) return;
+        for (const target of group) {
+          const card = cards.find(
+            (item) =>
+              item.payload.agentDid === target.workerDid ||
+              item.payload.ownerDid === target.workerDid,
+          );
+          if (card) target.workerDid = card.payload.agentDid;
+        }
+      } catch {
+        // Discovery only collapses aliases. Settlement still checks the signed manifest.
+      }
+    }),
+  );
 }
 export function buildTaskManifest(options: {
   ownerDid: string;

@@ -1356,3 +1356,377 @@ describe('issue 30: MCP invite expiry preserves an explicit zero', () => {
     expect(JSON.parse(textQuorum.content[0].text)).toMatchObject({ error: 'INVALID_QUORUM_SIZE' });
   });
 });
+
+describe('issue 32: over-budget progress stops the tool before the backend runs', () => {
+  it('rejects the same turn as the un-awaited budget report', async () => {
+    const owner = generateKeyPair();
+    const key = generateKeyPair();
+    const relay = new InMemoryRelay();
+    let backendCalls = 0;
+    const worker = new WorkerNode({
+      owner: key,
+      relay,
+      timeoutMs: 1500,
+      approvalProvider: new PolicyAutoApprovalProvider(key),
+      tools: { read: { resource: () => 'mcp://synthetic/read', readOnly: true } },
+      toolBackend: {
+        callTool: async () => {
+          backendCalls += 1;
+          return { content: [] };
+        },
+      },
+      adapter: {
+        id: 'quota',
+        name: 'quota',
+        skills: [],
+        executeTask: async (ctx) => {
+          void Promise.resolve(
+            ctx.reportProgress?.({ step: 'over', metrics: { inputTokens: 11 } }),
+          ).catch(() => undefined);
+          await ctx.callTool?.('read', {});
+          return { ok: true };
+        },
+      },
+    });
+    const summarize = (pending: Promise<unknown>): Promise<{ state?: string; error?: string }> =>
+      pending.then(
+        (value) => ({ state: (value as { state?: string } | undefined)?.state }),
+        (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
+      );
+    const pending = summarize(worker.start({ once: true }));
+    const client = new RequesterClient({
+      owner,
+      relay,
+      timeoutMs: 1500,
+      approvalProvider: new PolicyAutoApprovalProvider(owner),
+    });
+    const requester = await summarize(
+      client.delegate({
+        to: worker.invite(),
+        title: 'quota',
+        description: 'synthetic counter only',
+        input: {},
+        budget: { maxInputTokens: 10 },
+        capabilities: [
+          {
+            capabilityId: 'cap_synthetic_read',
+            resource: 'mcp://synthetic/read',
+            allowedTools: ['read'],
+            maxInvocations: 2,
+            argConstraints: { type: 'object' },
+            expiresAt: new Date(Date.now() + 60000).toISOString(),
+          },
+        ],
+      }),
+    );
+    const workerResult = await pending;
+    worker.stop();
+    expect(backendCalls).toBe(0);
+    expect(requester.error).toContain('PEER_REJECTED');
+    expect(requester.error).toContain('BUDGET');
+    expect(workerResult.error).toContain('BUDGET_EXCEEDED');
+  });
+
+  it('still runs a tool when the reported usage stays inside the budget', async () => {
+    const owner = generateKeyPair();
+    const key = generateKeyPair();
+    const relay = new InMemoryRelay();
+    let backendCalls = 0;
+    const worker = new WorkerNode({
+      owner: key,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(key),
+      tools: { read: { resource: () => 'mcp://synthetic/read', readOnly: true } },
+      toolBackend: {
+        callTool: async () => {
+          backendCalls += 1;
+          return { content: [] };
+        },
+      },
+      adapter: {
+        id: 'quota-ok',
+        name: 'quota-ok',
+        skills: [],
+        executeTask: async (ctx) => {
+          await ctx.reportProgress?.({ step: 'inside', metrics: { inputTokens: 1 } });
+          await ctx.callTool?.('read', {});
+          return { ok: true };
+        },
+      },
+    });
+    const pending = worker.start({ once: true });
+    const client = new RequesterClient({
+      owner,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(owner),
+    });
+    const result = await client.delegate({
+      to: worker.invite(),
+      title: 'within budget',
+      description: 'synthetic',
+      input: {},
+      budget: { maxInputTokens: 10 },
+      capabilities: [
+        {
+          capabilityId: 'cap_synthetic_read',
+          resource: 'mcp://synthetic/read',
+          allowedTools: ['read'],
+          maxInvocations: 2,
+          argConstraints: { type: 'object' },
+          expiresAt: new Date(Date.now() + 60000).toISOString(),
+        },
+      ],
+    });
+    const workerResult = await pending;
+    worker.stop();
+    expect(result.state).toBe('SETTLED');
+    expect(workerResult?.state).toBe('SETTLED');
+    expect(backendCalls).toBe(1);
+    expect(verifyAudit(result.bundle).valid).toBe(true);
+  });
+});
+
+describe('issue 33: owner DID and agent DID address the same worker', () => {
+  it('accepts an owner DID in delegate and delegateMulti when agentDid differs', async () => {
+    const owner = generateKeyPair();
+    const key = generateKeyPair();
+    const agent = generateKeyPair();
+    const relay = new InMemoryRelay();
+    let executions = 0;
+    const worker = new WorkerNode({
+      owner: key,
+      agentDid: agent.did,
+      relay,
+      timeoutMs: 1500,
+      approvalProvider: new PolicyAutoApprovalProvider(key),
+      adapter: {
+        id: 'alias',
+        name: 'alias',
+        skills: [],
+        executeTask: async () => {
+          executions += 1;
+          return { ok: true };
+        },
+      },
+    });
+    const pending = worker
+      .start()
+      .catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
+    const client = new RequesterClient({
+      owner,
+      relay,
+      timeoutMs: 1500,
+      approvalProvider: new PolicyAutoApprovalProvider(owner),
+    });
+    const result: Record<string, { state?: string; deliverable?: Json; error?: string }> = {};
+    try {
+      for (const mode of ['single-owner', 'multi-owner', 'multi-agent-invite'] as const) {
+        try {
+          const settled =
+            mode === 'single-owner'
+              ? await client.delegate({
+                  to: key.did,
+                  title: 'alias',
+                  description: 'synthetic',
+                  input: {},
+                })
+              : await client.delegateMulti({
+                  workers: [
+                    mode === 'multi-owner'
+                      ? { workerDid: key.did }
+                      : { workerDid: agent.did, inviteToken: worker.invite() },
+                  ],
+                  mode: 'race',
+                  title: 'alias',
+                  description: 'synthetic',
+                  input: {},
+                });
+          result[mode] = {
+            state: 'state' in settled ? settled.state : settled.status,
+            deliverable: settled.deliverable,
+          };
+        } catch (error) {
+          result[mode] = { error: error instanceof Error ? error.message : String(error) };
+        }
+      }
+    } finally {
+      worker.stop();
+      await pending;
+    }
+    expect(executions).toBe(3);
+    expect(result['single-owner']).toMatchObject({ state: 'SETTLED', deliverable: { ok: true } });
+    expect(result['multi-owner']).toMatchObject({ state: 'SETTLED', deliverable: { ok: true } });
+    expect(result['multi-agent-invite']).toMatchObject({
+      state: 'SETTLED',
+      deliverable: { ok: true },
+    });
+  });
+
+  it('binds owner-addressed and agent-addressed races to the canonical agentDid', async () => {
+    const owner = generateKeyPair();
+    const key = generateKeyPair();
+    const agent = generateKeyPair();
+    const relay = new InMemoryRelay();
+    const worker = new WorkerNode({
+      owner: key,
+      agentDid: agent.did,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(key),
+      adapter: {
+        id: 'alias',
+        name: 'alias',
+        skills: [],
+        executeTask: async () => ({ ok: true }),
+      },
+    });
+    const pending = worker.start();
+    const client = new RequesterClient({
+      owner,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(owner),
+    });
+    const byOwner = await client.delegateMulti({
+      workers: [{ workerDid: key.did }],
+      mode: 'race',
+      title: 'owner alias',
+      description: 'synthetic',
+      input: {},
+    });
+    const byAgent = await client.delegateMulti({
+      workers: [{ workerDid: agent.did }],
+      mode: 'race',
+      title: 'agent alias',
+      description: 'synthetic',
+      input: {},
+    });
+    worker.stop();
+    await pending;
+    expect(byOwner.status).toBe('SETTLED');
+    expect(byOwner.winners.map((winner) => winner.workerDid)).toEqual([agent.did]);
+    expect(byAgent.status).toBe('SETTLED');
+    expect(byAgent.winners.map((winner) => winner.workerDid)).toEqual([agent.did]);
+    expect(verifyAudit(byOwner.receipts[0].bundle).valid).toBe(true);
+  });
+
+  it('does not let owner and agent aliases of one worker satisfy a quorum of two', async () => {
+    const owner = generateKeyPair();
+    const key = generateKeyPair();
+    const agent = generateKeyPair();
+    const relay = new InMemoryRelay();
+    let executions = 0;
+    const worker = new WorkerNode({
+      owner: key,
+      agentDid: agent.did,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(key),
+      adapter: {
+        id: 'alias',
+        name: 'alias',
+        skills: [],
+        executeTask: async () => {
+          executions += 1;
+          return { ok: true };
+        },
+      },
+    });
+    const pending = worker.start();
+    const client = new RequesterClient({
+      owner,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(owner),
+    });
+    await expect(
+      client.delegateMulti({
+        workers: [{ workerDid: key.did }, { workerDid: agent.did }],
+        mode: 'quorum',
+        quorumSize: 2,
+        title: 'same worker',
+        description: 'synthetic',
+        input: {},
+      }),
+    ).rejects.toThrow('DUPLICATE_WORKER_TARGET');
+    await expect(
+      client.delegateMulti({
+        workers: [{ workerDid: key.did }, { workerDid: agent.did, inviteToken: worker.invite() }],
+        mode: 'quorum',
+        quorumSize: 2,
+        title: 'same worker invite',
+        description: 'synthetic',
+        input: {},
+      }),
+    ).rejects.toThrow('DUPLICATE_WORKER_TARGET');
+    await expect(
+      client.delegateMulti({
+        workers: [{ workerDid: key.did, inviteToken: worker.invite() }],
+        mode: 'race',
+        title: 'owner label on invite',
+        description: 'synthetic',
+        input: {},
+      }),
+    ).rejects.toThrow('WORKER_DID_MISMATCH');
+    expect(executions).toBe(0);
+    worker.stop();
+    await pending;
+  });
+
+  it('counts an owner-addressed worker and a different worker as two quorum votes', async () => {
+    const owner = generateKeyPair();
+    const key = generateKeyPair();
+    const agent = generateKeyPair();
+    const other = generateKeyPair();
+    const relay = new InMemoryRelay();
+    const alias = new WorkerNode({
+      owner: key,
+      agentDid: agent.did,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(key),
+      adapter: {
+        id: 'alias',
+        name: 'alias',
+        skills: [],
+        executeTask: async () => ({ ok: true }),
+      },
+    });
+    const second = new WorkerNode({
+      owner: other,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(other),
+      adapter: {
+        id: 'second',
+        name: 'second',
+        skills: [],
+        executeTask: async () => ({ ok: true }),
+      },
+    });
+    const pending = Promise.all([alias.start({ once: true }), second.start({ once: true })]);
+    const client = new RequesterClient({
+      owner,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(owner),
+    });
+    const result = await client.delegateMulti({
+      workers: [{ workerDid: key.did }, { workerDid: other.did }],
+      mode: 'quorum',
+      quorumSize: 2,
+      title: 'two workers',
+      description: 'synthetic',
+      input: {},
+    });
+    for (const node of [alias, second]) node.stop();
+    await pending;
+    expect(result.status).toBe('SETTLED');
+    expect(result.deliverable).toEqual({ ok: true });
+    expect(new Set(result.winners.map((winner) => winner.workerDid))).toEqual(
+      new Set([agent.did, other.did]),
+    );
+  });
+});
