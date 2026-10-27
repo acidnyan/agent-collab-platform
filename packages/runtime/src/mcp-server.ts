@@ -1,12 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createSignedAgentCard, createInviteToken, createRevocationNotice } from '@acp/core';
-import type { BudgetSpec, Json, KeyPair, Schema } from '@acp/core';
+import {
+  createSignedAgentCard,
+  createInviteToken,
+  createRevocationNotice,
+  digest,
+  parseAndVerifyInviteToken,
+  resolveDid,
+  validateRelayEndpointUrl,
+} from '@acp/core';
+import type { BudgetSpec, Invite, Json, KeyPair, Schema } from '@acp/core';
 import { RevocationRegistry } from '@acp/core';
 import type { AuditBundle } from '@acp/ledger';
 import { verifyAudit } from '@acp/ledger';
 import type { RelayTransport } from '@acp/relay';
 import type { Readable, Writable } from 'node:stream';
-import { PolicyAutoApprovalProvider } from './approval-providers.js';
+import {
+  InteractiveCliApprovalProvider,
+  PolicyAutoApprovalProvider,
+  WebhookApprovalProvider,
+  assertApprovalWebhookUrl,
+} from './approval-providers.js';
+import type { ApprovalProvider } from './approval-providers.js';
 import type { DelegateMultiOptions, DelegateOptions } from './session.js';
 import { RequesterClient } from './session.js';
 
@@ -17,8 +31,40 @@ export interface AcpMcpServerOptions {
   name?: string;
   /** Signs agentDid on acp_create_invite when that DID is not the server owner. */
   agentKey?: KeyPair;
-  /** Opt in to loopback and RFC1918 relays. Untrusted invites stay blocked by default. */
+  /**
+   * When set, a task may proceed only if its worker DID is listed. An invite
+   * matches when either agentDid or ownerDid is listed. Checked before dialing.
+   */
+  allowedWorkerDids?: string[];
+  /**
+   * When set, every outbound relay URL must match an entry after normalization
+   * to origin + pathname with no trailing slash. Includes tool arguments, the
+   * configured relay, and relay URLs embedded in invite tokens.
+   */
+  allowedRelayUrls?: string[];
+  /**
+   * Permit a tool call or invite to select a relay other than `relay` when no
+   * allowlist is set. `allowedRelayUrls` still wins when it is set.
+   */
+  allowAnyRelay?: boolean;
+  /**
+   * Opt in to loopback and RFC1918 relays. Untrusted invites stay blocked by default.
+   * Passed through to relay URL validation and invite parsing.
+   */
   allowPrivateRelay?: boolean;
+  /** Used for pre-send and final-verification approvals instead of the default. */
+  approvalProvider?: ApprovalProvider;
+  /**
+   * POST `{ taskId, summaryHash, reason, approverDid }` and sign the owner
+   * decision only when the webhook returns `{ approved: true }`.
+   */
+  approvalWebhookUrl?: string;
+  approvalWebhookFetcher?: typeof fetch;
+  /** Use InteractiveCliApprovalProvider instead of policy auto-approval. */
+  requireInteractiveApproval?: boolean;
+  /** Streams for `requireInteractiveApproval`. Default to process stdin and stdout. */
+  approvalInput?: Readable;
+  approvalOutput?: Writable;
 }
 
 interface RpcRequest {
@@ -38,6 +84,7 @@ class RpcError extends Error {
 }
 
 const PROTOCOL_VERSION = '2024-11-05';
+const OUTBOUND_REASON = 'outbound delegation to a remote ACP worker';
 
 function rpcError(id: unknown, code: number, message: string): Json {
   return { jsonrpc: '2.0', id: (id ?? null) as Json, error: { code, message } };
@@ -56,11 +103,73 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+/** Origin plus pathname, without a trailing slash. Query and fragment are dropped. */
+export function normalizeMcpRelayUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('MCP_RELAY_NOT_ALLOWED');
+  }
+  return url.origin + url.pathname.replace(/\/+$/, '');
+}
+
+function workerAllowlist(dids: string[] | undefined): ReadonlySet<string> | undefined {
+  if (dids === undefined) return undefined;
+  if (!Array.isArray(dids)) throw new Error('INVALID_WORKER_DID');
+  const allow = new Set<string>();
+  for (const did of dids) {
+    if (typeof did !== 'string') throw new Error('INVALID_WORKER_DID');
+    const trimmed = did.trim();
+    try {
+      resolveDid(trimmed);
+    } catch {
+      throw new Error('INVALID_WORKER_DID');
+    }
+    allow.add(trimmed);
+  }
+  return allow;
+}
+
+function relayAllowlist(
+  urls: string[] | undefined,
+  allowPrivateRelay: boolean | undefined,
+): ReadonlySet<string> | undefined {
+  if (urls === undefined) return undefined;
+  if (!Array.isArray(urls)) throw new Error('INVALID_RELAY_URL');
+  const allow = new Set<string>();
+  for (const entry of urls) {
+    if (typeof entry !== 'string') throw new Error('INVALID_RELAY_URL');
+    const trimmed = entry.trim();
+    validateRelayEndpointUrl(trimmed, { allowPrivateRelay });
+    allow.add(normalizeMcpRelayUrl(trimmed));
+  }
+  return allow;
+}
+
+function selectApproval(options: AcpMcpServerOptions): ApprovalProvider {
+  if (options.approvalProvider) return options.approvalProvider;
+  if (options.approvalWebhookUrl) {
+    return new WebhookApprovalProvider(options.owner, {
+      url: options.approvalWebhookUrl,
+      fetch: options.approvalWebhookFetcher,
+      response: 'owner-decision',
+    });
+  }
+  if (options.requireInteractiveApproval) {
+    return new InteractiveCliApprovalProvider(options.owner, {
+      input: options.approvalInput,
+      output: options.approvalOutput,
+    });
+  }
+  return new PolicyAutoApprovalProvider(options.owner);
+}
+
 const tools: Array<{ name: string; description: string; inputSchema: Json }> = [
   {
     name: 'acp_delegate_task',
     description:
-      'Delegate one task to an ACP worker and return the verified deliverable plus an audit summary.',
+      'Delegate a task to a remote ACP worker and verify its signed audit bundle. Input data is transmitted externally to the worker over the relay.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -81,7 +190,7 @@ const tools: Array<{ name: string; description: string; inputSchema: Json }> = [
   {
     name: 'acp_delegate_multi',
     description:
-      'Delegate one task to several workers. race returns the first verified deliverable. quorum returns the matching verified digest.',
+      'Delegate a task to multiple remote ACP workers and verify their signed audit bundles. Input data is transmitted externally to the worker agents over the relay. race returns the first verified deliverable. quorum returns the matching verified digest.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -144,9 +253,16 @@ const tools: Array<{ name: string; description: string; inputSchema: Json }> = [
 /** Dependency-free MCP server for ACP delegation, audit verification, and revocation. */
 export class AcpMcpServer {
   readonly revocation: RevocationRegistry;
+  private readonly allowedWorkers?: ReadonlySet<string>;
+  private readonly allowedRelays?: ReadonlySet<string>;
+  private readonly approval: ApprovalProvider;
   private framed: boolean | undefined;
   constructor(readonly options: AcpMcpServerOptions) {
     this.revocation = options.revocation ?? new RevocationRegistry();
+    this.allowedWorkers = workerAllowlist(options.allowedWorkerDids);
+    this.allowedRelays = relayAllowlist(options.allowedRelayUrls, options.allowPrivateRelay);
+    if (options.approvalWebhookUrl) assertApprovalWebhookUrl(options.approvalWebhookUrl);
+    this.approval = selectApproval(options);
   }
   async handle(message: unknown): Promise<Json | undefined> {
     if (!message || typeof message !== 'object' || Array.isArray(message))
@@ -266,15 +382,94 @@ export class AcpMcpServer {
     return new RequesterClient({
       owner: this.options.owner,
       relay: selected,
+      approvalProvider: this.approval,
       allowPrivateRelay: this.options.allowPrivateRelay,
-      approvalProvider: new PolicyAutoApprovalProvider(this.options.owner),
     });
+  }
+  private isInvite(value: string): boolean {
+    return value.startsWith('acp-invite:') || value.startsWith('acp:');
+  }
+  private parseInvite(token: string): Invite {
+    return parseAndVerifyInviteToken(token, Date.now(), {
+      allowPrivateRelay: this.options.allowPrivateRelay,
+    });
+  }
+  /** Reject unlisted workers before any relay dial. */
+  private assertWorker(invite: Invite | undefined, workerDid: string | undefined): void {
+    if (!this.allowedWorkers) return;
+    if (invite) {
+      if (this.allowedWorkers.has(invite.agentDid) || this.allowedWorkers.has(invite.ownerDid))
+        return;
+      throw new Error('MCP_WORKER_NOT_ALLOWED');
+    }
+    if (typeof workerDid === 'string' && this.allowedWorkers.has(workerDid)) return;
+    throw new Error('MCP_WORKER_NOT_ALLOWED');
+  }
+  /**
+   * Reject unlisted or switched relay URLs before any relay dial.
+   * Explicit tool URLs are dial targets. Invite URLs are outbound destinations
+   * even when the configured transport is what would be dialed.
+   */
+  private assertRelays(explicit: string[], inviteUrls: string[]): void {
+    const configured = typeof this.options.relay === 'string' ? this.options.relay : undefined;
+    const outbound = [...explicit, ...inviteUrls];
+    if (configured) outbound.push(configured);
+    if (this.allowedRelays) {
+      for (const url of outbound) {
+        if (!this.allowedRelays.has(normalizeMcpRelayUrl(url)))
+          throw new Error('MCP_RELAY_NOT_ALLOWED');
+      }
+      return;
+    }
+    if (this.options.allowAnyRelay) return;
+    if (configured) {
+      const expected = normalizeMcpRelayUrl(configured);
+      for (const url of [...explicit, ...inviteUrls]) {
+        if (normalizeMcpRelayUrl(url) !== expected) throw new Error('MCP_RELAY_NOT_ALLOWED');
+      }
+      return;
+    }
+    if (this.options.relay && explicit.length > 0) throw new Error('MCP_RELAY_NOT_ALLOWED');
+  }
+  private outboundApprovalRequired(): boolean {
+    if (this.options.approvalProvider)
+      return !(this.options.approvalProvider instanceof PolicyAutoApprovalProvider);
+    return Boolean(this.options.approvalWebhookUrl || this.options.requireInteractiveApproval);
+  }
+  /** Ask the configured provider before task input is written to the relay. */
+  private async approveOutbound(summary: Json): Promise<void> {
+    if (!this.outboundApprovalRequired()) return;
+    const taskId = 'task_mcp_' + digest(summary).slice(7, 23);
+    const receipt = await this.approval.approve({
+      taskId,
+      gate: 'external_side_effect',
+      target: summary,
+      details: { reason: OUTBOUND_REASON },
+    });
+    if (receipt.payload.decision !== 'APPROVED') throw new Error('APPROVAL_REJECTED');
   }
   private async delegateTask(args: Record<string, unknown>): Promise<Json> {
     const to = typeof args.inviteToken === 'string' ? args.inviteToken : args.workerDid;
     if (typeof to !== 'string' || typeof args.title !== 'string')
       throw new RpcError(-32602, 'Invalid params');
-    const relay = typeof args.relayUrl === 'string' ? args.relayUrl : this.options.relay;
+    const invite = this.isInvite(to) ? this.parseInvite(to) : undefined;
+    const explicitRelay = typeof args.relayUrl === 'string' ? args.relayUrl : undefined;
+    this.assertWorker(invite, invite ? undefined : to);
+    this.assertRelays(explicitRelay ? [explicitRelay] : [], invite ? [invite.relayUrl] : []);
+    const relay = explicitRelay ?? this.options.relay;
+    await this.approveOutbound({
+      title: args.title,
+      description: typeof args.description === 'string' ? args.description : '',
+      input: (args.input ?? null) as Json,
+      workers: [
+        {
+          workerDid: invite?.agentDid ?? to,
+          agentDid: invite?.agentDid ?? null,
+          ownerDid: invite?.ownerDid ?? null,
+        },
+      ],
+      relayUrls: this.relayList(explicitRelay ? [explicitRelay] : [], invite ? [invite.relayUrl] : []),
+    });
     const request: DelegateOptions = {
       to,
       relay,
@@ -306,14 +501,37 @@ export class AcpMcpServer {
       throw new RpcError(-32602, 'Invalid params');
     if (typeof args.title !== 'string') throw new RpcError(-32602, 'Invalid params');
     const relay = typeof args.relayUrl === 'string' ? args.relayUrl : undefined;
+    const explicitRelays: string[] = [];
+    if (relay) explicitRelays.push(relay);
+    const inviteUrls: string[] = [];
+    const described: Json[] = [];
     const workers = args.workers.map((worker) => {
       const item = asRecord(worker);
       if (typeof item.workerDid !== 'string') throw new RpcError(-32602, 'Invalid params');
+      const inviteToken = typeof item.inviteToken === 'string' ? item.inviteToken : undefined;
+      const invite = inviteToken ? this.parseInvite(inviteToken) : undefined;
+      this.assertWorker(invite, item.workerDid);
+      if (typeof item.relayUrl === 'string') explicitRelays.push(item.relayUrl);
+      if (invite) inviteUrls.push(invite.relayUrl);
+      described.push({
+        workerDid: invite?.agentDid ?? item.workerDid,
+        agentDid: invite?.agentDid ?? null,
+        ownerDid: invite?.ownerDid ?? null,
+      });
       return {
         workerDid: item.workerDid,
-        inviteToken: typeof item.inviteToken === 'string' ? item.inviteToken : undefined,
+        inviteToken,
         relayUrl: typeof item.relayUrl === 'string' ? item.relayUrl : relay,
       };
+    });
+    this.assertRelays(explicitRelays, inviteUrls);
+    await this.approveOutbound({
+      title: args.title,
+      description: typeof args.description === 'string' ? args.description : '',
+      input: (args.input ?? null) as Json,
+      mode: args.mode,
+      workers: described,
+      relayUrls: this.relayList(explicitRelays, inviteUrls),
     });
     const quorumSize =
       args.quorumSize === undefined
@@ -351,6 +569,11 @@ export class AcpMcpServer {
         head: receipt.bundle.checkpoint.actor.payload.head,
       })),
     };
+  }
+  private relayList(explicit: string[], inviteUrls: string[]): string[] {
+    const urls = [...explicit, ...inviteUrls];
+    if (typeof this.options.relay === 'string') urls.push(this.options.relay);
+    return urls;
   }
   private verifyBundle(args: Record<string, unknown>): Json {
     const bundle = args.bundle as AuditBundle;

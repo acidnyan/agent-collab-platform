@@ -48,6 +48,8 @@ Or add **`acp mcp-server`** directly to **Claude Desktop**, **Cursor**, **Codex*
 }
 ```
 
+An MCP host can pass untrusted tool arguments. Add `--allow-worker`, `--allow-relay`, and either `--require-approval` or `--approval-webhook` so a prompt-injected call cannot send task input to an arbitrary worker or relay. The MCP section below lists those flags.
+
 ## One-screen summary
 
 This project is not a centralized hosting SaaS and not an agent directory. Each owner runs their own Gateway. Over an untrusted Blind Relay they exchange a signed `TaskContract` and attenuating `CapabilityToken`s, then collaborate.
@@ -215,6 +217,21 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 | `acp_revoke_token`         | Signed `RevocationNotice`                                                                       |
 
 `AcpMcpServer` in `@acp/runtime` is the same server for tests and embedded hosts. The server key signs requester approvals for the tools it runs.
+
+`acp_delegate_task` and `acp_delegate_multi` transmit task input to the target worker over the relay. Restrict that path when the host might supply the arguments:
+
+```sh
+pnpm acp mcp-server \
+  --key /tmp/alice.private.json \
+  --relay https://acp-relay.agent-collab.workers.dev \
+  --allow-relay https://acp-relay.agent-collab.workers.dev \
+  --allow-worker did:key:z... \
+  --approval-webhook https://approvals.example/acp
+```
+
+`--allow-worker <did>` and `--allow-relay <url>` are repeatable and comma-separated. With `--allow-worker`, a plain worker DID must be listed. An invite is allowed when either its `agentDid` or its `ownerDid` is listed. Any other target fails with `MCP_WORKER_NOT_ALLOWED` before the server dials. With `--allow-relay`, every relay URL is normalized to origin plus pathname with no trailing slash. The configured `--relay`, a tool `relayUrl`, and any relay URL embedded in an invite must all match, or the call fails with `MCP_RELAY_NOT_ALLOWED`. A tool call or invite that selects a relay other than `--relay` is rejected unless that URL is allowlisted. Programmatic hosts can set `allowAnyRelay: true` to accept another relay when no allowlist is configured. An allowlist still applies when it is set. Configured relay URLs are checked with `validateRelayEndpointUrl`.
+
+`--require-approval` uses `InteractiveCliApprovalProvider` and asks on stdin before input is sent, then again for final verification. `--approval-webhook <url>` uses `WebhookApprovalProvider` in owner-decision mode. It POSTs `{ taskId, summaryHash, reason, approverDid }` and continues only when the response is HTTP 2xx and `{ approved: true }`. `{ approved: false }` or a non-2xx response throws `APPROVAL_REJECTED` and nothing is sent. Pass `approvalProvider` on `AcpMcpServer` for a custom provider. Allowlist checks and this approval run before `delegate` / `delegateMulti` write task input to the relay. `conformance/p1-7-mcp-outbound-policy.test.ts` locks the behavior.
 
 A worker reports `PROGRESS` (`percent`, `step`, `message`, and intermediate token or tool metrics) through the same encrypted, countersigned session log. `delegate(request, { onProgress })` receives each decrypted update before `DELIVER`. Reported metrics are charged against `QuotaMeter`.
 

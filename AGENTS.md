@@ -199,8 +199,22 @@ For an MCP host, start a stdio server with the owner key. It exposes
 `acp_create_invite`, and `acp_revoke_token`.
 
 ```sh
-pnpm acp mcp-server --key ~/.acp/requester.private.json --relay https://acp-relay.agent-collab.workers.dev
+pnpm acp mcp-server --key ~/.acp/requester.private.json --relay https://acp-relay.agent-collab.workers.dev [--allow-private-relay] [--allow-worker <did>] [--allow-relay <url>] [--require-approval | --approval-webhook <url>]
 ```
+
+`acp_delegate_task` and `acp_delegate_multi` transmit task input to the worker
+over the relay. `--allow-worker` and `--allow-relay` are repeatable or
+comma-separated. A plain worker DID must be listed. An invite matches when
+either `agentDid` or `ownerDid` is listed (`MCP_WORKER_NOT_ALLOWED`). Every
+relay URL from `--relay`, the tool call, and the invite is normalized to origin
+plus pathname with no trailing slash and must match `--allow-relay`
+(`MCP_RELAY_NOT_ALLOWED`). Those checks run before dialing. `--allow-private-relay`
+opts into loopback and RFC1918 relays; those destinations stay blocked by
+default, and metadata addresses stay blocked even when the flag is set.
+`--require-approval` asks on stdin. `--approval-webhook` POSTs
+`{ taskId, summaryHash, reason, approverDid }` and sends only when the webhook
+returns `{ approved: true }`. `{ approved: false }` or a non-2xx response is
+`APPROVAL_REJECTED`.
 
 Programmatic callers can pass `onProgress` to receive encrypted `PROGRESS`
 updates, and an `AbortSignal` to send `CANCEL` during an accepted or running

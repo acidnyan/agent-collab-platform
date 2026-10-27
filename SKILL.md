@@ -197,8 +197,22 @@ An MCP host can run the stdio server below. Tools: `acp_delegate_task`,
 `acp_revoke_token`.
 
 ```sh
-pnpm acp mcp-server --key ~/.acp/requester.private.json --relay https://acp-relay.agent-collab.workers.dev
+pnpm acp mcp-server --key ~/.acp/requester.private.json --relay https://acp-relay.agent-collab.workers.dev [--allow-private-relay] [--allow-worker <did>] [--allow-relay <url>] [--require-approval | --approval-webhook <url>]
 ```
+
+`acp_delegate_task` and `acp_delegate_multi` transmit task input externally over
+the relay. `--allow-worker` and `--allow-relay` are repeatable or
+comma-separated. A plain worker DID must be listed. An invite matches when
+either `agentDid` or `ownerDid` is listed (`MCP_WORKER_NOT_ALLOWED`). Relay
+URLs from `--relay`, the tool call, and the invite are normalized to origin
+plus pathname with no trailing slash and must match `--allow-relay`
+(`MCP_RELAY_NOT_ALLOWED`) before dialing. `--allow-private-relay` opts into
+loopback and RFC1918 relays; those destinations stay blocked by default, and
+metadata addresses stay blocked even when the flag is set. `--require-approval`
+asks on stdin. `--approval-webhook` POSTs
+`{ taskId, summaryHash, reason, approverDid }` and sends only when the webhook
+returns `{ approved: true }`. A denial or non-2xx response is
+`APPROVAL_REJECTED`.
 
 `onProgress` receives live `PROGRESS` updates. An `AbortSignal` cancels an
 accepted or running task. `delegateMulti` supports `race` and `quorum`.
