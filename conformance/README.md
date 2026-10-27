@@ -31,6 +31,14 @@ reject every invalid attenuation, and implement the same transition table.
 envelopes with `UNENCRYPTED_ENVELOPE_REJECTED` unless the caller explicitly opts out,
 and that an encrypted session still settles with a valid audit bundle.
 
+`p2-11-hkdf-key-binding.test.ts` checks that HKDF-SHA256 info for
+`encryptEnvelopePayload` and `decryptEnvelopePayload` binds the canonical envelope
+header plus the ephemeral and recipient X25519 public keys. AES-GCM additional
+data stays the header, and the nonce stays the HKDF salt. A ciphertext whose AES
+key was derived with header-only info, or whose ephemeral public key or recipient
+key context was altered, is rejected with `ENVELOPE_DECRYPTION_FAILED`. An
+encrypted session still settles with a `VALID` audit bundle.
+
 `p2-10-relay-error-sanitization.test.ts` checks that HTTP and WebSocket relay
 errors return an allowlisted protocol code. An unexpected storage or runtime
 exception becomes `RELAY_INTERNAL_ERROR` (HTTP 500 on the fetch handler) and the

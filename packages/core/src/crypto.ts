@@ -243,6 +243,39 @@ function envelopeAad(context: EnvelopeHeaderContext): Buffer {
     }),
   );
 }
+function rawX25519PublicKey(key: KeyObject): Buffer {
+  const raw = key.export({ format: 'der', type: 'spki' }).subarray(-32);
+  if (raw.length !== 32) throw new Error('INVALID_PUBLIC_KEY');
+  return Buffer.from(raw);
+}
+/**
+ * HKDF-SHA256 info for envelope payload encryption.
+ * Binds the canonical header to the ephemeral X25519 public key and the
+ * recipient static X25519 public key so the AES key is tied to this
+ * Diffie-Hellman transcript as well as the header. Both keys are the raw
+ * 32-byte values, encoded base64url. AES-GCM additional data stays the
+ * header alone, and the 12-byte nonce stays the HKDF salt.
+ */
+export function envelopeHkdfInfo(
+  context: EnvelopeHeaderContext,
+  ephemeralPublicKey: Uint8Array,
+  recipientPublicKey: Uint8Array,
+): Buffer {
+  if (ephemeralPublicKey.length !== 32 || recipientPublicKey.length !== 32)
+    throw new Error('INVALID_PUBLIC_KEY');
+  return Buffer.from(
+    canonicalize({
+      taskId: context.taskId,
+      seq: context.seq,
+      eventType: context.eventType,
+      senderDid: context.senderDid,
+      recipientDid: context.recipientDid,
+      ephemeralPublicKey: Buffer.from(ephemeralPublicKey).toString('base64url'),
+      recipientPublicKey: Buffer.from(recipientPublicKey).toString('base64url'),
+    }),
+    'utf8',
+  );
+}
 function importEphemeralPublic(encoded: string): KeyObject {
   const raw = Buffer.from(encoded, 'base64url');
   const der = raw.length === 32 ? Buffer.concat([X25519_SPKI_PREFIX, raw]) : raw;
@@ -264,13 +297,20 @@ export function encryptEnvelopePayload(
   context: EnvelopeHeaderContext,
 ): EncryptedEnvelopePayload {
   const ephemeral = generateKeyPairSync('x25519');
+  const recipientPublic = x25519PublicFromDid(context.recipientDid);
   const shared = diffieHellman({
     privateKey: ephemeral.privateKey,
-    publicKey: x25519PublicFromDid(context.recipientDid),
+    publicKey: recipientPublic,
   });
   const iv = randomBytes(12);
   const aad = envelopeAad(context);
-  const key = Buffer.from(hkdfSync('sha256', shared, iv, aad, 32));
+  const info = envelopeHkdfInfo(
+    context,
+    rawX25519PublicKey(ephemeral.publicKey),
+    rawX25519PublicKey(recipientPublic),
+  );
+  // The nonce remains the HKDF salt. Info binds the header and both X25519 public keys.
+  const key = Buffer.from(hkdfSync('sha256', shared, iv, info, 32));
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   cipher.setAAD(aad);
   const ciphertext = Buffer.concat([
@@ -302,11 +342,19 @@ export function decryptEnvelopePayload<T = Json>(
   try {
     const iv = Buffer.from(payload.iv, 'base64url');
     const aad = envelopeAad(context);
+    const ephemeralPublic = importEphemeralPublic(payload.ephemeralPublicKey);
+    const recipientPublic = x25519PublicFromDid(context.recipientDid);
     const shared = diffieHellman({
       privateKey: x25519PrivateFromKey(recipient),
-      publicKey: importEphemeralPublic(payload.ephemeralPublicKey),
+      publicKey: ephemeralPublic,
     });
-    const key = Buffer.from(hkdfSync('sha256', shared, iv, aad, 32));
+    const info = envelopeHkdfInfo(
+      context,
+      rawX25519PublicKey(ephemeralPublic),
+      rawX25519PublicKey(recipientPublic),
+    );
+    // The nonce remains the HKDF salt. Info binds the header and both X25519 public keys.
+    const key = Buffer.from(hkdfSync('sha256', shared, iv, info, 32));
     const decipher = createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAAD(aad);
     decipher.setAuthTag(Buffer.from(payload.tag, 'base64url'));

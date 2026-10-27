@@ -56,7 +56,10 @@ export type EncryptedEnvelopePayload = {
   __acpEncrypted: 'X25519-HKDF-AES256GCM';
   /** Ephemeral X25519 SPKI DER, or the raw 32-byte public key, base64url. */
   ephemeralPublicKey: string;
-  /** 12-byte AES-GCM nonce, base64url. Also the HKDF salt. */
+  /**
+   * 12-byte AES-GCM nonce, base64url. Also the HKDF salt.
+   * HKDF info binds the canonical header plus the ephemeral and recipient X25519 public keys.
+   */
   iv: string;
   ciphertext: string;
   /** 16-byte AES-GCM tag, base64url. */
