@@ -51,6 +51,17 @@ export interface Ack {
   receiverDid: string;
 }
 export type AckReceipt = Signed<Ack>;
+/** Ciphertext wrapper stored in `envelope.payload.payload`. The relay never receives the plaintext. */
+export type EncryptedEnvelopePayload = {
+  __acpEncrypted: 'X25519-HKDF-AES256GCM';
+  /** Ephemeral X25519 SPKI DER, or the raw 32-byte public key, base64url. */
+  ephemeralPublicKey: string;
+  /** 12-byte AES-GCM nonce, base64url. Also the HKDF salt. */
+  iv: string;
+  ciphertext: string;
+  /** 16-byte AES-GCM tag, base64url. */
+  tag: string;
+};
 export interface Envelope {
   type: 'SignedEnvelope';
   envelopeId: string;

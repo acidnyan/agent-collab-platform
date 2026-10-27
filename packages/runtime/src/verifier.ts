@@ -2,6 +2,8 @@
 // Adapted from newtro/delegateos src/core/verification.ts (MIT), Scott Smith.
 import {
   digest,
+  isEncryptedEnvelopePayload,
+  openEnvelope,
   signPayload,
   verifySigned,
   verifyEnvelope,
@@ -82,6 +84,7 @@ export class VerificationEngine {
     envelope: SignedEnvelope,
     gate: ApprovalGate,
     approval?: ApprovalReceipt | (() => Promise<ApprovalReceipt>),
+    recipient?: KeyPair,
   ): Promise<VerificationResult> {
     const stages: string[] = [];
     try {
@@ -96,7 +99,11 @@ export class VerificationEngine {
         Date.now() > Date.parse(m.deadline)
       )
         throw new Error('CRYPTO_ENVELOPE_OR_DEADLINE');
-      const d = envelope.payload.payload as unknown as Delivery;
+      if (isEncryptedEnvelopePayload(envelope.payload.payload) && !recipient)
+        throw new Error('CRYPTO_ENVELOPE_OR_DEADLINE');
+      const d = (isEncryptedEnvelopePayload(envelope.payload.payload)
+        ? openEnvelope(envelope, recipient!)
+        : envelope.payload.payload) as unknown as Delivery;
       if (
         !verifySigned(d.artifact, worker) ||
         d.artifact.payload.type !== 'Artifact' ||

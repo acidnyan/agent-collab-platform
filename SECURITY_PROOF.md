@@ -77,6 +77,18 @@ Threat class: one-byte or one-field edits to a signed `TaskContract` budget or s
 
 An unmodified contract, delivery, and fresh token are accepted first. A verifier that rejected everything would fail those controls.
 
+## Proof 9 — End-to-end payload encryption
+
+Threat class: a curious or compromised relay operator reads task inputs, `CapabilityToken`s, or task results from queued envelopes or a storage snapshot. A third party who copies a ciphertext, or moves it onto another `taskId` or `seq`, tries to decrypt it.
+
+| Threat class                                           | Architectural control                                                                                                                                                                                                                       | Adversarial test                                                                                           |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Relay reads a saved session payload                    | `SessionWire` in `packages/runtime/src/session-audit.ts` encrypts every payload to the peer `did:key`. `encryptEnvelopePayload` in `packages/core/src/crypto.ts` uses a fresh X25519 key, HKDF-SHA256, and AES-256-GCM bound to the header. | `Proof 9: end-to-end payload encryption` → hides task input, capability tokens, and results from the relay |
+| Third party decrypts an intercepted envelope           | Only the recipient seed derives the X25519 scalar. `decryptEnvelopePayload` throws `ENVELOPE_DECRYPTION_FAILED`.                                                                                                                            | same proof → rejects a third party and a ciphertext moved to another header                                |
+| Ciphertext transplanted onto another `taskId` or `seq` | The GCM additional data and the HKDF info are the canonical header (`taskId`, `seq`, `eventType`, `senderDid`, `recipientDid`).                                                                                                             | same proof → transplanted header                                                                           |
+
+The outer Ed25519 signature still covers the ciphertext, so the relay checks envelope shape without a decryption key. Plaintext envelopes still open, which keeps older callers working. Routing metadata remains visible.
+
 ## Local verification
 
 From a built checkout (Node.js 22, pnpm 10):

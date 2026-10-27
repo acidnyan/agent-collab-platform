@@ -9,8 +9,11 @@ import {
   createInviteToken,
   createRelayAuthToken,
   createSignedAgentCard,
+  decryptEnvelopePayload,
   digest,
   generateKeyPair,
+  isEncryptedEnvelopePayload,
+  openEnvelope,
   parseAndVerifyInviteToken,
   signApproval,
   signEnvelope,
@@ -19,6 +22,7 @@ import {
   validateOutput,
   validateRelayEndpointUrl,
   verifyContract,
+  verifyEnvelope,
   verifyRelayAuthToken,
   verifySigned,
 } from '../packages/core/src/index.js';
@@ -32,8 +36,10 @@ import type {
 import { InMemoryRelay, createRelayFetchHandler } from '../packages/relay/src/index.js';
 import {
   ApprovalGate,
+  PolicyAutoApprovalProvider,
   RequesterClient,
   VerificationEngine,
+  WorkerNode,
   buildTaskManifest,
   createDelivery,
 } from '../packages/runtime/src/index.js';
@@ -704,6 +710,164 @@ describe('Proof 5: cryptographic envelope and artifact tampering', () => {
     expect(relay.authenticate(bob.did, fresh)).toBe(true);
     expect(relay.authenticate(bob.did, fresh)).toBe(false);
     expect(relay.authenticate(bob.did, stale)).toBe(false);
+  });
+});
+
+describe('Proof 9: end-to-end payload encryption', () => {
+  it('rejects a third party and a ciphertext moved to another header', () => {
+    const alice = generateKeyPair();
+    const bob = generateKeyPair();
+    const mallory = generateKeyPair();
+    const secret = 'zk-blind-unit-secret';
+    const envelope = signEnvelope(
+      {
+        taskId: 'task_blind_unit',
+        recipientDid: bob.did,
+        seq: 4,
+        eventType: 'PING',
+        payload: { secret, token: 'CapabilityToken' },
+      },
+      alice,
+      { encrypt: true },
+    );
+    expect(verifyEnvelope(envelope, bob.did)).toBe(true);
+    expect(isEncryptedEnvelopePayload(envelope.payload.payload)).toBe(true);
+    expect(JSON.stringify(envelope)).not.toContain(secret);
+    const context = {
+      taskId: envelope.payload.taskId,
+      seq: envelope.payload.seq,
+      eventType: envelope.payload.eventType,
+      senderDid: envelope.payload.senderDid,
+      recipientDid: envelope.payload.recipientDid,
+    };
+    expect(decryptEnvelopePayload(envelope.payload.payload, bob, context)).toEqual({
+      secret,
+      token: 'CapabilityToken',
+    });
+    expect(openEnvelope(envelope, bob)).toEqual({ secret, token: 'CapabilityToken' });
+    expect(() => decryptEnvelopePayload(envelope.payload.payload, mallory, context)).toThrow(
+      'ENVELOPE_DECRYPTION_FAILED',
+    );
+    expect(() =>
+      decryptEnvelopePayload(envelope.payload.payload, bob, { ...context, taskId: 'task_other' }),
+    ).toThrow('ENVELOPE_DECRYPTION_FAILED');
+    expect(() =>
+      decryptEnvelopePayload(envelope.payload.payload, bob, { ...context, seq: context.seq + 1 }),
+    ).toThrow('ENVELOPE_DECRYPTION_FAILED');
+    const legacy = signEnvelope(
+      {
+        taskId: 'task_blind_unit',
+        recipientDid: bob.did,
+        seq: 0,
+        eventType: 'PING',
+        payload: { secret },
+      },
+      alice,
+    );
+    expect(openEnvelope(legacy, bob)).toEqual({ secret });
+    expect(() => openEnvelope(legacy, bob, { requireEncrypted: true })).toThrow(
+      'ENVELOPE_DECRYPTION_FAILED',
+    );
+  });
+
+  it('hides task input, capability tokens, and results from the relay', async () => {
+    const inputSecret = 'zk-blind-input-7c2e9a';
+    const outputSecret = 'zk-blind-output-91bd04';
+    const alice = generateKeyPair();
+    const bob = generateKeyPair();
+    const mallory = generateKeyPair();
+    const traffic: SignedEnvelope[] = [];
+    const snapshots: string[] = [];
+    const relay = new InMemoryRelay();
+    const send = relay.send.bind(relay);
+    relay.send = (envelope) => {
+      send(envelope);
+      traffic.push(structuredClone(envelope));
+      snapshots.push(JSON.stringify(relay.snapshot()));
+    };
+    const worker = new WorkerNode({
+      owner: bob,
+      relay,
+      adapter: {
+        id: 'blind-echo',
+        name: 'Blind echo',
+        skills: [],
+        executeTask: async (context) => ({ published: outputSecret, echoed: context.input }),
+      },
+      approvalProvider: new PolicyAutoApprovalProvider(bob),
+      timeoutMs: 10000,
+    });
+    const requester = new RequesterClient({
+      owner: alice,
+      relay,
+      approvalProvider: new PolicyAutoApprovalProvider(alice),
+      timeoutMs: 10000,
+    });
+    const input = { secret: inputSecret, marker: 'CapabilityToken' };
+    const [settled, result] = await Promise.all([
+      worker.start({ once: true }),
+      requester.delegate({
+        to: worker.invite(),
+        title: 'Blind relay',
+        description: 'Return the supplied report',
+        input,
+        outputSchema: { type: 'object' },
+        capabilities: [
+          {
+            capabilityId: 'cap_blind',
+            resource: 'mcp://docs/public',
+            allowedTools: ['docs/read'],
+            argConstraints: { type: 'object' },
+            maxInvocations: 1,
+            expiresAt: new Date(Date.now() + 60000).toISOString(),
+          },
+        ],
+      }),
+    ]);
+    worker.stop();
+    expect(result.state).toBe('SETTLED');
+    expect(settled?.state).toBe('SETTLED');
+    expect(JSON.stringify(result.deliverable)).toContain(outputSecret);
+    expect(JSON.stringify(result.deliverable)).toContain(inputSecret);
+    snapshots.push(JSON.stringify(relay.snapshot()));
+    const visible = traffic
+      .map((envelope) => JSON.stringify(envelope))
+      .concat(snapshots)
+      .join('\n');
+    expect(traffic.length).toBeGreaterThan(0);
+    for (const envelope of traffic) {
+      expect(envelope.payload.type).toBe('SignedEnvelope');
+      expect(isEncryptedEnvelopePayload(envelope.payload.payload)).toBe(true);
+    }
+    for (const secret of [inputSecret, outputSecret, 'CapabilityToken'])
+      expect(visible).not.toContain(secret);
+    const propose = traffic.find(
+      (envelope) =>
+        envelope.payload.eventType === 'PROPOSE' && envelope.payload.recipientDid === bob.did,
+    );
+    expect(propose).toBeDefined();
+    const context = {
+      taskId: propose!.payload.taskId,
+      seq: propose!.payload.seq,
+      eventType: propose!.payload.eventType,
+      senderDid: propose!.payload.senderDid,
+      recipientDid: propose!.payload.recipientDid,
+    };
+    const opened = JSON.stringify(decryptEnvelopePayload(propose!.payload.payload, bob, context));
+    expect(opened).toContain(inputSecret);
+    expect(opened).toContain('CapabilityToken');
+    expect(() => decryptEnvelopePayload(propose!.payload.payload, mallory, context)).toThrow(
+      'ENVELOPE_DECRYPTION_FAILED',
+    );
+    expect(() =>
+      decryptEnvelopePayload(propose!.payload.payload, bob, {
+        ...context,
+        taskId: 'task_transplanted',
+      }),
+    ).toThrow('ENVELOPE_DECRYPTION_FAILED');
+    expect(() =>
+      decryptEnvelopePayload(propose!.payload.payload, bob, { ...context, seq: context.seq + 1 }),
+    ).toThrow('ENVELOPE_DECRYPTION_FAILED');
   });
 });
 
