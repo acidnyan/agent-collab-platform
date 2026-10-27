@@ -291,10 +291,12 @@ export function decryptEnvelopePayload<T = Json>(
   payload: Json,
   recipient: KeyPair,
   context: EnvelopeHeaderContext,
-  options?: { requireEncrypted?: boolean },
+  options: { requireEncrypted?: boolean } = {},
 ): T {
+  // Session peers must opt in to cleartext. A missing flag rejects it.
+  const requireEncrypted = options.requireEncrypted ?? true;
   if (!isEncryptedEnvelopePayload(payload)) {
-    if (options?.requireEncrypted) throw new Error('ENVELOPE_DECRYPTION_FAILED');
+    if (requireEncrypted) throw new Error('UNENCRYPTED_ENVELOPE_REJECTED');
     return payload as T;
   }
   try {
@@ -321,7 +323,7 @@ export function decryptEnvelopePayload<T = Json>(
 export function openEnvelope<T = Json>(
   envelope: SignedEnvelope,
   recipient: KeyPair,
-  options?: { requireEncrypted?: boolean },
+  options: { requireEncrypted?: boolean } = {},
 ): T {
   return decryptEnvelopePayload<T>(
     envelope.payload.payload,
@@ -333,6 +335,6 @@ export function openEnvelope<T = Json>(
       senderDid: envelope.payload.senderDid,
       recipientDid: envelope.payload.recipientDid,
     },
-    options,
+    { requireEncrypted: options.requireEncrypted ?? true },
   );
 }

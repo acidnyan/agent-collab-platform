@@ -478,7 +478,7 @@ describe('Proof 3: cross-session state bleed and isolation downgrade', () => {
       isolation: 'subprocess_restricted',
       requireOci: true,
     });
-    const engine = new VerificationEngine();
+    const engine = new VerificationEngine({ allowUnencryptedEnvelopes: true });
     const downgraded = await engine.verify(contract, envelope, gate, approval);
     expect(downgraded.accepted).toBe(false);
     expect(downgraded.reason).toContain('ISOLATION_LEVEL_MISMATCH');
@@ -656,7 +656,7 @@ describe('Proof 5: cryptographic envelope and artifact tampering', () => {
       isolation: 'subprocess_restricted',
       requireOci: false,
     });
-    const engine = new VerificationEngine();
+    const engine = new VerificationEngine({ allowUnencryptedEnvelopes: true });
     expect(
       (await engine.verify(honest.contract, honest.envelope, honest.gate, honest.approval))
         .accepted,
@@ -774,10 +774,11 @@ describe('Proof 9: end-to-end payload encryption', () => {
       },
       alice,
     );
-    expect(openEnvelope(legacy, bob)).toEqual({ secret });
+    expect(() => openEnvelope(legacy, bob)).toThrow('UNENCRYPTED_ENVELOPE_REJECTED');
     expect(() => openEnvelope(legacy, bob, { requireEncrypted: true })).toThrow(
-      'ENVELOPE_DECRYPTION_FAILED',
+      'UNENCRYPTED_ENVELOPE_REJECTED',
     );
+    expect(openEnvelope(legacy, bob, { requireEncrypted: false })).toEqual({ secret });
   });
 
   it('hides task input, capability tokens, and results from the relay', async () => {

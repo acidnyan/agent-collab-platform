@@ -74,10 +74,36 @@ export interface VerificationResult {
   stages: string[];
   reason?: string;
 }
+export interface VerificationEngineOptions {
+  /** Accept a cleartext DELIVER envelope. Default false. */
+  allowUnencryptedEnvelopes?: boolean;
+}
+/** Direct delivery check. `allowUnencryptedEnvelopes` defaults to false. */
+export interface VerifyDeliverableInput {
+  contract: TaskContract;
+  envelope: SignedEnvelope;
+  gate: ApprovalGate;
+  approval?: ApprovalReceipt | (() => Promise<ApprovalReceipt>);
+  recipient?: KeyPair;
+  allowUnencryptedEnvelopes?: boolean;
+}
 export class VerificationEngine {
   private checks = new Map<string, string>();
+  constructor(private readonly options: VerificationEngineOptions = {}) {}
   registerIsolatedCheck(target: string, code: string): void {
     this.checks.set(target, code);
+  }
+  verifyDeliverable(input: VerifyDeliverableInput): Promise<VerificationResult> {
+    return this.verify(
+      input.contract,
+      input.envelope,
+      input.gate,
+      input.approval,
+      input.recipient,
+      input.allowUnencryptedEnvelopes === undefined
+        ? undefined
+        : { allowUnencryptedEnvelopes: input.allowUnencryptedEnvelopes },
+    );
   }
   async verify(
     contract: TaskContract,
@@ -85,6 +111,7 @@ export class VerificationEngine {
     gate: ApprovalGate,
     approval?: ApprovalReceipt | (() => Promise<ApprovalReceipt>),
     recipient?: KeyPair,
+    verifyOptions?: { allowUnencryptedEnvelopes?: boolean },
   ): Promise<VerificationResult> {
     const stages: string[] = [];
     try {
@@ -99,10 +126,14 @@ export class VerificationEngine {
         Date.now() > Date.parse(m.deadline)
       )
         throw new Error('CRYPTO_ENVELOPE_OR_DEADLINE');
+      const allowUnencrypted =
+        verifyOptions?.allowUnencryptedEnvelopes ?? this.options.allowUnencryptedEnvelopes === true;
       if (isEncryptedEnvelopePayload(envelope.payload.payload) && !recipient)
         throw new Error('CRYPTO_ENVELOPE_OR_DEADLINE');
+      if (!isEncryptedEnvelopePayload(envelope.payload.payload) && !allowUnencrypted)
+        throw new Error('UNENCRYPTED_ENVELOPE_REJECTED');
       const d = (isEncryptedEnvelopePayload(envelope.payload.payload)
-        ? openEnvelope(envelope, recipient!)
+        ? openEnvelope(envelope, recipient!, { requireEncrypted: true })
         : envelope.payload.payload) as unknown as Delivery;
       if (
         !verifySigned(d.artifact, worker) ||

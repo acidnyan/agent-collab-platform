@@ -129,6 +129,10 @@ function freshAudit(path?: string): void {
 function sessionSignal(timeout: number, signal?: AbortSignal): AbortSignal {
   return AbortSignal.any([AbortSignal.timeout(timeout), ...(signal ? [signal] : [])]);
 }
+/** Cleartext is rejected unless the owner explicitly opts out for a legacy fixture. */
+function sessionDecryptOptions(allowUnencryptedEnvelopes?: boolean): { requireEncrypted: boolean } {
+  return { requireEncrypted: allowUnencryptedEnvelopes !== true };
+}
 /** Per-task queue so one session cannot dequeue another task's envelopes. */
 class TaskMailbox {
   private queue: SignedEnvelope[] = [];
@@ -262,6 +266,11 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   /** Opt in to loopback and RFC1918 relays. Network invites stay blocked by default. */
   allowPrivateRelay?: boolean;
   lookup?: RelayClientSecurityOptions['lookup'];
+  /**
+   * Accept cleartext session envelopes. Default false: PROPOSE and later frames
+   * throw UNENCRYPTED_ENVELOPE_REJECTED unless they were encrypted to this owner.
+   */
+  allowUnencryptedEnvelopes?: boolean;
 }
 interface Proposal {
   proposal: Signed<TaskManifest>;
@@ -352,7 +361,11 @@ export class WorkerNode {
   /** Budget, allowlist, and rate checks that can be decided before execution starts. */
   private intakeRejection(first: SignedEnvelope): string | undefined {
     try {
-      const data = openEnvelope(first, this.options.owner) as unknown as Proposal;
+      const data = openEnvelope(
+        first,
+        this.options.owner,
+        sessionDecryptOptions(this.options.allowUnencryptedEnvelopes),
+      ) as unknown as Proposal;
       const manifest = data.proposal?.payload;
       const ownerDid = manifest?.requester?.ownerDid;
       if (!manifest || ownerDid !== first.payload.senderDid) return undefined;
@@ -504,7 +517,11 @@ export class WorkerNode {
     )
       throw new Error('INVALID_PROPOSAL_ENVELOPE');
     // PROPOSE arrives before the session wire is constructed. Open it with the same rule.
-    const data = openEnvelope(first, this.options.owner) as unknown as Proposal,
+    const data = openEnvelope(
+      first,
+      this.options.owner,
+      sessionDecryptOptions(this.options.allowUnencryptedEnvelopes),
+    ) as unknown as Proposal,
       m = data.proposal?.payload;
     if (!m || first.payload.senderDid !== m.requester.ownerDid || first.payload.taskId !== m.taskId)
       throw new Error('INVALID_PROPOSAL');
@@ -534,6 +551,7 @@ export class WorkerNode {
       [m.requester.ownerDid, this.options.owner.did],
       activeSignal,
       auditPath,
+      this.options.allowUnencryptedEnvelopes === true,
     );
     const cancelController = new AbortController();
     wire.earlyCancel = () => cancelController.abort('CANCELLED');
@@ -864,6 +882,11 @@ export interface RequesterClientOptions {
   allowPrivateRelay?: boolean;
   /** DNS resolver used before a string relay URL is dialed. */
   lookup?: RelayClientSecurityOptions['lookup'];
+  /**
+   * Accept cleartext session envelopes. Default false: ACCEPT, PROGRESS, DELIVER,
+   * and the other session frames throw UNENCRYPTED_ENVELOPE_REJECTED.
+   */
+  allowUnencryptedEnvelopes?: boolean;
 }
 export interface DelegateOptions {
   to: string;
@@ -1001,6 +1024,7 @@ export class RequesterClient {
       [owner.did, peer],
       signal,
       auditPath,
+      this.options.allowUnencryptedEnvelopes === true,
     );
     if (onProgress) {
       wire.onProgress = async (progress, envelope) => {
@@ -1108,6 +1132,7 @@ export class RequesterClient {
         wire.sealed(envelope),
         this.options.verificationEngine ?? new VerificationEngine(),
         approval,
+        { allowUnencryptedEnvelopes: this.options.allowUnencryptedEnvelopes === true },
       );
       if (!result.accepted || !settlement) {
         await wire.sendEvent('VERIFY_REJECT', verification);

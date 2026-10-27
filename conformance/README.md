@@ -26,6 +26,11 @@ A new implementation can consume these JSON vectors without TypeScript. It must
 produce the exact canonical bytes and signatures, accept the valid attenuations,
 reject every invalid attenuation, and implement the same transition table.
 
+`p1-8-require-encrypted-envelopes.test.ts` checks that `decryptEnvelopePayload`,
+`WorkerNode`, `RequesterClient`, and `VerificationEngine` reject cleartext session
+envelopes with `UNENCRYPTED_ENVELOPE_REJECTED` unless the caller explicitly opts out,
+and that an encrypted session still settles with a valid audit bundle.
+
 `p1-3-adapter-tool-restrictions.test.ts` checks that the Claude Code and Codex
 CLI adapters default to read-only tool flags, that adapter options and
 `extraArgs` can relax a flag without emitting a second copy, and that a mock
