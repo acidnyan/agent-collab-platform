@@ -231,6 +231,9 @@ describe('ACP MCP server', () => {
         serverInfo: { name: 'acp-mcp-server', version: '0.1.0' },
       },
     });
+    expect((init as { result: { instructions: string } }).result.instructions.length).toBeGreaterThan(
+      0,
+    );
     expect(
       await server.handle({ jsonrpc: '2.0', method: 'notifications/initialized' }),
     ).toBeUndefined();
@@ -244,6 +247,8 @@ describe('ACP MCP server', () => {
       'acp_verify_audit_bundle',
       'acp_create_invite',
       'acp_revoke_token',
+      'acp_discover_workers',
+      'acp_inspect_revocations',
     ]);
     const created = await server.handle({
       jsonrpc: '2.0',

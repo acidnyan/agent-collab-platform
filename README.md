@@ -214,9 +214,11 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 | `acp_delegate_multi`       | `race` or `quorum` delegation across workers                                                    |
 | `acp_verify_audit_bundle`  | Cryptographic verification report, including whether a trust anchor checked truncation          |
 | `acp_create_invite`        | Signed `acp-invite` token                                                                       |
-| `acp_revoke_token`         | Signed `RevocationNotice`                                                                       |
+| `acp_revoke_token`         | Signed `RevocationNotice` stored in this process                                                |
+| `acp_discover_workers`     | Signed agent cards registered on the relay                                                      |
+| `acp_inspect_revocations`  | Revocation notices recorded in this server process                                              |
 
-`AcpMcpServer` in `@acp/runtime` is the same server for tests and embedded hosts. The server key signs requester approvals for the tools it runs.
+`initialize` returns server `instructions` that name this workflow. `AcpMcpServer` in `@acp/runtime` is the same server for tests and embedded hosts. The server key signs requester approvals for the tools it runs. `acp_discover_workers` is a read-only directory fetch: it uses the same relay allowlist and `validateRelayEndpointUrl` before `GET /agents`, and it does not send task input. `acp_inspect_revocations` reads the in-memory registry and does not contact a worker.
 
 `acp_delegate_task` and `acp_delegate_multi` transmit task input to the target worker over the relay. Restrict that path when the host might supply the arguments:
 
