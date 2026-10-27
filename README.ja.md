@@ -5,6 +5,7 @@
 [![CI](https://github.com/acidnyan/agent-collab-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/badge/release-v1.0.0-2ea44f)](https://github.com/acidnyan/agent-collab-platform/releases)
 [![MCP Server](https://img.shields.io/badge/MCP-Server_Ready-0969da)](./SKILL.md)
+[![Glama MCP Server](https://glama.ai/mcp/servers/acidnyan/agent-collab-platform/badges/score.svg)](https://glama.ai/mcp/servers/acidnyan/agent-collab-platform)
 [![E2EE](https://img.shields.io/badge/E2EE-X25519_%2B_AES--256--GCM-8250df)](./SECURITY_PROOF.ja.md)
 [![Security Proofs](https://img.shields.io/badge/Security_Proofs-11%2F11_Passing-2da44e)](./SECURITY_PROOF.ja.md)
 [![Tests](https://img.shields.io/badge/Tests-375_Passing-2da44e)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/ci.yml)
