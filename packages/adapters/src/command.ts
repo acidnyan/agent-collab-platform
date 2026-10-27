@@ -132,6 +132,10 @@ export class CommandAgentAdapter implements AgentAdapter {
       args: ['-c', this.options.command, 'acp-task', ...(this.options.args ?? [])],
     };
   }
+  /** Executable and arguments that `executeCommand` will spawn. */
+  resolvedInvocation(): { command: string; args: string[] } {
+    return this.invocation();
+  }
   protected decode(stdout: string, _context: AgentTaskContext): Json {
     return parseJsonDeliverable(stdout);
   }
@@ -184,6 +188,104 @@ export interface CliOptions {
   apiKeyEnv?: string;
   baseUrl?: string;
   fetch?: typeof fetch;
+}
+const CLAUDE_PERMISSION_MODES = [
+  'acceptEdits',
+  'auto',
+  'bypassPermissions',
+  'default',
+  'dontAsk',
+  'plan',
+] as const;
+export type ClaudePermissionMode = (typeof CLAUDE_PERMISSION_MODES)[number];
+const CODEX_SANDBOX_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const;
+export type CodexSandboxMode = (typeof CODEX_SANDBOX_MODES)[number];
+export type CliToolList = string | readonly string[];
+export interface ClaudeCodeAdapterOptions extends CliOptions {
+  /** Value of `--tools`. Defaults to the read-only set `Read,Glob,Grep`. */
+  tools?: CliToolList;
+  /** Used when `tools` is omitted. Passed with the same `--tools` flag. */
+  allowedTools?: CliToolList;
+  /** Value of `--disallowedTools`. Defaults to shell, file-write, and web tools. */
+  disallowedTools?: CliToolList;
+  /** Value of `--permission-mode`. Defaults to `dontAsk`. */
+  permissionMode?: ClaudePermissionMode;
+  /**
+   * Omit the read-only defaults. Explicit `tools`, `disallowedTools`, and
+   * `permissionMode` are still passed, and `extraArgs` can still set the flags.
+   */
+  allowUnsafeTools?: boolean;
+}
+export interface CodexAdapterOptions extends CliOptions {
+  /** Value of `--sandbox`. Defaults to `read-only`. */
+  sandbox?: CodexSandboxMode;
+}
+export interface ResolvedCliCommand {
+  command: string;
+  args: string[];
+}
+const CLAUDE_READ_ONLY_TOOLS = 'Read,Glob,Grep';
+const CLAUDE_DISALLOWED_TOOLS = 'Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch';
+function joinTools(value: CliToolList): string {
+  return typeof value === 'string' ? value : value.join(',');
+}
+function cliFlagPresent(args: readonly string[], names: readonly string[]): boolean {
+  return args.some((arg) => names.some((name) => arg === name || arg.startsWith(name + '=')));
+}
+function assertOneOf<T extends string>(value: string, allowed: readonly T[], code: string): T {
+  if (!(allowed as readonly string[]).includes(value)) throw new Error(code);
+  return value as T;
+}
+function claudeRestrictionArgs(
+  options: ClaudeCodeAdapterOptions,
+  extra: readonly string[],
+): string[] {
+  const unsafe = options.allowUnsafeTools === true;
+  const flags: string[] = [];
+  const tools = options.tools !== undefined ? options.tools : options.allowedTools;
+  if (!cliFlagPresent(extra, ['--tools'])) {
+    if (tools !== undefined) flags.push('--tools', joinTools(tools));
+    else if (!unsafe) flags.push('--tools', CLAUDE_READ_ONLY_TOOLS);
+  }
+  if (!cliFlagPresent(extra, ['--disallowedTools', '--disallowed-tools'])) {
+    if (options.disallowedTools !== undefined)
+      flags.push('--disallowedTools', joinTools(options.disallowedTools));
+    else if (!unsafe) flags.push('--disallowedTools', CLAUDE_DISALLOWED_TOOLS);
+  }
+  if (!cliFlagPresent(extra, ['--permission-mode', '--permissionMode'])) {
+    if (options.permissionMode !== undefined)
+      flags.push(
+        '--permission-mode',
+        assertOneOf(options.permissionMode, CLAUDE_PERMISSION_MODES, 'INVALID_PERMISSION_MODE'),
+      );
+    else if (!unsafe) flags.push('--permission-mode', 'dontAsk');
+  }
+  return flags;
+}
+/** Argv for Claude Code. Read-only tool flags apply unless the owner relaxes that flag. */
+export function resolveClaudeCodeCliCommand(
+  options: ClaudeCodeAdapterOptions = {},
+): ResolvedCliCommand {
+  const extra = options.extraArgs ?? [];
+  return {
+    command: options.binaryPath ?? 'claude',
+    args: ['-p', '--output-format', 'json', ...claudeRestrictionArgs(options, extra), ...extra],
+  };
+}
+/** Argv for `codex exec`. `--sandbox read-only` applies unless the owner sets another sandbox. */
+export function resolveCodexCliCommand(options: CodexAdapterOptions = {}): ResolvedCliCommand {
+  const extra = options.extraArgs ?? [];
+  const args = ['exec', '--json', '--skip-git-repo-check'];
+  if (!cliFlagPresent(extra, ['--sandbox', '-s']))
+    args.push(
+      '--sandbox',
+      assertOneOf(options.sandbox ?? 'read-only', CODEX_SANDBOX_MODES, 'INVALID_SANDBOX_MODE'),
+    );
+  args.push(...extra, '-');
+  return { command: options.binaryPath ?? 'codex', args };
+}
+function commandList(resolved: ResolvedCliCommand): string[] {
+  return [resolved.command, ...resolved.args];
 }
 function usage(context: AgentTaskContext, value: Record<string, unknown>) {
   const inputTokens = Number(value.input_tokens ?? value.prompt_tokens ?? 0),
@@ -242,16 +344,11 @@ abstract class ProviderCliAdapter extends CommandAgentAdapter {
 }
 export class ClaudeCodeAdapter extends ProviderCliAdapter {
   protected providerStyle = 'anthropic' as const;
-  constructor(options: CliOptions = {}) {
+  constructor(options: ClaudeCodeAdapterOptions = {}) {
+    // `command` replaces the argv. Otherwise the CLI starts with read-only tool flags.
     super({
       ...options,
-      command: options.command ?? [
-        options.binaryPath ?? 'claude',
-        '-p',
-        '--output-format',
-        'json',
-        ...(options.extraArgs ?? []),
-      ],
+      command: options.command ?? commandList(resolveClaudeCodeCliCommand(options)),
       id: 'claude',
       name: 'Claude Code',
     });
@@ -269,19 +366,16 @@ export class ClaudeCodeAdapter extends ProviderCliAdapter {
     return value;
   }
 }
+/** Claude Code CLI adapter. Same class as `ClaudeCodeAdapter`. */
+export const ClaudeCodeCliAdapter = ClaudeCodeAdapter;
+export type ClaudeCodeCliAdapter = ClaudeCodeAdapter;
 export class CodexCliAdapter extends ProviderCliAdapter {
   protected providerStyle = 'openai' as const;
-  constructor(options: CliOptions = {}) {
+  constructor(options: CodexAdapterOptions = {}) {
+    // `command` replaces the argv. Otherwise model shell commands stay in the read-only sandbox.
     super({
       ...options,
-      command: options.command ?? [
-        options.binaryPath ?? 'codex',
-        'exec',
-        '--json',
-        '--skip-git-repo-check',
-        ...(options.extraArgs ?? []),
-        '-',
-      ],
+      command: options.command ?? commandList(resolveCodexCliCommand(options)),
       id: 'codex',
       name: 'Codex CLI',
     });
