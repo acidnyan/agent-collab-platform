@@ -4,6 +4,120 @@ import type { Readable, Writable } from 'node:stream';
 import { signApproval, signPayload, verifyApproval, digest } from '@acp/core';
 import type { ApprovalReceipt, Gate, KeyPair } from '@acp/core';
 import type { OwnerPolicy } from './policy.js';
+/** Caps a worker applies before it accepts a contract or spends owner credentials. */
+export interface WorkerAcceptancePolicy {
+  /** When non-empty, only these requester owner DIDs may be accepted. */
+  allowedRequesterDids?: readonly string[];
+  /** Explicit opt-in to accept every requester. Takes precedence over the allowlist. */
+  allowAnyRequester?: boolean;
+  maxInputTokens?: number;
+  maxOutputTokens?: number;
+  maxToolInvocations?: number;
+  maxWallClockSeconds?: number;
+  maxConcurrentTasks?: number;
+  /** How many PROPOSE envelopes one requester DID may submit per minute. */
+  maxTasksPerRequesterPerMinute?: number;
+  /** Replaces the one-minute window when set. */
+  requesterRateLimit?: { maxRequests: number; windowMs: number };
+  /** Register the worker AgentCard in the relay directory. Default is off. */
+  publishToRegistry?: boolean;
+}
+export class ProposalRejectedError extends Error {
+  readonly approved = false;
+  readonly code = 'PROPOSAL_REJECTED';
+  constructor(readonly reason: string) {
+    super('PROPOSAL_REJECTED: ' + reason);
+    this.name = 'ProposalRejectedError';
+  }
+}
+interface ProposedManifest {
+  timeoutSeconds?: unknown;
+  requester?: { ownerDid?: unknown; agentDid?: unknown };
+  budget?: unknown;
+}
+const budgetFields = [
+  'maxInputTokens',
+  'maxOutputTokens',
+  'maxToolInvocations',
+  'maxWallClockSeconds',
+] as const;
+function proposedManifest(details: unknown): ProposedManifest | undefined {
+  if (!details || typeof details !== 'object') return undefined;
+  const manifest = (details as { manifest?: unknown }).manifest;
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return undefined;
+  return manifest as ProposedManifest;
+}
+function envelopeFrom(details: unknown, from?: string): string | undefined {
+  if (typeof from === 'string' && from.length > 0) return from;
+  if (!details || typeof details !== 'object') return undefined;
+  const value = (details as { from?: unknown }).from;
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+function budgetLimit(
+  policy: WorkerAcceptancePolicy,
+  field: (typeof budgetFields)[number],
+): number | undefined {
+  return policy[field];
+}
+/** Returns approved:false with a reason when a proposal exceeds the worker policy. */
+export function evaluateContractAcceptance(
+  policy: WorkerAcceptancePolicy | undefined,
+  details: unknown,
+  from?: string,
+): { approved: true } | { approved: false; reason: string } {
+  if (!policy) return { approved: true };
+  const manifest = proposedManifest(details);
+  const limited = budgetFields.some((field) => policy[field] !== undefined);
+  if (limited && !manifest) return { approved: false, reason: 'manifest is missing' };
+  if (manifest && limited) {
+    const budget = manifest.budget;
+    if (!budget || typeof budget !== 'object' || Array.isArray(budget))
+      return { approved: false, reason: 'budget is missing' };
+    for (const field of budgetFields) {
+      const limit = budgetLimit(policy, field);
+      if (limit === undefined) continue;
+      const proposed = (budget as Record<string, unknown>)[field];
+      if (typeof proposed !== 'number' || !Number.isFinite(proposed))
+        return { approved: false, reason: field + ' is missing or not a finite number' };
+      if (proposed > limit)
+        return {
+          approved: false,
+          reason: field + ' ' + proposed + ' exceeds worker limit ' + limit,
+        };
+    }
+  }
+  if (manifest && policy.maxWallClockSeconds !== undefined && 'timeoutSeconds' in manifest) {
+    const timeout = manifest.timeoutSeconds;
+    if (typeof timeout !== 'number' || !Number.isFinite(timeout))
+      return { approved: false, reason: 'timeoutSeconds is missing or not a finite number' };
+    if (timeout > policy.maxWallClockSeconds)
+      return {
+        approved: false,
+        reason:
+          'timeoutSeconds ' +
+          timeout +
+          ' exceeds worker limit ' +
+          policy.maxWallClockSeconds,
+      };
+  }
+  if (policy.allowAnyRequester) return { approved: true };
+  const allow = (policy.allowedRequesterDids ?? []).map((did) => did.trim()).filter(Boolean);
+  if (allow.length === 0) return { approved: true };
+  const ownerDid = manifest?.requester?.ownerDid;
+  const sender = envelopeFrom(details, from);
+  if (typeof sender === 'string' && typeof ownerDid === 'string' && sender !== ownerDid)
+    return {
+      approved: false,
+      reason: 'requester ' + ownerDid + ' does not match envelope from ' + sender,
+    };
+  const authenticated =
+    typeof ownerDid === 'string' && ownerDid.length > 0 ? ownerDid : sender;
+  if (typeof authenticated === 'string' && allow.includes(authenticated)) return { approved: true };
+  return {
+    approved: false,
+    reason: 'requester ' + (authenticated ?? 'unknown') + ' is not allowed',
+  };
+}
 export interface ApprovalRequest {
   taskId: string;
   gate: Gate;
@@ -76,9 +190,17 @@ export class PolicyAutoApprovalProvider implements ApprovalProvider {
       requiredGates: [],
       autoApprove: ['contract_acceptance', 'final_verification'],
     },
-    readonly options: { yes?: boolean; confirmedGates?: Gate[] } = {},
+    readonly options: {
+      yes?: boolean;
+      confirmedGates?: Gate[];
+      acceptance?: WorkerAcceptancePolicy;
+    } = {},
   ) {}
   async approve(r: ApprovalRequest): Promise<ApprovalReceipt> {
+    if (r.gate === 'contract_acceptance') {
+      const decision = evaluateContractAcceptance(this.options.acceptance, r.details);
+      if (!decision.approved) throw new ProposalRejectedError(decision.reason);
+    }
     const explicit = this.options.confirmedGates?.includes(r.gate);
     const sensitive = ['external_side_effect', 'budget_increase'].includes(r.gate);
     if (

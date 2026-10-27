@@ -50,8 +50,12 @@ import type {
   ProgressPayload,
   ProtocolEnvelope,
 } from './adapter.js';
-import { InteractiveCliApprovalProvider } from './approval-providers.js';
-import type { ApprovalProvider } from './approval-providers.js';
+import {
+  InteractiveCliApprovalProvider,
+  ProposalRejectedError,
+  evaluateContractAcceptance,
+} from './approval-providers.js';
+import type { ApprovalProvider, WorkerAcceptancePolicy } from './approval-providers.js';
 import { OwnerGateway } from './gateway.js';
 import { MCPProxy } from './mcp.js';
 import type { ToolBackend, ToolDefinition } from './mcp.js';
@@ -66,6 +70,47 @@ export interface SessionResult {
   verification?: VerificationResult;
 }
 const policy = { requiredGates: [], autoApprove: [] };
+/** Daemon workers stay finite unless the owner raises the cap. */
+export const DEFAULT_MAX_CONCURRENT_TASKS = 8;
+function acceptanceFrom(options: WorkerNodeOptions): WorkerAcceptancePolicy {
+  return {
+    allowedRequesterDids: options.allowedRequesterDids,
+    allowAnyRequester: options.allowAnyRequester,
+    maxInputTokens: options.maxInputTokens,
+    maxOutputTokens: options.maxOutputTokens,
+    maxToolInvocations: options.maxToolInvocations,
+    maxWallClockSeconds: options.maxWallClockSeconds,
+    maxConcurrentTasks: options.maxConcurrentTasks,
+    maxTasksPerRequesterPerMinute: options.maxTasksPerRequesterPerMinute,
+    requesterRateLimit: options.requesterRateLimit,
+    publishToRegistry: options.publishToRegistry,
+  };
+}
+function assertPositive(name: string, value: number | undefined, minimum = 1): void {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || value < minimum) throw new Error('INVALID_' + name);
+}
+function validateAcceptance(acceptance: WorkerAcceptancePolicy): void {
+  assertPositive('MAX_INPUT_TOKENS', acceptance.maxInputTokens);
+  assertPositive('MAX_OUTPUT_TOKENS', acceptance.maxOutputTokens);
+  assertPositive('MAX_TOOL_INVOCATIONS', acceptance.maxToolInvocations);
+  assertPositive('MAX_WALL_CLOCK_SECONDS', acceptance.maxWallClockSeconds);
+  assertPositive('MAX_CONCURRENT_TASKS', acceptance.maxConcurrentTasks);
+  assertPositive('MAX_TASKS_PER_REQUESTER', acceptance.maxTasksPerRequesterPerMinute);
+  const rate = acceptance.requesterRateLimit;
+  if (
+    rate &&
+    (!Number.isSafeInteger(rate.maxRequests) ||
+      rate.maxRequests < 1 ||
+      !Number.isSafeInteger(rate.windowMs) ||
+      rate.windowMs < 1)
+  )
+    throw new Error('INVALID_REQUESTER_RATE_LIMIT');
+  if (
+    acceptance.allowedRequesterDids?.some((did) => typeof did !== 'string' || did.trim() === '')
+  )
+    throw new Error('INVALID_REQUESTER_DID');
+}
 function transport(relay: RelayTransport | string, owner: KeyPair): RelayTransport {
   const client: RelayTransport =
     typeof relay === 'string' ? new HttpRelayClient(relay.replace(/\/$/, ''), owner) : relay;
@@ -192,7 +237,7 @@ function recipientInbox(
   }
   return inbox;
 }
-export interface WorkerNodeOptions {
+export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   owner: KeyPair;
   relay: RelayTransport | string;
   relayUrl?: string;
@@ -217,11 +262,16 @@ export class WorkerNode {
   readonly relay: RelayTransport;
   readonly agentCard: SignedAgentCard;
   readonly approvalProvider: ApprovalProvider;
+  readonly acceptance: WorkerAcceptancePolicy;
   private completed = 0;
+  private activeTasks = 0;
+  private readonly proposalTimes = new Map<string, number[]>();
   private readonly mailboxes = new Map<string, TaskMailbox>();
   readonly controller = new AbortController();
   lastResult?: SessionResult;
   constructor(readonly options: WorkerNodeOptions) {
+    this.acceptance = acceptanceFrom(options);
+    validateAcceptance(this.acceptance);
     this.relay = transport(options.relay, options.owner);
     this.approvalProvider =
       options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner);
@@ -247,10 +297,65 @@ export class WorkerNode {
   stop(): void {
     this.controller.abort('WORKER_STOPPED');
   }
+  /** Public registration is opt-in, including for PolicyAutoApprovalProvider. */
+  private publishes(): boolean {
+    return this.options.publishToRegistry === true;
+  }
+  private get concurrentLimit(): number {
+    return this.acceptance.maxConcurrentTasks ?? DEFAULT_MAX_CONCURRENT_TASKS;
+  }
+  private rateBudget(): { maxRequests: number; windowMs: number } | undefined {
+    if (this.acceptance.requesterRateLimit) return this.acceptance.requesterRateLimit;
+    if (this.acceptance.maxTasksPerRequesterPerMinute === undefined) return undefined;
+    return { maxRequests: this.acceptance.maxTasksPerRequesterPerMinute, windowMs: 60_000 };
+  }
+  /** Count a PROPOSE from this requester. Returns a reason when the window is full. */
+  private consumeRate(requesterDid: string): string | undefined {
+    const budget = this.rateBudget();
+    if (!budget) return undefined;
+    const now = Date.now();
+    const recent = (this.proposalTimes.get(requesterDid) ?? []).filter(
+      (at) => now - at < budget.windowMs,
+    );
+    if (recent.length >= budget.maxRequests) {
+      this.proposalTimes.set(requesterDid, recent);
+      return (
+        'per-requester rate limit exceeded for ' +
+        requesterDid +
+        ' (' +
+        budget.maxRequests +
+        ' requests / ' +
+        budget.windowMs +
+        'ms)'
+      );
+    }
+    recent.push(now);
+    this.proposalTimes.set(requesterDid, recent);
+    return undefined;
+  }
+  /** Budget, allowlist, and rate checks that can be decided before execution starts. */
+  private intakeRejection(first: SignedEnvelope): string | undefined {
+    try {
+      const data = openEnvelope(first, this.options.owner) as unknown as Proposal;
+      const manifest = data.proposal?.payload;
+      const ownerDid = manifest?.requester?.ownerDid;
+      if (!manifest || ownerDid !== first.payload.senderDid) return undefined;
+      const limited = this.consumeRate(ownerDid);
+      if (limited) return limited;
+      const decision = evaluateContractAcceptance(
+        this.acceptance,
+        { manifest, from: first.payload.senderDid },
+        first.payload.senderDid,
+      );
+      return decision.approved ? undefined : decision.reason;
+    } catch {
+      return undefined;
+    }
+  }
   async start(
     options: { once?: boolean; signal?: AbortSignal } = {},
   ): Promise<SessionResult | undefined> {
-    await this.register();
+    if (this.publishes()) await this.register();
     const idleSignal = AbortSignal.any([
       this.controller.signal,
       ...(options.signal ? [options.signal] : []),
@@ -287,26 +392,47 @@ export class WorkerNode {
     idleSignal: AbortSignal,
     once: boolean,
   ): Promise<void> | undefined {
-    if (
-      !verifyEnvelope(first, this.options.owner.did) ||
-      first.payload.eventType !== 'PROPOSE' ||
-      first.payload.seq !== 0
-    ) {
-      if (once) throw new Error('INVALID_PROPOSAL_ENVELOPE');
+    const verified = verifyEnvelope(first, this.options.owner.did);
+    const proposal =
+      verified && first.payload.eventType === 'PROPOSE' && first.payload.seq === 0;
+    if (!proposal) {
+      // A rejected proposal is answered with ERROR, and the requester echoes ERROR.
+      // That trailing frame must not be treated as the next task, including after
+      // a --once worker restarts and reads the relay queue again. Unsigned or
+      // non-zero PROPOSE frames still fail a one-shot session immediately.
+      if (
+        once &&
+        (!verified || (first.payload.eventType === 'PROPOSE' && first.payload.seq !== 0))
+      )
+        throw new Error('INVALID_PROPOSAL_ENVELOPE');
       this.options.onEvent?.('REJECTED', '');
       return;
     }
+    let rejection = this.intakeRejection(first);
+    let reserved = false;
+    if (!rejection && this.activeTasks >= this.concurrentLimit)
+      rejection = 'maxConcurrentTasks ' + this.concurrentLimit + ' reached';
+    else if (!rejection) {
+      this.activeTasks += 1;
+      reserved = true;
+    }
     const mailbox = new TaskMailbox();
     this.mailboxes.set(first.payload.taskId, mailbox);
-    const job = this.executeTask(first, idleSignal, mailboxRelay(this.relay, mailbox))
+    const job = this.executeTask(
+      first,
+      idleSignal,
+      mailboxRelay(this.relay, mailbox),
+      rejection,
+    )
       .then((result) => {
         this.lastResult = result;
       })
       .catch((error) => {
         if (once) throw error;
-        this.options.onEvent?.('REJECTED', '');
+        this.options.onEvent?.('REJECTED', first.payload.taskId);
       })
       .finally(() => {
+        if (reserved) this.activeTasks -= 1;
         this.mailboxes.delete(first.payload.taskId);
       });
     return job;
@@ -353,6 +479,7 @@ export class WorkerNode {
     first: SignedEnvelope,
     idleSignal: AbortSignal,
     relay: RelayTransport,
+    earlyRejection?: string,
   ): Promise<SessionResult> {
     if (
       !verifyEnvelope(first, this.options.owner.did) ||
@@ -365,14 +492,12 @@ export class WorkerNode {
       m = data.proposal?.payload;
     if (!m || first.payload.senderDid !== m.requester.ownerDid || first.payload.taskId !== m.taskId)
       throw new Error('INVALID_PROPOSAL');
-    validateManifest(m);
     if (
       !verifySigned(data.proposal, m.requester.ownerDid) ||
       m.worker?.ownerDid !== this.options.owner.did ||
       m.worker.agentDid !== this.agentCard.payload.agentDid ||
       Date.parse(m.deadline) <= Date.now() ||
-      Date.parse(m.createdAt) > Date.now() ||
-      !validateOutput(m.io.inputSchema, data.input)
+      Date.parse(m.createdAt) > Date.now()
     )
       throw new Error('INVALID_PROPOSAL');
     const auditPath = this.options.auditPath
@@ -404,12 +529,25 @@ export class WorkerNode {
     try {
       await wire.receiveEvent('PROPOSE', first);
       this.assertInviteActive(data);
+      const decision = evaluateContractAcceptance(
+        this.acceptance,
+        { manifest: m, from: first.payload.senderDid },
+        first.payload.senderDid,
+      );
+      const reason = earlyRejection ?? (decision.approved ? undefined : decision.reason);
+      if (reason) throw new ProposalRejectedError(reason);
+      validateManifest(m);
+      if (!validateOutput(m.io.inputSchema, data.input)) throw new Error('INVALID_PROPOSAL');
       const contract = createContract(m, data.proposal, this.options.owner);
       const approval = await this.approvalProvider.approve({
         taskId: m.taskId,
         gate: 'contract_acceptance',
         target: contract.contractDigest,
-        details: { manifest: m, capabilities: data.capabilityChains },
+        details: {
+          manifest: m,
+          capabilities: data.capabilityChains,
+          from: first.payload.senderDid,
+        },
         signal: activeSignal,
       });
       gateway = new OwnerGateway(this.options.owner, contract, policy, this.options.revocation);
@@ -638,7 +776,7 @@ export class WorkerNode {
       await progressTail;
       if (!wireFailureSent) {
         wireFailureSent = true;
-        await wire.rawSend('ERROR', { code: safeError(progressFailure ?? e) }).catch(() => {});
+        await wire.rawSend('ERROR', rejectionBody(progressFailure ?? e)).catch(() => {});
       }
       // A quota abort already surfaces as EXECUTION_ABORTED. Keep that error.
       // A caught INVALID_PROGRESS still fails the session with the sticky error.
@@ -665,6 +803,10 @@ interface CancelPayload {
   reason?: string;
   cancelledBy: string;
   transition: Signed<Transition>;
+}
+function rejectionBody(error: unknown): { code: string; reason?: string } {
+  if (error instanceof ProposalRejectedError) return { code: error.code, reason: error.reason };
+  return { code: safeError(error) };
 }
 function safeError(e: unknown): string {
   const s = String(e);
