@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { SignedAgentCard, SignedEnvelope } from '@acp/core/edge';
+import { agentRegistryKey } from './fetch.js';
 import type { RelaySnapshot } from './fetch.js';
 
 /**
@@ -108,6 +109,10 @@ function pairMap(pairs: [string, number][] | undefined): Map<string, number> {
   return new Map(pairs ?? []);
 }
 
+function registryKey(card: SignedAgentCard): string {
+  return agentRegistryKey(card.payload.ownerDid, card.payload.agentDid);
+}
+
 function cloneCursor(cursor: JournalCursor): JournalCursor {
   return {
     head: cursor.head,
@@ -189,9 +194,9 @@ export function planJournal(
   }
   nextCursor.liveAuth = [...(next.authSeen ?? [])];
 
-  const nextCards = new Map(next.agents.map((card) => [card.payload.agentDid, card]));
+  const nextCards = new Map(next.agents.map((card) => [registryKey(card), card]));
   const nextAgentExpiry = pairMap(next.agentExpiry);
-  const prevCards = new Map(prev.agents.map((card) => [card.payload.agentDid, card]));
+  const prevCards = new Map(prev.agents.map((card) => [registryKey(card), card]));
   const prevAgentExpiry = pairMap(prev.agentExpiry);
   const removeSlots: number[] = [];
   for (let slot = 0; slot < nextCursor.agents.length; slot++) {
@@ -209,7 +214,7 @@ export function planJournal(
     nextCursor.agents.pop();
   }
   for (const card of next.agents) {
-    const did = card.payload.agentDid;
+    const did = registryKey(card);
     const expiresAt = nextAgentExpiry.get(did) ?? 0;
     const slot = nextCursor.agents.findIndex((agent) => agent.did === did);
     const previous = prevCards.get(did);
@@ -337,15 +342,16 @@ async function loadMeta(
   for (let slot = 0; slot < meta.agentCount; slot++) {
     const ptr = await storage.get<{ blob: string }>('agentptr:' + slot);
     const row = ptr?.blob ? await storage.get<StoredAgent>('agentblob:' + ptr.blob) : undefined;
-    if (!row?.card?.payload?.agentDid) {
+    if (!row?.card?.payload?.agentDid || !row.card.payload.ownerDid) {
       // Keep the slot index aligned with storage so a later plan can delete the hole.
       cursor.agents.push({ did: 'missing:' + slot, blob: ptr?.blob ?? '' });
       continue;
     }
-    cursor.agents.push({ did: row.card.payload.agentDid, blob: ptr?.blob ?? '' });
+    const did = registryKey(row.card);
+    cursor.agents.push({ did, blob: ptr?.blob ?? '' });
     if (row.expiresAt <= now) continue;
     agents.push(row.card);
-    agentExpiry.push([row.card.payload.agentDid, row.expiresAt]);
+    agentExpiry.push([did, row.expiresAt]);
   }
   return {
     cursor,

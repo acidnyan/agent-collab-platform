@@ -108,6 +108,27 @@ export function canonicalRelayPath(pathname: string): string {
   if (pathname.startsWith('/v1/')) return pathname.slice(3);
   return pathname;
 }
+/**
+ * Registry identity for one owner's registration of one agent.
+ * did:key values do not contain "/", so the pair round-trips unambiguously.
+ */
+export function agentRegistryKey(ownerDid: string, agentDid: string): string {
+  return ownerDid + '/' + agentDid;
+}
+/**
+ * GET /agents/:agentDid returns the only card for that agent, or the self-owned
+ * card when several owners have registered it. An ambiguous set with no self-owned
+ * card is not returned.
+ */
+export function selectAgentCard(
+  cards: Iterable<SignedAgentCard>,
+  agentDid: string,
+): SignedAgentCard | undefined {
+  const matches: SignedAgentCard[] = [];
+  for (const card of cards) if (card.payload.agentDid === agentDid) matches.push(card);
+  if (matches.length === 1) return matches[0];
+  return matches.find((card) => card.payload.ownerDid === card.payload.agentDid);
+}
 export class InMemoryRelay {
   private queues = new Map<string, StoredEnvelope[]>();
   private seen = new Map<string, number>();
@@ -118,6 +139,7 @@ export class InMemoryRelay {
     return this.version;
   }
   private listeners = new Map<string, Set<() => void>>();
+  /** Keyed by agentRegistryKey(ownerDid, agentDid). One owner cannot block another. */
   readonly agents = new Map<string, SignedAgentCard>();
   readonly tamper?: (e: SignedEnvelope) => SignedEnvelope;
   readonly requireAuth: boolean;
@@ -397,7 +419,7 @@ export class InMemoryRelay {
         }
         return queue.some((envelope) => Buffer.byteLength(JSON.stringify(envelope)) > this.maxEnvelopeBytes);
       }) ||
-      snapshot.agents.some((card) => !verifySignedAgentCard(card))
+      this.invalidAgentSnapshot(snapshot, agentExpiry)
     )
       throw new Error('INVALID_RELAY_SNAPSHOT');
     this.queues = new Map();
@@ -422,32 +444,48 @@ export class InMemoryRelay {
     this.agentExpiry.clear();
     for (const card of snapshot.agents) {
       const copy = structuredClone(card);
-      this.agents.set(copy.payload.agentDid, copy);
+      const key = agentRegistryKey(copy.payload.ownerDid, copy.payload.agentDid);
+      this.agents.set(key, copy);
+      const cardExpiresAt = Date.parse(copy.payload.expiresAt);
       this.agentExpiry.set(
-        copy.payload.agentDid,
-        agentExpiry.get(copy.payload.agentDid) ?? this.now() + this.agentCardTtlMs,
+        key,
+        agentExpiry.get(key) ?? Math.min(this.now() + this.agentCardTtlMs, cardExpiresAt),
       );
     }
     this.version++;
+  }
+  /** Reject snapshots that would resurrect an expired, duplicate, or unsigned card. */
+  private invalidAgentSnapshot(snapshot: RelaySnapshot, agentExpiry: Map<string, number>): boolean {
+    const seen = new Set<string>();
+    for (const card of snapshot.agents) {
+      const key = agentRegistryKey(card.payload.ownerDid, card.payload.agentDid);
+      const stored = agentExpiry.get(key);
+      const effective =
+        stored ?? Math.min(this.now() + this.agentCardTtlMs, Date.parse(card.payload.expiresAt));
+      if (seen.has(key) || !verifySignedAgentCard(card, this.now()) || !(effective > this.now()))
+        return true;
+      seen.add(key);
+    }
+    return false;
   }
   discover(): SignedAgentCard[] {
     this.evictExpired();
     return structuredClone([...this.agents.values()]);
   }
   register(card: SignedAgentCard): void {
-    if (!verifySignedAgentCard(card)) throw new Error('INVALID_AGENT_CARD');
+    if (!verifySignedAgentCard(card, this.now())) throw new Error('INVALID_AGENT_CARD');
     this.evictExpired();
-    const old = this.agents.get(card.payload.agentDid);
-    if (
-      old &&
-      (old.payload.ownerDid !== card.payload.ownerDid ||
-        Date.parse(old.signature.signedAt) > Date.parse(card.signature.signedAt))
-    )
+    // A different ownerDid is a different registry entry and cannot squat this agentDid.
+    const key = agentRegistryKey(card.payload.ownerDid, card.payload.agentDid);
+    const old = this.agents.get(key);
+    if (old && Date.parse(old.signature.signedAt) > Date.parse(card.signature.signedAt))
       throw new Error('AGENT_OWNER_OR_VERSION_MISMATCH');
     if (!old && this.agents.size >= this.maxAgents) throw new Error('RELAY_CAPACITY');
     const copy = structuredClone(card);
-    this.agents.set(copy.payload.agentDid, copy);
-    this.agentExpiry.set(copy.payload.agentDid, this.now() + this.agentCardTtlMs);
+    const expiresAt = Math.min(this.now() + this.agentCardTtlMs, Date.parse(copy.payload.expiresAt));
+    if (!(expiresAt > this.now())) throw new Error('INVALID_AGENT_CARD');
+    this.agents.set(key, copy);
+    this.agentExpiry.set(key, expiresAt);
     this.version++;
   }
 }
@@ -576,9 +614,26 @@ export function createRelayFetchHandler(
         relay.register((await body(request)) as SignedAgentCard);
         return json({ registered: true }, 201);
       }
-      if (request.method === 'GET' && path === '/agents') return json([...relay.agents.values()]);
+      if (request.method === 'GET' && path === '/agents') {
+        const ownerDid = url.searchParams.get('ownerDid');
+        const agentDid = url.searchParams.get('agentDid');
+        let cards = [...relay.agents.values()];
+        if (ownerDid !== null) cards = cards.filter((card) => card.payload.ownerDid === ownerDid);
+        if (agentDid !== null) cards = cards.filter((card) => card.payload.agentDid === agentDid);
+        return json(cards);
+      }
       if (request.method === 'GET' && path.startsWith('/agents/')) {
-        const card = relay.agents.get(decodeURIComponent(path.slice(8)));
+        const segments = path
+          .slice('/agents/'.length)
+          .split('/')
+          .filter((segment) => segment.length > 0)
+          .map((segment) => decodeURIComponent(segment));
+        const card =
+          segments.length === 2
+            ? relay.agents.get(agentRegistryKey(segments[0]!, segments[1]!))
+            : segments.length === 1
+              ? selectAgentCard(relay.agents.values(), segments[0]!)
+              : undefined;
         return card ? json(card) : json({ error: 'NOT_FOUND' }, 404);
       }
       if (request.method === 'GET' && path === '/.well-known/agent.json') {

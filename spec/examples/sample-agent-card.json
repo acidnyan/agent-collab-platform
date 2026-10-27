@@ -1,0 +1,35 @@
+{
+  "payload": {
+    "type": "AgentCard",
+    "version": "0.2.0",
+    "description": "Signed agent card with an agent-key delegation",
+    "costModes": [
+      "worker_byok"
+    ],
+    "name": "Example Worker",
+    "skills": [
+      {
+        "id": "json-task",
+        "name": "JSON task"
+      }
+    ],
+    "ownerDid": "did:key:z6MkhEQK4haXyh7AeNPvGUtqgFv45mxKaBPiu4rY9MVf9wBN",
+    "agentDid": "did:key:z6Mkv2MyKMWdD5KjnAuC6qvNokzGcq8WyWaHYLChZX2FPogo",
+    "relayEndpoint": "https://relay.example",
+    "expiresAt": "2026-10-28T15:32:19.599Z",
+    "agentDelegation": {
+      "signerDid": "did:key:z6Mkv2MyKMWdD5KjnAuC6qvNokzGcq8WyWaHYLChZX2FPogo",
+      "canonicalization": "RFC8785-JCS",
+      "payloadDigest": "sha256:019748fd70b5e1579775b13478cc2cb4e14d2e472feefcc6c61d134e88e47aeb",
+      "signedAt": "2026-10-27T15:32:19.599Z",
+      "signature": "ed25519:1RkAOSuZEwGZdnISrr7Dzdbmtw-SBv2ehC3BiDLYeOVc8OeXHdbIpe8nTszKdrkF3m2RGSda43BhbWb_6GnaAg"
+    }
+  },
+  "signature": {
+    "signerDid": "did:key:z6MkhEQK4haXyh7AeNPvGUtqgFv45mxKaBPiu4rY9MVf9wBN",
+    "canonicalization": "RFC8785-JCS",
+    "payloadDigest": "sha256:2ea9933656c9a1ae988391be9ce188484f798a7ab767bcc017720c85243e6d55",
+    "signedAt": "2026-10-27T15:32:19.599Z",
+    "signature": "ed25519:WXTwXJbqYw_EGC0gQOMU7fJblzDdgAPOHz5dIqD-4ZOqkpjpqRLZXjxbZWC87DYuIcvZJ15KIa-osnlSsvTZAQ"
+  }
+}

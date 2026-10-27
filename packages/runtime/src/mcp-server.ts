@@ -15,6 +15,8 @@ export interface AcpMcpServerOptions {
   relay?: RelayTransport | string;
   revocation?: RevocationRegistry;
   name?: string;
+  /** Signs agentDid on acp_create_invite when that DID is not the server owner. */
+  agentKey?: KeyPair;
 }
 
 interface RpcRequest {
@@ -358,14 +360,16 @@ export class AcpMcpServer {
   }
   private createInvite(args: Record<string, unknown>): Json {
     if (typeof args.relayUrl !== 'string') throw new RpcError(-32602, 'Invalid params');
+    const agentDid = typeof args.agentDid === 'string' ? args.agentDid : this.options.owner.did;
     const card = createSignedAgentCard(
       {
         name: typeof args.name === 'string' ? args.name : (this.options.name ?? 'ACP Worker'),
-        agentDid: typeof args.agentDid === 'string' ? args.agentDid : this.options.owner.did,
+        agentDid,
         relayEndpoint: args.relayUrl,
         skills: [{ id: 'json-task', name: 'JSON task' }],
       },
       this.options.owner,
+      agentDid === this.options.owner.did ? undefined : this.options.agentKey,
     );
     const inviteOptions: { agentCard: typeof card; expiresInSeconds?: number } = {
       agentCard: card,

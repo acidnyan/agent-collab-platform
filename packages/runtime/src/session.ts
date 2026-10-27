@@ -244,6 +244,8 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   adapter: AgentAdapter;
   name?: string;
   agentDid?: string;
+  /** Controls agentDid when it is not owner.did. Required to sign the delegation. */
+  agentKey?: KeyPair;
   approvalProvider?: ApprovalProvider;
   auditPath?: string;
   timeoutMs?: number;
@@ -275,10 +277,11 @@ export class WorkerNode {
     this.relay = transport(options.relay, options.owner);
     this.approvalProvider =
       options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner);
+    const agentDid = options.agentDid ?? options.agentKey?.did ?? options.owner.did;
     this.agentCard = createSignedAgentCard(
       {
         name: options.name ?? options.adapter.name,
-        agentDid: options.agentDid ?? options.owner.did,
+        agentDid,
         relayEndpoint:
           typeof options.relay === 'string'
             ? options.relay
@@ -286,6 +289,7 @@ export class WorkerNode {
         skills: options.adapter.skills,
       },
       options.owner,
+      agentDid === options.owner.did ? undefined : options.agentKey,
     );
   }
   invite(expiresInSeconds = 3600): string {
