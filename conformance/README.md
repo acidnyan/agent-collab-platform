@@ -31,6 +31,13 @@ reject every invalid attenuation, and implement the same transition table.
 envelopes with `UNENCRYPTED_ENVELOPE_REJECTED` unless the caller explicitly opts out,
 and that an encrypted session still settles with a valid audit bundle.
 
+`p2-10-relay-error-sanitization.test.ts` checks that HTTP and WebSocket relay
+errors return an allowlisted protocol code. An unexpected storage or runtime
+exception becomes `RELAY_INTERNAL_ERROR` (HTTP 500 on the fetch handler) and the
+response body does not include the exception text. Documented codes such as
+`INVALID_ENVELOPE`, `RELAY_CAPACITY`, `RELAY_AUTH_ORIGIN_MISMATCH`, and
+`INVALID_AGENT_CARD` keep their status and exact code.
+
 `p1-3-adapter-tool-restrictions.test.ts` checks that the Claude Code and Codex
 CLI adapters default to read-only tool flags, that adapter options and
 `extraArgs` can relax a flag without emitting a second copy, and that a mock

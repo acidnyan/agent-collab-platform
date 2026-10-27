@@ -12,8 +12,9 @@ import {
   DEFAULT_MAX_ENVELOPE_BYTES,
   InMemoryRelay,
   createRelayFetchHandler,
-  relayAuthFailure,
+  mapRelayError,
   relayHttpHeaders,
+  sanitizeRelayErrorCode,
 } from './fetch.js';
 import type { RelayAuthContext } from './fetch.js';
 import { createPinnedRelayFetch, resolveAndValidateRelayEndpoint } from './ssrf.js';
@@ -116,8 +117,9 @@ export async function startLocalRelay(
         if (!response.destroyed && !response.writableEnded) response.end();
       }
     } catch (e) {
-      if (!response.headersSent) response.writeHead(400, relayHttpHeaders('json'));
-      if (!response.destroyed) response.end(JSON.stringify({ error: String(e) }));
+      const mapped = mapRelayError(e);
+      if (!response.headersSent) response.writeHead(mapped.status, relayHttpHeaders('json'));
+      if (!response.destroyed) response.end(JSON.stringify({ error: mapped.error }));
     }
   });
   server.requestTimeout = 10000;
@@ -206,11 +208,7 @@ export async function startLocalRelay(
           disposeSubscription();
         } else throw new Error('INVALID_REQUEST');
       } catch (e) {
-        socket.send(
-          JSON.stringify({
-            error: relayAuthFailure(e) ?? String(e),
-          }),
-        );
+        socket.send(JSON.stringify({ ok: false, error: sanitizeRelayErrorCode(e) }));
       }
     });
   });
