@@ -3,7 +3,12 @@ import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { verifyEnvelope, createRelayAuthToken } from '@acp/core';
 import type { SignedEnvelope, KeyPair, RelayAuthAction } from '@acp/core';
-import { InMemoryRelay, createRelayFetchHandler, relayHttpHeaders } from './fetch.js';
+import {
+  DEFAULT_MAX_ENVELOPE_BYTES,
+  InMemoryRelay,
+  createRelayFetchHandler,
+  relayHttpHeaders,
+} from './fetch.js';
 export * from './fetch.js';
 export {
   createSignedAgentCard,
@@ -25,7 +30,7 @@ export async function startLocalRelay(
       let size = 0;
       for await (const chunk of request) {
         size += (chunk as Buffer).length;
-        if (size > 1048576) throw new Error('BODY_TOO_LARGE');
+        if (size > DEFAULT_MAX_ENVELOPE_BYTES) throw new Error('BODY_TOO_LARGE');
         chunks.push(chunk as Buffer);
       }
       const result = await handler(

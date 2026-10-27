@@ -53,6 +53,13 @@ replay protection is not a trust assumption. HTTP/WebSocket listeners bind only 
 execution authority, but can observe application data. X25519 payload encryption,
 remote relay authentication and durable replay storage belong to M2.
 
+The hosted relay shards Durable Objects by recipient DID (`inbox:<did>`) and
+stores agent cards on a separate `registry` object. Each accepted envelope is
+one storage key plus a fixed-size meta record. Queued envelopes expire after
+10 minutes; replay ids and agent cards expire after 1 hour. Defaults are
+256 KiB per envelope, 256 envelopes and 4 MiB per inbox, with a per-IP rate
+limit. A new deploy does not import the previous single-object snapshot.
+
 Audit entries include a signature from each distinct party. A separate, final,
 bilaterally signed checkpoint fixes the entry count and head. JSONL must end with
 that checkpoint: deleting any entry or removing the checkpoint is invalid. Pin the
