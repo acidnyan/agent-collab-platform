@@ -294,7 +294,9 @@ describe('issue 11: unread SSE backpressure', () => {
     const response = await handler(
       new Request('https://relay.local/stream?recipient=' + encodeURIComponent(peer.did), {
         headers: {
-          authorization: 'Bearer ' + createRelayAuthToken(peer, { action: 'stream' }),
+          authorization:
+            'Bearer ' +
+            createRelayAuthToken(peer, { action: 'stream', origin: 'https://relay.local' }),
         },
       }),
     );
@@ -526,7 +528,7 @@ describe('issue 15: websocket unsubscribe cancels a backpressured flush', () => 
         JSON.stringify({
           method: 'subscribe',
           recipientDid: peer.did,
-          authToken: createRelayAuthToken(peer, { action: 'subscribe' }),
+          authToken: createRelayAuthToken(peer, { action: 'subscribe', origin: server.url }),
         }),
       );
       await pause(50);
@@ -628,7 +630,10 @@ describe('issue 17: overlapping durable storage failure', () => {
     for (let i = 0; i < 2; i++) {
       const response = await restarted.fetch(
         new Request('https://relay.local/envelopes?recipient=' + encodeURIComponent(peer.did), {
-          headers: { authorization: 'Bearer ' + createRelayAuthToken(peer) },
+          headers: {
+            authorization:
+              'Bearer ' + createRelayAuthToken(peer, { origin: 'https://relay.local' }),
+          },
         }),
       );
       persisted.push({
@@ -686,7 +691,8 @@ describe('issue 18: http backpressure disconnect cancels the reader', () => {
             server.url + '/stream?recipient=' + encodeURIComponent(peer.did),
             {
               headers: {
-                authorization: 'Bearer ' + createRelayAuthToken(peer, { action: 'stream' }),
+                authorization:
+                  'Bearer ' + createRelayAuthToken(peer, { action: 'stream', origin: server.url }),
               },
             },
             (incoming) => {
@@ -747,7 +753,11 @@ describe('issue 20: requester relay URL switch', () => {
       const started = Date.now();
       const response = await fetch(
         server.url + '/envelopes?recipient=' + encodeURIComponent(peer.did) + '&waitMs=1000',
-        { headers: { authorization: 'Bearer ' + createRelayAuthToken(peer) } },
+        {
+          headers: {
+            authorization: 'Bearer ' + createRelayAuthToken(peer, { origin: server.url }),
+          },
+        },
       );
       const elapsedMs = Date.now() - started;
       const body = (await response.json()) as {
@@ -854,7 +864,12 @@ describe('issue 21: durable long-poll wakes on a concurrent post', () => {
     function receiveRequest() {
       return new Request(
         'https://relay.local/envelopes?recipient=' + encodeURIComponent(peer.did) + '&waitMs=200',
-        { headers: { authorization: 'Bearer ' + createRelayAuthToken(peer) } },
+        {
+          headers: {
+            authorization:
+              'Bearer ' + createRelayAuthToken(peer, { origin: 'https://relay.local' }),
+          },
+        },
       );
     }
     const started = Date.now();
@@ -936,7 +951,10 @@ describe('issue 23: cancelled durable long-poll leaves the envelope queued', () 
           '&waitMs=' +
           wait,
         {
-          headers: { authorization: 'Bearer ' + createRelayAuthToken(peer) },
+          headers: {
+            authorization:
+              'Bearer ' + createRelayAuthToken(peer, { origin: 'https://relay.local' }),
+          },
           signal,
         },
       );

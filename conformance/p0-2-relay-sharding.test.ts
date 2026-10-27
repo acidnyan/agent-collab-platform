@@ -401,7 +401,9 @@ describe('P0-2 edge sharding', () => {
     const object = new RelayDurableObject(state);
     const response = await object.fetch(
       new Request('https://relay.example/envelopes?recipient=' + encodeURIComponent(bob.did), {
-        headers: { authorization: 'Bearer ' + createRelayAuthToken(bob) },
+        headers: {
+          authorization: 'Bearer ' + createRelayAuthToken(bob, { origin: 'https://relay.example' }),
+        },
       }),
     );
     expect(response.status).toBe(200);

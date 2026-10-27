@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { verifyEnvelope, createRelayAuthToken, validateRelayEndpointUrl } from '@acp/core';
+import {
+  verifyEnvelope,
+  createRelayAuthToken,
+  normalizeRelayOrigin,
+  validateRelayEndpointUrl,
+} from '@acp/core';
 import type { SignedEnvelope, KeyPair, RelayAuthAction } from '@acp/core';
 import {
   DEFAULT_MAX_ENVELOPE_BYTES,
   InMemoryRelay,
   createRelayFetchHandler,
+  relayAuthFailure,
   relayHttpHeaders,
 } from './fetch.js';
+import type { RelayAuthContext } from './fetch.js';
 import { createPinnedRelayFetch, resolveAndValidateRelayEndpoint } from './ssrf.js';
 import type { RelayClientSecurityOptions } from './ssrf.js';
 export * from './fetch.js';
@@ -27,10 +34,24 @@ export {
   parseAndVerifyInviteToken,
 } from '@acp/core';
 export async function startLocalRelay(
-  options: { port?: number; host?: string; tamper?: (e: SignedEnvelope) => SignedEnvelope } = {},
+  options: {
+    port?: number;
+    host?: string;
+    tamper?: (e: SignedEnvelope) => SignedEnvelope;
+    allowQueryAuth?: boolean;
+    allowUnboundRelayAuth?: boolean;
+  } = {},
 ) {
-  const relay = new InMemoryRelay(options.tamper),
-    handler = createRelayFetchHandler({ relay });
+  const relay = new InMemoryRelay({
+    tamper: options.tamper,
+    allowUnboundRelayAuth: options.allowUnboundRelayAuth,
+  });
+  const handler = createRelayFetchHandler({
+    relay,
+    allowQueryAuth: options.allowQueryAuth,
+    allowUnboundRelayAuth: options.allowUnboundRelayAuth,
+  });
+  let boundOrigin = 'http://127.0.0.1';
   const server = createServer(async (request, response) => {
     const controller = new AbortController();
     response.once('close', () => controller.abort());
@@ -43,7 +64,7 @@ export async function startLocalRelay(
         chunks.push(chunk as Buffer);
       }
       const result = await handler(
-        new Request(new URL(request.url ?? '/', 'http://localhost'), {
+        new Request(new URL(request.url ?? '/', boundOrigin), {
           method: request.method,
           headers: Object.entries(request.headers).flatMap(([name, value]) =>
             value === undefined
@@ -101,6 +122,10 @@ export async function startLocalRelay(
   });
   server.requestTimeout = 10000;
   const wsServer = new WebSocketServer({ server, path: '/ws', maxPayload: 1048576 });
+  const wsAuth = (): RelayAuthContext => ({
+    expectedOrigin: boundOrigin,
+    requireOrigin: options.allowUnboundRelayAuth !== true,
+  });
   wsServer.on('connection', (socket) => {
     let subscription: {
       disposed: boolean;
@@ -130,11 +155,21 @@ export async function startLocalRelay(
           relay.send(request.envelope);
           socket.send(JSON.stringify({ ok: true }));
         } else if (request.method === 'receive' && request.recipientDid) {
-          const receive = relay.openInbox(request.recipientDid, request.authToken ?? request.auth);
+          const receive = relay.openInbox(
+            request.recipientDid,
+            request.authToken ?? request.auth,
+            'receive',
+            wsAuth(),
+          );
           socket.send(JSON.stringify({ envelope: receive() ?? null }));
         } else if (request.method === 'subscribe' && request.recipientDid) {
           const did = request.recipientDid,
-            receive = relay.openInbox(did, request.authToken ?? request.auth, 'subscribe');
+            receive = relay.openInbox(
+              did,
+              request.authToken ?? request.auth,
+              'subscribe',
+              wsAuth(),
+            );
           disposeSubscription();
           const current: {
             disposed: boolean;
@@ -173,10 +208,7 @@ export async function startLocalRelay(
       } catch (e) {
         socket.send(
           JSON.stringify({
-            error:
-              e instanceof Error && e.message === 'RELAY_UNAUTHORIZED'
-                ? 'RELAY_UNAUTHORIZED'
-                : String(e),
+            error: relayAuthFailure(e) ?? String(e),
           }),
         );
       }
@@ -184,15 +216,23 @@ export async function startLocalRelay(
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(options.port ?? 0, options.host ?? '127.0.0.1', resolve);
+    server.listen(options.port ?? 0, options.host ?? '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        reject(new Error('RELAY_BIND'));
+        return;
+      }
+      const hostname = address.address.includes(':')
+        ? '[' + address.address + ']'
+        : address.address;
+      boundOrigin = 'http://' + hostname + ':' + address.port;
+      resolve();
+    });
   });
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('RELAY_BIND');
-  const hostname = address.address.includes(':') ? '[' + address.address + ']' : address.address;
   return {
     relay,
-    url: 'http://' + hostname + ':' + address.port,
-    wsUrl: 'ws://' + hostname + ':' + address.port + '/ws',
+    url: boundOrigin,
+    wsUrl: boundOrigin.replace(/^http:/, 'ws:') + '/ws',
     close: async () => {
       for (const client of wsServer.clients) client.terminate();
       await new Promise<void>((resolve) => wsServer.close(() => resolve()));
@@ -205,19 +245,28 @@ export async function startLocalRelay(
 }
 export type RelayAuthSource =
   | KeyPair
-  | ((recipientDid: string, action: RelayAuthAction) => string | Promise<string>);
+  | ((
+      recipientDid: string,
+      action: RelayAuthAction,
+      origin?: string,
+    ) => string | Promise<string>);
 class RelayCredentials {
   private recipientKeys = new Map<string, KeyPair>();
-  constructor(private authSource?: RelayAuthSource) {}
+  constructor(
+    private authSource: RelayAuthSource | undefined,
+    private relayUrl: string,
+  ) {}
   setRecipientKey(key: KeyPair): this {
     this.recipientKeys.set(key.did, key);
     return this;
   }
   protected async authToken(did: string, action: RelayAuthAction): Promise<string> {
+    const origin = normalizeRelayOrigin(this.relayUrl);
     const key = this.recipientKeys.get(did);
-    if (key) return createRelayAuthToken(key, { action });
-    if (typeof this.authSource === 'function') return this.authSource(did, action);
-    if (this.authSource?.did === did) return createRelayAuthToken(this.authSource, { action });
+    if (key) return createRelayAuthToken(key, { action, origin });
+    if (typeof this.authSource === 'function') return this.authSource(did, action, origin);
+    if (this.authSource?.did === did)
+      return createRelayAuthToken(this.authSource, { action, origin });
     throw new Error('RELAY_AUTH_REQUIRED');
   }
 }
@@ -275,7 +324,7 @@ export class HttpRelayClient extends RelayCredentials implements RelayTransport 
     options?: RelayClientSecurityOptions,
   ) {
     const parsed = splitRelayArgs(fetcherOrKey, authOrOptions, options);
-    super(parsed.auth);
+    super(parsed.auth, url);
     this.baseFetcher = parsed.fetcher;
     this.security = parsed.security;
     this.fetcher = ((input: RequestInfo | URL, init?: RequestInit) =>
@@ -472,7 +521,7 @@ export class WebSocketRelayClient extends RelayCredentials {
     options?: RelayClientSecurityOptions,
   ) {
     const parsed = splitRelayArgs(undefined, authOrOptions, options);
-    super(parsed.auth);
+    super(parsed.auth, url);
     this.security = parsed.security;
   }
   private requireSocket(): WebSocket {

@@ -378,7 +378,7 @@ describe('WP-8 signed discovery, invite and relay transports', () => {
       b = generateKeyPair();
     const pending = fetcher(
       url + '/envelopes?recipient=' + encodeURIComponent(b.did) + '&waitMs=1000',
-      { headers: { authorization: 'Bearer ' + createRelayAuthToken(b) } },
+      { headers: { authorization: 'Bearer ' + createRelayAuthToken(b, { origin: url }) } },
     );
     const envelope = signEnvelope(
       { taskId: 'task_network1', recipientDid: b.did, seq: 0, eventType: 'PING', payload: {} },
@@ -396,7 +396,7 @@ describe('WP-8 signed discovery, invite and relay transports', () => {
     expect(
       await (
         await fetcher(url + '/envelopes?recipient=' + encodeURIComponent(b.did) + '&waitMs=1', {
-          headers: { authorization: 'Bearer ' + createRelayAuthToken(b) },
+          headers: { authorization: 'Bearer ' + createRelayAuthToken(b, { origin: url }) },
         })
       ).json(),
     ).toEqual({ envelopes: [] });
@@ -886,7 +886,9 @@ it('persists the edge relay registry, queue and replay protection across restart
     await (
       await second.fetch(
         new Request('https://relay.local/envelopes?recipient=' + encodeURIComponent(peer.did), {
-          headers: { authorization: 'Bearer ' + createRelayAuthToken(peer) },
+          headers: {
+            authorization: 'Bearer ' + createRelayAuthToken(peer, { origin: 'https://relay.local' }),
+          },
         }),
       )
     ).json(),

@@ -134,8 +134,12 @@ const payload = (action: RelayAuthAction = 'receive'): RelayAuthPayload => ({
   timestamp: new Date().toISOString(),
   nonce: 'test-nonce',
 });
-const headers = (key = bob, action: RelayAuthAction = 'receive') => ({
-  authorization: 'Bearer ' + createRelayAuthToken(key, { action }),
+const headers = (
+  key = bob,
+  action: RelayAuthAction = 'receive',
+  origin = 'https://relay.example',
+) => ({
+  authorization: 'Bearer ' + createRelayAuthToken(key, { action, origin }),
 });
 const recipientPath = (path: string, did = bob.did) =>
   path + '?recipient=' + encodeURIComponent(did);
@@ -153,6 +157,7 @@ const attacks = [
 function attackToken(
   attack: (typeof attacks)[number],
   action: RelayAuthAction,
+  origin = 'https://relay.example',
 ): string | undefined {
   switch (attack) {
     case 'missing':
@@ -161,7 +166,7 @@ function attackToken(
       return 'not-a-token';
     case 'tampered': {
       const signed = JSON.parse(
-        Buffer.from(createRelayAuthToken(bob, { action }), 'base64url').toString(),
+        Buffer.from(createRelayAuthToken(bob, { action, origin }), 'base64url').toString(),
       );
       signed.payload.nonce += 'changed';
       return Buffer.from(JSON.stringify(signed)).toString('base64url');
@@ -169,21 +174,26 @@ function attackToken(
     case 'wrong signer':
       return encode(payload(action), eve);
     case 'wrong recipient':
-      return createRelayAuthToken(eve, { action });
+      return createRelayAuthToken(eve, { action, origin });
     case 'expired':
       return createRelayAuthToken(bob, {
         action,
+        origin,
         now: new Date(Date.now() - 300001).toISOString(),
       });
     case 'future':
       return createRelayAuthToken(bob, {
         action,
+        origin,
         now: new Date(Date.now() + 600000).toISOString(),
       });
     case 'replayed':
-      return createRelayAuthToken(bob, { action });
+      return createRelayAuthToken(bob, { action, origin });
     case 'wrong action':
-      return createRelayAuthToken(bob, { action: action === 'receive' ? 'stream' : 'receive' });
+      return createRelayAuthToken(bob, {
+        action: action === 'receive' ? 'stream' : 'receive',
+        origin,
+      });
   }
 }
 
@@ -277,26 +287,18 @@ describe.each(['/envelopes', '/stream'])('M3.1 HTTP %s authentication', (path) =
     expect(legitimate.status).toBe(200);
     expect(await legitimate.json()).toEqual(e);
   });
-  it.each(['authorization', 'x-acp-relay-auth', 'query'])(
+  it.each(['authorization', 'x-acp-relay-auth'] as const)(
     'accepts fresh auth via %s',
     async (source) => {
       const relay = new InMemoryRelay({ requireAuth: true }),
         handler = createRelayFetchHandler({ relay }),
-        token = createRelayAuthToken(bob, { action }),
+        token = createRelayAuthToken(bob, { action, origin: 'https://relay.example' }),
         e = envelope();
       relay.send(e);
       const r = await handler(
-        new Request(
-          'https://relay.example' +
-            recipientPath(path) +
-            (source === 'query' ? '&auth=' + token : ''),
-          {
-            headers:
-              source === 'query'
-                ? {}
-                : { [source]: source === 'authorization' ? 'Bearer ' + token : token },
-          },
-        ),
+        new Request('https://relay.example' + recipientPath(path), {
+          headers: { [source]: source === 'authorization' ? 'Bearer ' + token : token },
+        }),
       );
       expect(r.status).toBe(200);
       if (path === '/stream') {
@@ -313,6 +315,36 @@ describe.each(['/envelopes', '/stream'])('M3.1 HTTP %s authentication', (path) =
       expect(relay.snapshot().queues).toEqual([]);
     },
   );
+  it('rejects ?auth= unless allowQueryAuth is enabled', async () => {
+    const relay = new InMemoryRelay({ requireAuth: true }),
+      handler = createRelayFetchHandler({ relay }),
+      origin = 'https://relay.example',
+      token = createRelayAuthToken(bob, { action, origin }),
+      e = envelope();
+    relay.send(e);
+    const denied = await handler(
+      new Request(origin + recipientPath(path) + '&auth=' + token),
+    );
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toEqual({ error: 'RELAY_QUERY_AUTH_DISABLED' });
+    expect(relay.snapshot().queues).toEqual([[bob.did, [e]]]);
+    const allowed = await createRelayFetchHandler({ relay, allowQueryAuth: true })(
+      new Request(origin + recipientPath(path) + '&auth=' + token),
+    );
+    expect(allowed.status).toBe(200);
+    if (path === '/stream') {
+      const reader = allowed.body!.getReader();
+      try {
+        expect(new TextDecoder().decode((await reader.read()).value)).toContain('connected');
+        expect(new TextDecoder().decode((await reader.read()).value)).toContain(
+          e.payload.envelopeId,
+        );
+      } finally {
+        await reader.cancel();
+      }
+    } else expect(await allowed.json()).toEqual(e);
+    expect(relay.snapshot().queues).toEqual([]);
+  });
 });
 
 describe('relay HTTP security headers', () => {
@@ -330,6 +362,7 @@ describe('relay HTTP security headers', () => {
     base: string,
     request: (input: string, init?: RequestInit) => Promise<Response>,
   ): Promise<void> {
+    const origin = new URL(base).origin;
     const health = await request(base + '/health');
     expect(health.status).toBe(200);
     expectSecurity(health);
@@ -343,17 +376,21 @@ describe('relay HTTP security headers', () => {
     expect(posted.status).toBe(202);
     expectSecurity(posted);
     expect(posted.headers.get('cache-control')).toBe('no-store');
-    const delivered = await request(base + recipientPath('/envelopes'), { headers: headers() });
+    const delivered = await request(base + recipientPath('/envelopes'), {
+      headers: headers(bob, 'receive', origin),
+    });
     expect(delivered.status).toBe(200);
     expectSecurity(delivered);
     expect(delivered.headers.get('content-type')).toBe('application/json; charset=utf-8');
     expect(delivered.headers.get('cache-control')).toBe('no-store');
-    const empty = await request(base + recipientPath('/envelopes'), { headers: headers() });
+    const empty = await request(base + recipientPath('/envelopes'), {
+      headers: headers(bob, 'receive', origin),
+    });
     expect(empty.status).toBe(204);
     expectSecurity(empty);
     expect(empty.headers.get('cache-control')).toBe('no-store');
     const stream = await request(base + recipientPath('/stream'), {
-      headers: headers(bob, 'stream'),
+      headers: headers(bob, 'stream', origin),
     });
     expect(stream.status).toBe(200);
     expectSecurity(stream);
@@ -406,7 +443,7 @@ describe.each(['receive', 'subscribe'] as const)('M3.1 WebSocket %s authenticati
     const server = await startLocalRelay();
     cleanup.push(server.close);
     const socket = await socketAt(server.wsUrl),
-      token = attackToken(attack, action);
+      token = attackToken(attack, action, server.url);
     if (attack === 'replayed') expect(server.relay.authenticate(bob.did, token)).toBe(true);
     const e = envelope();
     server.relay.send(e);
@@ -420,14 +457,14 @@ describe.each(['receive', 'subscribe'] as const)('M3.1 WebSocket %s authenticati
       await wsRequest(socket, {
         method: 'receive',
         recipientDid: bob.did,
-        auth: createRelayAuthToken(bob),
+        auth: createRelayAuthToken(bob, { origin: server.url }),
       }),
     ).toEqual({ envelope: e });
     expect(
       await wsRequest(socket, {
         method: 'receive',
         recipientDid: bob.did,
-        authToken: createRelayAuthToken(bob),
+        authToken: createRelayAuthToken(bob, { origin: server.url }),
       }),
     ).toEqual({ envelope: later });
   });
@@ -444,15 +481,19 @@ it('forwards Node headers and auto-signs fresh HTTP, SSE and WebSocket requests'
   const extra = envelope();
   server.relay.send(extra);
   const response = await fetch(server.url + recipientPath('/envelopes'), {
-    headers: { 'x-acp-relay-auth': createRelayAuthToken(bob), accept: 'application/json' },
+    headers: {
+      'x-acp-relay-auth': createRelayAuthToken(bob, { origin: server.url }),
+      accept: 'application/json',
+    },
   });
   expect(await response.json()).toEqual(extra);
   const sse = new SseRelayClient(
     server.url,
     fetch,
-    (did, action) => {
+    (did, action, origin) => {
       expect(did).toBe(bob.did);
-      return createRelayAuthToken(bob, { action });
+      expect(origin).toBe(new URL(server.url).origin);
+      return createRelayAuthToken(bob, { action, origin });
     },
     { allowPrivateRelay: true },
   );
@@ -660,7 +701,7 @@ describe('M3.1 Durable Object mutation persistence', () => {
       );
     expect((await post(first)).status).toBe(202);
     state.storage.put.mockClear();
-    const token = createRelayAuthToken(bob),
+    const token = createRelayAuthToken(bob, { origin: 'https://relay.example' }),
       request = () =>
         new Request('https://relay.example' + recipientPath('/envelopes'), {
           headers: { authorization: 'Bearer ' + token },
@@ -687,7 +728,7 @@ describe('M3.1 Durable Object mutation persistence', () => {
     vi.useFakeTimers();
     const state = durableState(),
       durable = new RelayDurableObject(state),
-      token = createRelayAuthToken(bob, { action: 'stream' });
+      token = createRelayAuthToken(bob, { action: 'stream', origin: 'https://relay.example' });
     const r = await durable.fetch(
       new Request('https://relay.example' + recipientPath('/stream'), {
         headers: { authorization: 'Bearer ' + token },
