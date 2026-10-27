@@ -70,58 +70,212 @@ function relayUrl(value: string): void {
   if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password)
     throw new Error('INVALID_RELAY_URL');
 }
-/** Validate literal endpoints before using an untrusted invite as a network destination. */
-export function validateRelayEndpointUrl(
-  value: string,
-  options: { allowPrivateRelay?: boolean } = {},
-): void {
-  const blocked = () => {
-    throw new Error('SSRF_BLOCKED_RELAY_URL');
+export interface RelayEndpointPolicy {
+  /** Private and loopback relays are blocked unless this is exactly true. */
+  allowPrivateRelay?: boolean;
+}
+function ssrfBlocked(): never {
+  throw new Error('SSRF_BLOCKED_RELAY_URL');
+}
+function normalizeHost(value: string): string {
+  return value.toLowerCase().replace(/^\[|\]$/g, '').split('%')[0].replace(/\.+$/, '');
+}
+function parseNumericPart(part: string): number | undefined {
+  if (/^0x[0-9a-f]+$/i.test(part)) return parseInt(part, 16);
+  // Leading zeros are octal for inet_aton. A bare 0 stays decimal zero.
+  if (/^0[0-7]+$/.test(part)) return parseInt(part, 8);
+  if (/^\d+$/.test(part)) return Number(part);
+  return undefined;
+}
+/** inet_aton forms: a, a.b, a.b.c, a.b.c.d, including hex and octal parts. */
+function decodeInetAton(host: string): [number, number, number, number] | undefined {
+  const parts = host.split('.');
+  if (parts.length < 1 || parts.length > 4) return undefined;
+  const nums = parts.map(parseNumericPart);
+  if (nums.some((n) => n === undefined || !Number.isSafeInteger(n))) return undefined;
+  const values = nums as number[];
+  const limits =
+    values.length === 1
+      ? [0x100000000]
+      : values.length === 2
+        ? [0x100, 0x1000000]
+        : values.length === 3
+          ? [0x100, 0x100, 0x10000]
+          : [0x100, 0x100, 0x100, 0x100];
+  let packed = 0;
+  for (let i = 0; i < values.length; i++) {
+    if (values[i] < 0 || values[i] >= limits[i]) return undefined;
+    packed = packed * limits[i] + values[i];
+  }
+  if (packed > 0xffffffff) return undefined;
+  return [(packed >>> 24) & 255, (packed >>> 16) & 255, (packed >>> 8) & 255, packed & 255];
+}
+function isCanonicalIpv4(host: string): boolean {
+  return /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/.test(host);
+}
+function isNonCanonicalIpv4(host: string): boolean {
+  if (!host || host.includes(':')) return false;
+  if (isCanonicalIpv4(host)) {
+    const parts = host.split('.').map(Number);
+    return parts.some((n) => n > 255);
+  }
+  return partsLookNumeric(host);
+}
+function partsLookNumeric(host: string): boolean {
+  const parts = host.split('.');
+  if (parts.length < 1 || parts.length > 4) return false;
+  return parts.every((part) => /^0x[0-9a-f]+$/i.test(part) || /^\d+$/.test(part));
+}
+function wordPairToIpv4(hi: number, lo: number): [number, number, number, number] {
+  return [hi >> 8, hi & 255, lo >> 8, lo & 255];
+}
+function parseIpv6Words(host: string): number[] | undefined {
+  let body = host;
+  if (body.includes('.')) {
+    const last = body.lastIndexOf(':');
+    if (last < 0) return undefined;
+    const tail = decodeInetAton(body.slice(last + 1));
+    if (!tail) return undefined;
+    const hi = ((tail[0] << 8) | tail[1]).toString(16);
+    const lo = ((tail[2] << 8) | tail[3]).toString(16);
+    body = body.slice(0, last + 1) + hi + ':' + lo;
+  }
+  const halves = body.split('::');
+  if (halves.length > 2) return undefined;
+  const parseSide = (side: string): number[] | undefined => {
+    if (!side) return [];
+    const words = side.split(':');
+    const parsed: number[] = [];
+    for (const word of words) {
+      if (!/^[0-9a-f]{1,4}$/i.test(word)) return undefined;
+      parsed.push(parseInt(word, 16));
+    }
+    return parsed;
   };
+  const left = parseSide(halves[0]);
+  const right = halves.length === 2 ? parseSide(halves[1]) : [];
+  if (!left || !right) return undefined;
+  if (halves.length === 1) return left.length === 8 ? left : undefined;
+  if (left.length + right.length > 7) return undefined;
+  return [...left, ...Array(8 - left.length - right.length).fill(0), ...right];
+}
+/**
+ * Unspecified, link-local, metadata, multicast, and reserved ranges are always blocked.
+ * Loopback, RFC1918, CGNAT, benchmarking, documentation, and ULA ranges are blocked
+ * unless allowPrivateRelay is exactly true.
+ */
+function ipv4Disallowed(octets: number[], privateBlocked: boolean): boolean {
+  const [a, b, c] = octets;
+  if (a === undefined || b === undefined || c === undefined || octets[3] === undefined) return true;
+  if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  if (a === 0 || (a === 169 && b === 254) || a >= 224) return true;
+  if (!privateBlocked) return false;
+  if (a === 127 || a === 10 || (a === 100 && b >= 64 && b <= 127)) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;
+  if (a === 198 && b === 51 && c === 100) return true;
+  if (a === 203 && b === 0 && c === 113) return true;
+  return false;
+}
+function assertIpv6Allowed(words: number[], privateBlocked: boolean): void {
+  if (words.length !== 8) ssrfBlocked();
+  if (words.every((word) => word === 0)) ssrfBlocked();
+  if (
+    words[0] === 0xfd00 &&
+    words[1] === 0x0ec2 &&
+    words.slice(2, 7).every((word) => word === 0) &&
+    words[7] === 0x254
+  )
+    ssrfBlocked();
+  // fe80::/10 link-local and ff00::/8 multicast are never a relay destination.
+  if ((words[0] & 0xffc0) === 0xfe80 || (words[0] & 0xff00) === 0xff00) ssrfBlocked();
+  const embedded: Array<[number, number, number, number]> = [];
+  const mapped = words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff;
+  const compatible = words.slice(0, 6).every((word) => word === 0);
+  if (mapped) embedded.push(wordPairToIpv4(words[6], words[7]));
+  else if (compatible) {
+    // ::1 is loopback. Do not treat it as the IPv4-compatible address 0.0.0.1.
+    if (words[6] === 0 && words[7] === 1) {
+      if (privateBlocked) ssrfBlocked();
+    } else if (words[6] !== 0 || words[7] !== 0) embedded.push(wordPairToIpv4(words[6], words[7]));
+  }
+  if (words[0] === 0x64 && words[1] === 0xff9b && words.slice(2, 6).every((word) => word === 0))
+    embedded.push(wordPairToIpv4(words[6], words[7]));
+  if (words[0] === 0x64 && words[1] === 0xff9b && words[2] === 0x0001) {
+    // RFC 6052 /48 embeds IPv4 around the u byte. A non-zero u byte is not a relay target.
+    if (words[4] >> 8 !== 0) ssrfBlocked();
+    embedded.push([words[3] >> 8, words[3] & 255, words[4] & 255, words[5] >> 8]);
+  }
+  if (words[0] === 0x2002) embedded.push(wordPairToIpv4(words[1], words[2]));
+  if (words[0] === 0x2001 && words[1] === 0) {
+    embedded.push(wordPairToIpv4(words[2], words[3]));
+    embedded.push(wordPairToIpv4(words[6] ^ 0xffff, words[7] ^ 0xffff));
+  }
+  for (const ip of embedded) if (ipv4Disallowed(ip, privateBlocked)) ssrfBlocked();
+  if (privateBlocked && (words[0] & 0xfe00) === 0xfc00) ssrfBlocked();
+}
+function assertIpv4Allowed(octets: [number, number, number, number], privateBlocked: boolean): void {
+  if (ipv4Disallowed(octets, privateBlocked)) ssrfBlocked();
+}
+function rawAuthorityHost(value: string): string | undefined {
+  const match = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(value.trim());
+  if (!match || match[1].includes('@')) return undefined;
+  let authority = match[1];
+  if (authority.startsWith('[')) {
+    const end = authority.indexOf(']');
+    return end > 1 ? normalizeHost(authority.slice(1, end)) : undefined;
+  }
+  const colon = authority.lastIndexOf(':');
+  if (colon > 0 && /^\d+$/.test(authority.slice(colon + 1))) authority = authority.slice(0, colon);
+  return normalizeHost(authority);
+}
+/** Reject an IP address that must not be used as a relay destination. */
+export function validateIpAddress(ip: string, options: RelayEndpointPolicy = {}): void {
+  const privateBlocked = options.allowPrivateRelay !== true;
+  const host = normalizeHost(ip.trim());
+  if (!host) ssrfBlocked();
+  if (host.includes(':')) {
+    const words = parseIpv6Words(host);
+    if (!words) ssrfBlocked();
+    assertIpv6Allowed(words, privateBlocked);
+    return;
+  }
+  const decoded = decodeInetAton(host);
+  if (!decoded || !partsLookNumeric(host)) ssrfBlocked();
+  assertIpv4Allowed(decoded, privateBlocked);
+}
+/** Validate literal endpoints before using an untrusted invite as a network destination. */
+export function validateRelayEndpointUrl(value: string, options: RelayEndpointPolicy = {}): void {
   let u: URL;
   try {
     u = new URL(value);
   } catch {
-    return blocked();
+    ssrfBlocked();
   }
   if (!['http:', 'https:', 'ws:', 'wss:'].includes(u.protocol) || u.username || u.password)
-    blocked();
-  const host = u.hostname
-    .toLowerCase()
-    .replace(/^\[|\]$/g, '')
-    .replace(/\.+$/, '');
-  if (['metadata.google.internal', 'metadata.goog'].includes(host)) blocked();
-  const privateBlocked = options.allowPrivateRelay === false;
-  let ipv4 = /^\d+\.\d+\.\d+\.\d+$/.test(host) ? host.split('.').map(Number) : undefined;
-  if (host.includes(':')) {
-    const halves = host.split('::'),
-      left = halves[0] ? halves[0].split(':') : [],
-      right = halves[1] ? halves[1].split(':') : [];
-    const words = (
-      halves.length === 2
-        ? [...left, ...Array(8 - left.length - right.length).fill('0'), ...right]
-        : left
-    ).map((w) => parseInt(w, 16));
-    if (words.every((w) => w === 0) || host === 'fd00:ec2::254') blocked();
-    // IPv4-mapped IPv6 must obey the same policy as the embedded IPv4 address.
-    if (words.slice(0, 5).every((w) => w === 0) && words[5] === 0xffff)
-      ipv4 = [words[6] >> 8, words[6] & 255, words[7] >> 8, words[7] & 255];
-    if (
-      privateBlocked &&
-      ((words.slice(0, 7).every((w) => w === 0) && words[7] === 1) ||
-        (words[0] & 0xfe00) === 0xfc00 ||
-        (words[0] & 0xffc0) === 0xfe80)
-    )
-      blocked();
+    ssrfBlocked();
+  const host = normalizeHost(u.hostname);
+  if (!host || host === 'metadata.google.internal' || host === 'metadata.goog') ssrfBlocked();
+  // Private and loopback destinations stay blocked unless the caller opts in.
+  const privateBlocked = options.allowPrivateRelay !== true;
+  const raw = rawAuthorityHost(value);
+  if (raw && raw !== host && (isNonCanonicalIpv4(raw) || partsLookNumeric(raw))) {
+    const decoded = decodeInetAton(raw);
+    if (!decoded || ipv4Disallowed(decoded, privateBlocked)) ssrfBlocked();
   }
-  if (ipv4) {
-    const [a, b] = ipv4;
-    if ((a === 169 && b === 254) || ipv4.every((n) => n === 0)) blocked();
-    if (
-      privateBlocked &&
-      (a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168))
-    )
-      blocked();
+  if (host.includes(':')) {
+    const words = parseIpv6Words(host);
+    if (!words) ssrfBlocked();
+    assertIpv6Allowed(words, privateBlocked);
+    return;
+  }
+  if (partsLookNumeric(host)) {
+    const decoded = decodeInetAton(host);
+    if (!decoded) ssrfBlocked();
+    assertIpv4Allowed(decoded, privateBlocked);
+    return;
   }
   if (
     privateBlocked &&
@@ -130,7 +284,7 @@ export function validateRelayEndpointUrl(
       host.endsWith('.local') ||
       host.endsWith('.internal'))
   )
-    blocked();
+    ssrfBlocked();
 }
 function resolveAgentKey(options: CreateAgentCardOptions, agentKey?: KeyPair): KeyPair | undefined {
   if (

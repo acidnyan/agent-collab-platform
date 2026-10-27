@@ -313,6 +313,7 @@ describe('acp worker CLI acceptance guard', () => {
         bob.path,
         '--relay',
         server.url,
+        '--allow-private-relay',
         '--adapter',
         adapter,
         '--auto-accept',
@@ -342,6 +343,7 @@ describe('acp worker CLI acceptance guard', () => {
         bob.path,
         '--relay',
         server.url,
+        '--allow-private-relay',
         '--adapter',
         adapter,
         '--auto-accept',
@@ -384,6 +386,7 @@ describe('acp worker CLI acceptance guard', () => {
       bob.path,
       '--relay',
       server.url,
+      '--allow-private-relay',
       '--adapter',
       'sandbox',
       '--auto-accept',
@@ -411,6 +414,7 @@ describe('acp worker CLI acceptance guard', () => {
         eve.path,
         '--to',
         invite,
+        '--allow-private-relay',
         '--title',
         'Denied',
         '--description',
@@ -427,6 +431,7 @@ describe('acp worker CLI acceptance guard', () => {
       carol.path,
       '--to',
       invite,
+      '--allow-private-relay',
       '--title',
       'Allowed',
       '--description',
@@ -452,6 +457,7 @@ describe('acp worker CLI acceptance guard', () => {
       commaBob.path,
       '--relay',
       server.url,
+      '--allow-private-relay',
       '--adapter',
       'sandbox',
       '--auto-accept',
@@ -473,6 +479,7 @@ describe('acp worker CLI acceptance guard', () => {
       commaAlice.path,
       '--to',
       commaInvite,
+      '--allow-private-relay',
       '--title',
       'Comma',
       '--description',
@@ -502,6 +509,7 @@ describe('acp worker CLI acceptance guard', () => {
       bob.path,
       '--relay',
       server.url,
+      '--allow-private-relay',
       '--adapter',
       'sandbox',
       '--once',
@@ -513,7 +521,9 @@ describe('acp worker CLI acceptance guard', () => {
     await vi.waitFor(() => {
       if (!lines.some((line) => line.startsWith('acp-invite:'))) throw new Error('waiting');
     });
-    expect(await new HttpRelayClient(server.url).discover()).toEqual([]);
+    expect(await new HttpRelayClient(server.url, { allowPrivateRelay: true }).discover()).toEqual(
+      [],
+    );
     await server.close();
     await hidden.catch(() => undefined);
 
@@ -528,6 +538,7 @@ describe('acp worker CLI acceptance guard', () => {
       bob.path,
       '--relay',
       publishedServer.url,
+      '--allow-private-relay',
       '--adapter',
       'sandbox',
       '--publish',
@@ -541,7 +552,7 @@ describe('acp worker CLI acceptance guard', () => {
       if (!publishedLines.some((line) => line.startsWith('acp-invite:')))
         throw new Error('waiting');
     });
-    const cards = await new HttpRelayClient(publishedServer.url).discover();
+    const cards = await new HttpRelayClient(publishedServer.url, { allowPrivateRelay: true }).discover();
     expect(cards.map((card) => card.payload.ownerDid)).toContain(bob.key.did);
   });
 });

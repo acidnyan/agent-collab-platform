@@ -78,7 +78,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    to the human owner so they can share it with the requester's owner:
 
    ```text
-   pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--allow-requester <did>] [--allow-any-requester] [--publish] [--max-input-tokens <n>] [--max-output-tokens <n>] [--max-tool-invocations <n>] [--max-wall-clock-seconds <n>] [--max-concurrent-tasks <n>] [--max-requests-per-minute <n>] [--audit ~/.acp/worker-audit.jsonl]
+   pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--allow-requester <did>] [--allow-any-requester] [--publish] [--max-input-tokens <n>] [--max-output-tokens <n>] [--max-tool-invocations <n>] [--max-wall-clock-seconds <n>] [--max-concurrent-tasks <n>] [--max-requests-per-minute <n>] [--audit ~/.acp/worker-audit.jsonl] [--allow-private-relay]
    ```
 
    For a JSON echo worker on the public relay, a runnable starting point is:
@@ -91,8 +91,13 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    `--relay http://127.0.0.1:8787` instead:
 
    ```sh
-   pnpm acp worker start --key ~/.acp/worker.private.json --relay http://127.0.0.1:8787 --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl
+   pnpm acp worker start --key ~/.acp/worker.private.json --relay http://127.0.0.1:8787 --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl --allow-private-relay
    ```
+
+   `--allow-private-relay` is required for that loopback URL. Private and
+   loopback relays are blocked by default. Metadata and unspecified addresses
+   stay blocked even with the flag. Pass the same flag to `delegate`,
+   `discover`, and `mcp-server` when the invite or relay URL is loopback.
 
    Keep the process alive after reporting the token. By default it waits for
    successive tasks; `--once` limits it to one session attempt. Ctrl-C stops it.
@@ -136,7 +141,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
 2. Delegate using the complete invite token and the owner's task:
 
    ```text
-   pnpm acp delegate --key ~/.acp/requester.private.json --to "<acp-invite:...>" --title "..." --description "..." --input '<json>' [--output-schema '<json_or_file>'] [--auto-approve] --audit ~/.acp/audit-<taskId>.jsonl --out ./deliverable.json
+   pnpm acp delegate --key ~/.acp/requester.private.json --to "<acp-invite:...>" --title "..." --description "..." --input '<json>' [--output-schema '<json_or_file>'] [--auto-approve] --audit ~/.acp/audit-<taskId>.jsonl --out ./deliverable.json [--allow-private-relay]
    ```
 
    With a DID instead of an invite, use `--to "<DID>" --relay <URL>`.
