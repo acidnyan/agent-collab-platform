@@ -329,4 +329,4 @@ Blind Relay は HTTP、上限付きロングポーリング、SSE、WebSocket �
 
 `detectDockerRuntime` は、動く Podman を優先し、次に Docker を選びます。`runContainerOrSubprocessSandbox` は、マニフェストが `oci_container` のとき OCI を選び、ランタイムが無いときは Node の権限制限付きサンドボックスへフォールバックします。OCI はネットワークを切り、ルートファイルシステムを読み取り専用にし、すべての capability を落とし、no-new-privileges を有効にし、PID 数とメモリを制限します。`ExecutionAttestation.effectiveIsolationLevel` は実際に走ったものを記録します。コンテナの実行失敗は、より弱いサンドボックスでは再試行しません。Command / CLI アダプタは、環境と作業ディレクトリの衛生を備えた信頼されたホスト実行ファイルであり、制限付き JavaScript サンドボックスではありません。証明はその区別を示します。
 
-元のスキーマ、エクスポート、169 件の M0/M1 適合性テストは残しています。セッションのペイロードは、受信者の `did:key` に対して一時的な X25519、HKDF-SHA256、AES-256-GCM で暗号化されるため、リレーのスナップショットにタスクの中身は残りません。外部決済と透明性ログへのアンカーは、今後の作業です。公開リレーには、配置に応じた運用上のアクセス制御と TLS が必要です。参照実装のキューには上限があります。平文のエンベロープも引き続き検証できるので、既存の呼び出し側はそのまま動きます。
+元のスキーマ、エクスポート、169 件の M0/M1 適合性テストは残しています。セッションのペイロードは、受信者の `did:key` に対して一時的な X25519、HKDF-SHA256、AES-256-GCM で暗号化されるため、リレーのスナップショットにタスクの中身は残りません。外部決済と透明性ログへのアンカーは、今後の作業です。公開リレーには、配置に応じた運用上のアクセス制御と TLS が必要です。参照実装のキューには上限があります。`decryptEnvelopePayload`、`WorkerNode`、`RequesterClient`、`VerificationEngine` は既定で暗号化された封筒を要求し、平文のセッション封筒を `UNENCRYPTED_ENVELOPE_REJECTED` で拒否します。

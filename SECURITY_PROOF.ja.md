@@ -84,8 +84,9 @@ LLM の CLI アダプタ（`claude`、`codex`、`openai`）も、遠隔のピア
 | リレーが保存したセッションペイロードを読む    | `packages/runtime/src/session-audit.ts` の `SessionWire` は、すべてのペイロードを相手の `did:key` へ暗号化する。`packages/core/src/crypto.ts` の `encryptEnvelopePayload` は、封筒ごとに新しい X25519 鍵、HKDF-SHA256、ヘッダに束縛した AES-256-GCM を使う。 | `Proof 9: end-to-end payload encryption` の hides task input, capability tokens, and results from the relay |
 | 第三者が傍受した封筒を復号する                | X25519 スカラーを導出できるのは受信者のシードだけである。`decryptEnvelopePayload` は `ENVELOPE_DECRYPTION_FAILED` を投げる。                                                                                                                                 | 同じ証明の rejects a third party and a ciphertext moved to another header                                   |
 | 暗号文を別の `taskId` または `seq` に移植する | GCM の追加認証データと HKDF の info は、正規化したヘッダ（`taskId`、`seq`、`eventType`、`senderDid`、`recipientDid`）である。                                                                                                                                | 同じ証明の transplanted header                                                                              |
+| 平文のセッション封筒が E2EE なしで受理される  | `decryptEnvelopePayload` は `requireEncrypted` の既定を true とし、`UNENCRYPTED_ENVELOPE_REJECTED` を投げる。`WorkerNode`、`RequesterClient`、`VerificationEngine` もその既定を使う。`{ requireEncrypted: false }` または `allowUnencryptedEnvelopes: true` は、レガシー向けの明示的なオプトアウトである。 | 同じ証明の legacy cleartext envelope、および `P1-8 require encrypted envelopes`                            |
 
-外側の Ed25519 署名は暗号文を覆う。リレーは復号鍵なしで封筒の形を検査できる。平文の封筒も開くことができるので、既存の呼び出し側はそのまま動く。経路のメタデータは見えたままである。
+外側の Ed25519 署名は暗号文を覆う。リレーは復号鍵なしで封筒の形を検査できる。`decryptEnvelopePayload`、`WorkerNode`、`RequesterClient`、`VerificationEngine` は、既定で暗号化された封筒を要求し（`requireEncrypted: true`）、平文のセッション封筒を `UNENCRYPTED_ENVELOPE_REJECTED` で拒否する。呼び出し側が `{ requireEncrypted: false }` または `allowUnencryptedEnvelopes: true` を明示したときだけ、レガシーのメモリ内フィクスチャとして平文を開ける。経路のメタデータは見えたままである。
 
 ## 証明 10 — トークン失効と実行中の取り消し
 

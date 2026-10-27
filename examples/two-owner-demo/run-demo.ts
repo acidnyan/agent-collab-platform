@@ -226,7 +226,8 @@ export async function createSession(auditDirectory?: string) {
       record(event, details);
     },
   });
-  const verifier = new VerificationEngine();
+  // Gateway fixtures in this demo are cleartext. Network sessions reject those envelopes.
+  const verifier = new VerificationEngine({ allowUnencryptedEnvelopes: true });
   verifier.registerIsolatedCheck(
     'check://report',
     'return input.artifact.summary.length > 0 && input.artifact.findings.length === 0 ? 0 : 1;',

@@ -792,7 +792,11 @@ describe('M3.1 attested isolation enforcement', () => {
           bob,
         );
         const approval = vi.fn(async () => signApproval(m.taskId, 'final_verification', d, alice));
-        const { result } = await gateway.verifyAndSettle(e, new VerificationEngine(), approval);
+        const { result } = await gateway.verifyAndSettle(
+          e,
+          new VerificationEngine({ allowUnencryptedEnvelopes: true }),
+          approval,
+        );
         expect(result.accepted).toBe(accepted);
         expect(gateway.machine.state).toBe(accepted ? 'SETTLED' : 'VERIFY_REJECT');
         if (!accepted) {

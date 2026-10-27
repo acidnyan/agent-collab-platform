@@ -85,6 +85,8 @@ export class SessionWire {
     readonly actors: [string, string],
     readonly signal: AbortSignal,
     readonly auditPath?: string,
+    /** Legacy in-memory fixtures may open cleartext. Network sessions leave this false. */
+    readonly allowUnencryptedEnvelopes = false,
   ) {
     this.startPump();
     void this.dispatch();
@@ -235,7 +237,11 @@ export class SessionWire {
       throw new Error('INVALID_OR_REPLAYED_SESSION_ENVELOPE');
     // The signature covers ciphertext. Open a copy so later session code reads plaintext.
     const view = structuredClone(e);
-    view.payload.payload = asJson(openEnvelope(e, this.owner));
+    view.payload.payload = asJson(
+      openEnvelope(e, this.owner, {
+        requireEncrypted: !this.allowUnencryptedEnvelopes,
+      }),
+    );
     this.sealedByView.set(view, e);
     if (view.payload.eventType === 'ERROR')
       throw new Error('PEER_REJECTED: ' + JSON.stringify(view.payload.payload));

@@ -375,5 +375,6 @@ Session payloads are encrypted to the recipient `did:key` with ephemeral X25519,
 HKDF-SHA256, and AES-256-GCM, so a relay snapshot does not contain task contents.
 External settlement and transparency anchoring remain future work. Public relays
 require operational access controls and TLS appropriate to their deployment; the
-reference queue is bounded. Plaintext envelopes still verify, so older callers
-keep working.
+reference queue is bounded. `decryptEnvelopePayload`, `WorkerNode`, `RequesterClient`,
+and `VerificationEngine` require encrypted envelopes by default and reject cleartext
+session envelopes with `UNENCRYPTED_ENVELOPE_REJECTED`.

@@ -82,6 +82,7 @@ export class OwnerGateway {
     envelope: SignedEnvelope,
     engine: VerificationEngine,
     approval?: ApprovalReceipt | (() => Promise<ApprovalReceipt>),
+    options?: { allowUnencryptedEnvelopes?: boolean },
   ) {
     if (
       this.owner.did !== this.contract.manifest.requester.ownerDid ||
@@ -94,6 +95,7 @@ export class OwnerGateway {
       this.approvals,
       approval,
       this.owner,
+      options,
     );
     const verification = this.applyOwn(result.event);
     const settlement = result.accepted ? this.applyOwn('SETTLE') : undefined;
