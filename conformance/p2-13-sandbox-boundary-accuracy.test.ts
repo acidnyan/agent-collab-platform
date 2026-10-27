@@ -268,9 +268,9 @@ describe('P2-13 subprocess_restricted boundary', () => {
       expect(body.env.LANG).toBe('C.UTF-8');
       expect(body.env.TMPDIR).toBe(directory);
       expect(body.env.TZ).toBe('UTC');
-      // Windows/libuv still injects system variables after an explicit env block.
-      // Those keys are not credentials. Anything else, including provider keys
-      // and NODE_OPTIONS, must stay absent on every platform.
+      // Windows/libuv and macOS CoreFoundation still inject system variables
+      // after an explicit env block. Those keys are not credentials. Anything
+      // else, including provider keys and NODE_OPTIONS, must stay absent.
       const allowed = new Set(['HOME', 'LANG', 'TMPDIR', 'TZ']);
       const windowsOsKeys = new Set(
         [
@@ -309,9 +309,12 @@ describe('P2-13 subprocess_restricted boundary', () => {
           'WINDIR',
         ].map((key) => key.toUpperCase()),
       );
+      const darwinOsKeys = new Set(['__CF_USER_TEXT_ENCODING']);
       const unexpected = Object.keys(body.env).filter((key) => {
         if (allowed.has(key)) return false;
-        return process.platform === 'win32' ? !windowsOsKeys.has(key.toUpperCase()) : true;
+        if (process.platform === 'win32') return !windowsOsKeys.has(key.toUpperCase());
+        if (process.platform === 'darwin') return !darwinOsKeys.has(key);
+        return true;
       });
       expect(unexpected).toEqual([]);
       expect(body.env.OPENAI_API_KEY).toBeUndefined();
