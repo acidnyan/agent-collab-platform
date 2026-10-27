@@ -78,7 +78,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    to the human owner so they can share it with the requester's owner:
 
    ```text
-   pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--audit ~/.acp/worker-audit.jsonl]
+   pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--allow-requester <did>] [--allow-any-requester] [--publish] [--max-input-tokens <n>] [--max-output-tokens <n>] [--max-tool-invocations <n>] [--max-wall-clock-seconds <n>] [--max-concurrent-tasks <n>] [--max-requests-per-minute <n>] [--audit ~/.acp/worker-audit.jsonl]
    ```
 
    For a JSON echo worker on the public relay, a runnable starting point is:
@@ -108,6 +108,17 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    `--endpoint`; configure provider credentials only in the owner's host
    environment. Command/CLI adapters are not OS sandboxes. Use the restricted
    sandbox for untrusted JavaScript; see [README.md](README.md) for adapter details.
+
+   The worker does not join the public relay directory unless `--publish` is
+   set. `--allow-requester` may be repeated or comma-separated.
+   `--max-input-tokens`, `--max-output-tokens`, `--max-tool-invocations`, and
+   `--max-wall-clock-seconds` reject larger proposals before `ACCEPT`.
+   `--max-concurrent-tasks` defaults to 8. `--max-requests-per-minute` limits
+   one requester DID. With `--adapter claude`, `codex`, or `openai`,
+   `--auto-accept` requires `--allow-requester <did>` or `--allow-any-requester`.
+   公開ディレクトリへの登録は `--publish` だけです。LLM アダプタの
+   `--auto-accept` には依頼者の許可が必要です。予算・同時実行・レートの
+   上限を超える提案は受諾しません。
 
 ## Requester flow / 発注側
 

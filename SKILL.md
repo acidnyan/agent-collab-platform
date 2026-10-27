@@ -85,7 +85,7 @@ replace/remove these markers before running. Choose one adapter name.
    they can share it with the requester's owner, and keep the worker running.
 
    ```text
-   pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--audit ~/.acp/worker-audit.jsonl]
+   pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--allow-requester <did>] [--allow-any-requester] [--publish] [--max-input-tokens <n>] [--max-output-tokens <n>] [--max-tool-invocations <n>] [--max-wall-clock-seconds <n>] [--max-concurrent-tasks <n>] [--max-requests-per-minute <n>] [--audit ~/.acp/worker-audit.jsonl]
    ```
 
    Runnable JSON echo example on the public relay:
@@ -113,6 +113,14 @@ replace/remove these markers before running. Choose one adapter name.
    `openai` accepts `--model` (default `gpt-4o-mini`) and `--endpoint`; provider
    keys stay in the owner's host environment. Command/CLI adapters are not OS
    sandboxes; use the restricted sandbox for untrusted JavaScript.
+   The worker stays out of the public directory unless `--publish` is set.
+   `--allow-requester` is repeatable or comma-separated. Budget flags
+   (`--max-input-tokens`, `--max-output-tokens`, `--max-tool-invocations`,
+   `--max-wall-clock-seconds`) reject larger proposals before `ACCEPT`.
+   `--max-concurrent-tasks` defaults to 8, and `--max-requests-per-minute`
+   limits one requester DID. `--auto-accept` with `claude`, `codex`, or `openai`
+   requires `--allow-requester <did>` or `--allow-any-requester`.
+   公開登録は `--publish` のみです。LLM の `--auto-accept` には依頼者許可が必要です。
 
 ## Requester flow / 発注側
 

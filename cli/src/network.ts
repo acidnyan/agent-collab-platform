@@ -9,7 +9,7 @@ import {
   PolicyAutoApprovalProvider,
   InteractiveCliApprovalProvider,
 } from '@acp/runtime';
-import type { AgentAdapter, ApprovalProvider } from '@acp/runtime';
+import type { AgentAdapter, ApprovalProvider, WorkerAcceptancePolicy } from '@acp/runtime';
 import {
   CommandAgentAdapter,
   ClaudeCodeAdapter,
@@ -17,13 +17,24 @@ import {
   OpenAICompatibleAdapter,
   SandboxAgentAdapter,
 } from '@acp/adapters';
+const REPEATABLE = new Set(['--allow-requester']);
+const LLM_ADAPTERS = new Set(['claude', 'codex', 'openai']);
 function flags(args: string[]): Map<string, string | true> {
   const out = new Map<string, string | true>();
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!arg.startsWith('--')) throw new Error('Unexpected argument: ' + arg);
+    const next = args[i + 1];
+    const value = next && !next.startsWith('--') ? args[++i] : true;
+    if (REPEATABLE.has(arg)) {
+      if (typeof value !== 'string' || value.trim() === '')
+        throw new Error('Missing --allow-requester');
+      const previous = out.get(arg);
+      out.set(arg, (typeof previous === 'string' && previous ? previous + ',' : '') + value);
+      continue;
+    }
     if (out.has(arg)) throw new Error('Duplicate option: ' + arg);
-    out.set(arg, args[i + 1] && !args[i + 1].startsWith('--') ? args[++i] : true);
+    out.set(arg, value);
   }
   return out;
 }
@@ -32,8 +43,62 @@ function text(f: Map<string, string | true>, name: string, fallback?: string): s
   if (typeof value !== 'string') throw new Error('Missing --' + name);
   return value;
 }
-function approval(key: KeyPair, automatic: boolean): ApprovalProvider {
-  return automatic ? new PolicyAutoApprovalProvider(key) : new InteractiveCliApprovalProvider(key);
+function approval(
+  key: KeyPair,
+  automatic: boolean,
+  acceptance?: WorkerAcceptancePolicy,
+): ApprovalProvider {
+  return automatic
+    ? new PolicyAutoApprovalProvider(key, undefined, { acceptance })
+    : new InteractiveCliApprovalProvider(key);
+}
+function optionalCount(parsed: Map<string, string | true>, name: string): number | undefined {
+  if (!parsed.has('--' + name)) return undefined;
+  const raw = text(parsed, name);
+  if (!/^[1-9]\d*$/.test(raw))
+    throw new Error('INVALID_' + name.toUpperCase().replaceAll('-', '_'));
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value))
+    throw new Error('INVALID_' + name.toUpperCase().replaceAll('-', '_'));
+  return value;
+}
+function allowRequesterDids(parsed: Map<string, string | true>): string[] {
+  const raw = parsed.get('--allow-requester');
+  if (raw === undefined) return [];
+  if (typeof raw !== 'string') throw new Error('Missing --allow-requester');
+  const dids = raw
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (dids.length === 0) throw new Error('Missing --allow-requester');
+  return dids;
+}
+function workerAcceptance(parsed: Map<string, string | true>): WorkerAcceptancePolicy {
+  return {
+    allowedRequesterDids: allowRequesterDids(parsed),
+    allowAnyRequester: parsed.has('--allow-any-requester'),
+    maxInputTokens: optionalCount(parsed, 'max-input-tokens'),
+    maxOutputTokens: optionalCount(parsed, 'max-output-tokens'),
+    maxToolInvocations: optionalCount(parsed, 'max-tool-invocations'),
+    maxWallClockSeconds: optionalCount(parsed, 'max-wall-clock-seconds'),
+    maxConcurrentTasks: optionalCount(parsed, 'max-concurrent-tasks'),
+    maxTasksPerRequesterPerMinute: optionalCount(parsed, 'max-requests-per-minute'),
+    publishToRegistry: parsed.has('--publish'),
+  };
+}
+function assertLlmAutoAccept(
+  adapter: string,
+  automatic: boolean,
+  acceptance: WorkerAcceptancePolicy,
+): void {
+  if (!automatic || !LLM_ADAPTERS.has(adapter)) return;
+  if (acceptance.allowAnyRequester || (acceptance.allowedRequesterDids?.length ?? 0) > 0) return;
+  throw new Error(
+    'LLM_AUTO_ACCEPT_REQUIRES_ALLOWLIST: --auto-accept with the ' +
+      adapter +
+      ' adapter can spend the worker owner API key. Pass --allow-requester <did> ' +
+      '(repeatable or comma-separated) or --allow-any-requester.',
+  );
 }
 export async function networkCommand(command: string, args: string[]): Promise<void> {
   const sub = ['relay', 'worker', 'invite'].includes(command) ? args.shift() : undefined;
@@ -80,8 +145,11 @@ export async function networkCommand(command: string, args: string[]): Promise<v
   }
   const automatic = ['yes', 'auto-accept', 'auto-approve'].some((name) => f.has('--' + name));
   if (command === 'worker') {
+    const adapterName = text(f, 'adapter', 'sandbox');
+    const acceptance = workerAcceptance(f);
+    assertLlmAutoAccept(adapterName, automatic, acceptance);
     let adapter: AgentAdapter;
-    switch (text(f, 'adapter', 'sandbox')) {
+    switch (adapterName) {
       case 'command':
         adapter = new CommandAgentAdapter({ command: text(f, 'cmd') });
         break;
@@ -109,11 +177,12 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       relayUrl: text(f, 'relay'),
       adapter,
       name: text(f, 'name', adapter.name),
-      approvalProvider: approval(key, automatic),
+      approvalProvider: approval(key, automatic, acceptance),
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
       onEvent: (event, taskId) => console.error(JSON.stringify({ event, taskId })),
+      ...acceptance,
     });
-    await worker.register();
+    if (acceptance.publishToRegistry) await worker.register();
     console.log(worker.invite());
     const stop = () => worker.stop();
     process.once('SIGINT', stop);

@@ -1500,6 +1500,7 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
       agentDid: agent.did,
       relay,
       timeoutMs: 1500,
+      publishToRegistry: true,
       approvalProvider: new PolicyAutoApprovalProvider(key),
       adapter: {
         id: 'alias',
@@ -1574,6 +1575,7 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
       agentDid: agent.did,
       relay,
       timeoutMs: 5000,
+      publishToRegistry: true,
       approvalProvider: new PolicyAutoApprovalProvider(key),
       adapter: {
         id: 'alias',
@@ -1623,6 +1625,7 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
       agentDid: agent.did,
       relay,
       timeoutMs: 5000,
+      publishToRegistry: true,
       approvalProvider: new PolicyAutoApprovalProvider(key),
       adapter: {
         id: 'alias',
@@ -1686,6 +1689,7 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
       agentDid: agent.did,
       relay,
       timeoutMs: 5000,
+      publishToRegistry: true,
       approvalProvider: new PolicyAutoApprovalProvider(key),
       adapter: {
         id: 'alias',
@@ -1698,6 +1702,7 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
       owner: other,
       relay,
       timeoutMs: 5000,
+      publishToRegistry: true,
       approvalProvider: new PolicyAutoApprovalProvider(other),
       adapter: {
         id: 'second',
