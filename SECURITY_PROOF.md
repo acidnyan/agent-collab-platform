@@ -2,6 +2,8 @@
 
 **English** | [日本語 (SECURITY_PROOF.ja.md)](./SECURITY_PROOF.ja.md)
 
+> **Scope note (Adversarial Security Test Suite, not a formal proof):** Each "Proof" section in this document maps a concrete threat class to its enforcement mechanism in the reference implementation and an executable adversarial regression test in `conformance/security-proofs.test.ts` (plus the P0–P2 conformance tests). Those cases are empirical security and red-team regression tests executed in CI by `pnpm test:security-proof`. They are not machine-checked formal or mathematical proofs (for example TLA+, Coq, Lean, or symbolic protocol verification).
+
 Skeptical engineers can rerun every proof below with:
 
 ```sh

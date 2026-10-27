@@ -39,6 +39,14 @@ key was derived with header-only info, or whose ephemeral public key or recipien
 key context was altered, is rejected with `ENVELOPE_DECRYPTION_FAILED`. An
 encrypted session still settles with a `VALID` audit bundle.
 
+`p2-14-security-proof-scope-notice.test.ts` checks that `SECURITY_PROOF.md` and
+`SECURITY_PROOF.ja.md` keep their language-switcher links and, within the first
+30 lines, state that each "Proof" section maps a threat class to an enforcement
+mechanism and an adversarial regression in `conformance/security-proofs.test.ts`
+(plus the P0–P2 conformance tests). The notice must say `pnpm test:security-proof`
+is an empirical red-team conformance suite, not a machine-checked formal or
+mathematical proof such as TLA+, Coq, Lean, or symbolic protocol verification.
+
 `p2-13-sandbox-boundary-accuracy.test.ts` checks that `detectNodePermissionFlag`
 pairs `--permission` (Node.js >= 22.13 and Node.js 23+) or `--experimental-permission`
 (earlier Node.js 20 and 22) with `--allow-fs-read` and `--allow-fs-write`.
