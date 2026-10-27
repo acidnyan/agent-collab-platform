@@ -134,6 +134,32 @@ Command と CLI アダプタは、オーナーが設定した実行ファイル�
 
 セッションのペイロードは、一時的な X25519、HKDF-SHA256、AES-256-GCM で暗号化し、ヘッダを暗号文に束縛します。転送には HTTPS を使います。中継器はオーナーの鍵を持たず、仕事を認可できず、タスク入力も CapabilityToken も結果も読めません。経路のメタデータの観測と、配送の拒否はできます。詳細は [セキュリティモデル](docs/security-model.md) と [SECURITY_PROOF.ja.md](SECURITY_PROOF.ja.md) を見てください。
 
+## MCP、進捗、失効、クォーラム
+
+```sh
+pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agent-collab.workers.dev
+```
+
+`acp mcp-server` は、依存ライブラリを増やさない JSON-RPC 2.0 の MCP サーバーです。標準入力に、改行区切り JSON と `Content-Length` フレームの両方を受けます。Claude Code、Cursor、Codex、Grok Bot から次のツールを呼べます。
+
+| ツール                     | 戻り値                                                                 |
+| -------------------------- | ---------------------------------------------------------------------- |
+| `acp_delegate_task`        | 検証済み成果物、`taskId`、状態、監査の要約                             |
+| `acp_delegate_multi`       | 複数ワーカーへの `race` または `quorum` 委任                           |
+| `acp_verify_audit_bundle`  | `AuditBundle` の暗号検証レポート                                       |
+| `acp_create_invite`        | 署名済み `acp-invite` トークン                                         |
+| `acp_revoke_token`         | 署名済み `RevocationNotice`                                            |
+
+同じ実装が `@acp/runtime` の `AcpMcpServer` です。サーバー鍵は、ツールが行う依頼側の承認に署名します。
+
+ワーカーは実行中に `PROGRESS`（`percent`、`step`、`message`、途中のトークン数やツール回数）を送れます。ほかのセッション封筒と同じ暗号と相互署名の監査に入ります。`delegate(request, { onProgress })` は、`DELIVER` の前に復号した更新を受け取ります。申告された使用量は `QuotaMeter` に計上されます。
+
+`RevocationRegistry` は Ed25519 の `RevocationNotice`（RFC 8785 JCS）を検査します。ワーカーは失効した招待を `ACCEPT` の前に拒否します。`CapabilityGuard` は失効した能力を、ツール実行の前に `TOKEN_REVOKED` で拒否します。`issuerDid` 以外の署名は無効です。
+
+`delegate` の `AbortSignal` は、タスクが `ACCEPTED` または `IN_PROGRESS` のとき、署名され暗号化された `CANCEL` を送ります。ワーカーはタスクを止め、サンドボックスへ `SIGTERM` のあと `SIGKILL` を送り、`CANCELLED` の監査ログを封印します。
+
+`delegateMulti({ mode: 'race' })` は、検証を通過した最初の成果物を採用し、残りを取り消します。`mode: 'quorum'` は、`quorumSize` 人（既定は `floor(n/2)+1`）が同じ JCS SHA-256 の出力ダイジェストを返した時点で確定し、残りを取り消します。合意が不可能なら `QUORUM_NOT_REACHED` で拒否し、検証済みの受領は残します。
+
 HTTP の受信、SSE ストリーム、WebSocket の受信と購読には、受信者が新しく署名した `RelayAuth` トークンが必要です。`WorkerNode`、`RequesterClient`、CLI は自動で署名します。トランスポートを直接使うときは、受信者の鍵を `new HttpRelayClient(url, key)`、`new SseRelayClient(url, fetch, key)`、`new WebSocketRelayClient(wsUrl, key)` に渡します。HTTP / SSE は第3引数に非同期のトークン生成関数も受け付け、WebSocket は第2引数で受け付けます。生の HTTP では `createRelayAuthToken(key, { action })` を `Authorization: Bearer <token>`、`x-acp-relay-auth`、または `auth` クエリに載せて送れます。操作に合わせて `receive`、`stream`、`subscribe` を使います。トークンは時計のずれ5分で期限切れになり、ノンスは境界付きの再生キャッシュに残っているあいだ一度だけ使えます。`InMemoryRelay.receive(did)` は既定ではトークンなしで使えます。そこでも要求するときは `{ requireAuth: true }` で構築します。
 
 招待の接続先は、メタデータアドレスと解釈できないアドレスを常に拒否します。`parseAndVerifyInviteToken(uri, Date.now(), { allowPrivateRelay: false })` と `RequesterClient` の `allowPrivateRelay: false` は、プライベートアドレスとループバックも拒否します。ローカル中継器は既定では有効です。

@@ -17,6 +17,7 @@ import type {
   ContractEvent,
   Json,
   SignedEnvelope,
+  RevocationList,
 } from '@acp/core';
 import { runContainerOrSubprocessSandbox } from '@acp/sandbox';
 import { ApprovalGate } from './policy.js';
@@ -27,7 +28,7 @@ import { EnvelopeInbox } from './inbox.js';
 import { VerificationEngine } from './verifier.js';
 export class OwnerGateway {
   effectiveIsolationLevel = 'subprocess_restricted';
-  readonly capabilities = new CapabilityGuard();
+  readonly capabilities: CapabilityGuard;
   readonly inbox: EnvelopeInbox;
   readonly machine: ContractMachine;
   readonly approvals: ApprovalGate;
@@ -36,6 +37,7 @@ export class OwnerGateway {
     readonly owner: KeyPair,
     readonly contract: TaskContract,
     policy: OwnerPolicy,
+    revocation?: RevocationList,
   ) {
     if (
       ![contract.manifest.requester.ownerDid, contract.manifest.worker?.ownerDid].includes(
@@ -51,6 +53,7 @@ export class OwnerGateway {
       contract.manifest.taskId,
     );
     this.machine = new ContractMachine(contract);
+    this.capabilities = new CapabilityGuard(revocation);
     this.approvals = new ApprovalGate(owner.did, policy);
     this.quota = new QuotaMeter(contract.manifest.taskId, contract.manifest.budget, owner.did);
   }

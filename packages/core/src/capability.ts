@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { canonicalize, digest, signPayload, verifySigned } from './crypto.js';
 import { validateSchema, createAjv, assertSynchronousSchema } from './schema.js';
+import type { RevocationList } from './revocation.js';
 import type { Capability, CapabilityToken, KeyPair, Schema } from './types.js';
 export function violation(detail: string): never {
   throw new Error('CAPABILITY_VIOLATION: ' + detail);
@@ -133,6 +134,7 @@ export function verifyCapabilityChain(
 export class CapabilityGuard {
   private counts = new Map<string, number>();
   private revoked = new Set<string>();
+  constructor(private readonly registry?: RevocationList) {}
   revokeTask(taskId: string): void {
     this.revoked.add(taskId);
   }
@@ -143,6 +145,15 @@ export class CapabilityGuard {
     args: Record<string, unknown>,
     resource: string,
   ): void {
+    if (this.registry) {
+      for (const token of chain) {
+        if (
+          this.registry.isRevoked('capability', token.payload.id) ||
+          this.registry.isRevoked('capability', digest(token))
+        )
+          throw new Error('TOKEN_REVOKED');
+      }
+    }
     if (this.revoked.has(context.taskId)) violation('revoked task');
     const leaf = verifyCapabilityChain(chain, context);
     if (

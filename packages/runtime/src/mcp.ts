@@ -75,9 +75,14 @@ export class MCPProxy {
       this.options.onAudit?.('TOOL_ALLOWED', { name, resultDigest: digest(result) });
       return result;
     } catch (e) {
+      const reason = String(e);
       this.options.onAudit?.(
-        String(e).includes('BUDGET') ? 'BUDGET_EXCEEDED' : 'CAPABILITY_VIOLATION',
-        { name, reason: String(e) },
+        reason.includes('TOKEN_REVOKED')
+          ? 'TOKEN_REVOKED'
+          : reason.includes('BUDGET')
+            ? 'BUDGET_EXCEEDED'
+            : 'CAPABILITY_VIOLATION',
+        { name, reason },
       );
       throw e;
     }

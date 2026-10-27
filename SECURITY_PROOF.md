@@ -89,6 +89,26 @@ Threat class: a curious or compromised relay operator reads task inputs, `Capabi
 
 The outer Ed25519 signature still covers the ciphertext, so the relay checks envelope shape without a decryption key. Plaintext envelopes still open, which keeps older callers working. Routing metadata remains visible.
 
+## Proof 10 — Token revocation and live cancellation
+
+Threat class: a stolen invite or capability is presented after the issuer revokes it; a third party forges a `RevocationNotice`; a requester must stop a running sandbox without leaving an unsigned hole in the audit log.
+
+| Threat class                                      | Architectural control                                                                                                                                                                      | Adversarial test                                                                                          |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| Revoked invite presented at `PROPOSE`             | `WorkerNode` calls `RevocationRegistry.assertNotRevoked` on the invite URI and its JCS digest before `ACCEPT`.                                                                            | `Proof 10: token revocation and live cancellation` → revoked invites                                     |
+| Revoked capability presented to a tool            | `CapabilityGuard.authorize` throws `TOKEN_REVOKED` before `MCPProxy` calls the backend.                                                                                                   | same proof → revoked capabilities                                                                         |
+| `RevocationNotice` signed by a non-issuer         | `verifyRevocationNotice` requires the Ed25519 signer to be `issuerDid`. `revoke(notice, expectedIssuer)` rejects a mismatch with `INVALID_REVOCATION`.                                  | same proof → forged notice                                                                                |
+| Requester aborts a running sandbox                | `CANCEL` is signed, encrypted, and countersigned. The worker aborts the task and signals the child `SIGTERM`, then `SIGKILL`. The sealed log contains `CANCEL` and verifies as `VALID`. | same proof → cancels a running sandbox                                                                   |
+
+## Proof 11 — Encrypted progress and Byzantine quorum
+
+Threat class: a relay reads a `PROGRESS` message; a compromised worker returns a verified but poisoned deliverable and tries to become the result.
+
+| Threat class                                      | Architectural control                                                                                                                                                          | Adversarial test                                                                                          |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| Relay reads a progress frame                      | `PROGRESS` uses `SessionWire` payload encryption. The event type stays visible. The message does not appear in the serialized envelope.                                       | `Proof 11: encrypted progress and Byzantine quorum` → keeps PROGRESS plaintext off the relay             |
+| One worker returns a different verified output    | `delegateMulti({ mode: 'quorum' })` groups outputs by RFC 8785 JCS SHA-256. The matching honest digest wins. Every verified receipt, including the minority, is retained.    | same proof → outvotes a poisoned worker                                                                   |
+
 ## Local verification
 
 From a built checkout (Node.js 22, pnpm 10):

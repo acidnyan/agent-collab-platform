@@ -23,6 +23,7 @@ import {
   schemaNarrows,
   digest,
   openEnvelope,
+  inviteRevocationId,
 } from '@acp/core';
 import type {
   Json,
@@ -36,11 +37,17 @@ import type {
   Transition,
   CapabilityToken,
   BudgetSpec,
+  RevocationList,
 } from '@acp/core';
 import type { AuditBundle } from '@acp/ledger';
 import { HttpRelayClient } from '@acp/relay';
 import type { RelayTransport } from '@acp/relay';
-import type { AgentAdapter, AgentTaskContext } from './adapter.js';
+import type {
+  AgentAdapter,
+  AgentTaskContext,
+  ProgressPayload,
+  ProtocolEnvelope,
+} from './adapter.js';
 import { InteractiveCliApprovalProvider } from './approval-providers.js';
 import type { ApprovalProvider } from './approval-providers.js';
 import { OwnerGateway } from './gateway.js';
@@ -51,8 +58,8 @@ import type { Delivery, VerificationResult } from './verifier.js';
 import { asJson, receiveRelay, SessionWire } from './session-audit.js';
 export interface SessionResult {
   taskId: string;
-  state: 'SETTLED';
-  deliverable: Json;
+  state: 'SETTLED' | 'CANCELLED';
+  deliverable: Json | null;
   bundle: AuditBundle;
   verification?: VerificationResult;
 }
@@ -195,12 +202,14 @@ export interface WorkerNodeOptions {
   timeoutMs?: number;
   tools?: Record<string, ToolDefinition>;
   toolBackend?: ToolBackend;
+  revocation?: RevocationList;
   onEvent?: (event: string, taskId: string) => void;
 }
 interface Proposal {
   proposal: Signed<TaskManifest>;
   input: Json;
   capabilityChains: CapabilityToken[][];
+  inviteToken?: string;
 }
 export class WorkerNode {
   readonly relay: RelayTransport;
@@ -303,8 +312,15 @@ export class WorkerNode {
   /** Keep reading the shared inbox until a single task finishes, without dropping its peer's mail. */
   private async pumpUntil(job: Promise<void>, idleSignal: AbortSignal): Promise<void> {
     const wait = new AbortController();
+    let failure: unknown;
+    const finished = job.then(
+      () => undefined,
+      (error: unknown) => {
+        failure = error;
+      },
+    );
     try {
-      while (!idleSignal.aborted) {
+      while (!idleSignal.aborted && failure === undefined) {
         const incoming = receiveRelay(
           this.relay,
           this.options.owner.did,
@@ -312,17 +328,19 @@ export class WorkerNode {
         ).then(
           (envelope) => envelope,
           (error: unknown) => {
-            if (idleSignal.aborted || wait.signal.aborted) return undefined;
-            throw error;
+            if (!idleSignal.aborted && !wait.signal.aborted) failure = error;
+            return undefined;
           },
         );
-        const envelope = await Promise.race([job.then(() => undefined), incoming]);
+        const envelope = await Promise.race([finished, incoming]);
+        if (failure !== undefined) break;
         if (!envelope) return;
         if (!this.deliver(envelope)) this.options.onEvent?.('REJECTED', '');
       }
     } finally {
       wait.abort();
     }
+    if (failure !== undefined) throw failure;
   }
   async runOnce(signal?: AbortSignal): Promise<SessionResult> {
     const idleSignal = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
@@ -374,9 +392,12 @@ export class WorkerNode {
       activeSignal,
       auditPath,
     );
+    const cancelController = new AbortController();
+    wire.earlyCancel = () => cancelController.abort('CANCELLED');
     let gateway: OwnerGateway | undefined, workspace: string | undefined;
     try {
       await wire.receiveEvent('PROPOSE', first);
+      this.assertInviteActive(data);
       const contract = createContract(m, data.proposal, this.options.owner);
       const approval = await this.approvalProvider.approve({
         taskId: m.taskId,
@@ -385,7 +406,7 @@ export class WorkerNode {
         details: { manifest: m, capabilities: data.capabilityChains },
         signal: activeSignal,
       });
-      gateway = new OwnerGateway(this.options.owner, contract, policy);
+      gateway = new OwnerGateway(this.options.owner, contract, policy, this.options.revocation);
       const accepted = gateway.accept(approval);
       await wire.sendEvent('ACCEPT', { contract, transition: accepted, approval });
       this.options.onEvent?.('ACCEPT', m.taskId);
@@ -447,7 +468,11 @@ export class WorkerNode {
         });
       });
       workspace = await mkdtemp(join(tmpdir(), 'acp-adapter-'));
-      const executionSignal = AbortSignal.any([activeSignal, gateway.quota.controller.signal]);
+      const executionSignal = AbortSignal.any([
+        activeSignal,
+        gateway.quota.controller.signal,
+        cancelController.signal,
+      ]);
       let effectiveIsolationLevel = 'host_adapter';
       const context: AgentTaskContext = {
         taskId: m.taskId,
@@ -456,6 +481,30 @@ export class WorkerNode {
         workspaceDir: workspace,
         signal: executionSignal,
         reportUsage: (delta) => gateway!.quota.recordMetrics(delta),
+        reportProgress: async (progress) => {
+          if (!progress || typeof progress.step !== 'string' || progress.step.length === 0)
+            throw new Error('INVALID_PROGRESS');
+          if (progress.percent !== undefined && typeof progress.percent !== 'number')
+            throw new Error('INVALID_PROGRESS');
+          if (progress.metrics) {
+            const delta: {
+              inputTokens?: number;
+              outputTokens?: number;
+              toolCalls?: number;
+              wallTimeMs?: number;
+            } = {};
+            if (progress.metrics.inputTokens !== undefined)
+              delta.inputTokens = progress.metrics.inputTokens;
+            if (progress.metrics.outputTokens !== undefined)
+              delta.outputTokens = progress.metrics.outputTokens;
+            if (progress.metrics.toolInvocations !== undefined)
+              delta.toolCalls = progress.metrics.toolInvocations;
+            if (progress.metrics.elapsedMs !== undefined)
+              delta.wallTimeMs = progress.metrics.elapsedMs;
+            if (Object.keys(delta).length > 0) gateway!.quota.recordMetrics(delta);
+          }
+          await wire.sendEvent('PROGRESS', progress);
+        },
         reportIsolation: (level) => {
           effectiveIsolationLevel = level;
         },
@@ -504,6 +553,25 @@ export class WorkerNode {
       this.options.onEvent?.('SETTLED', m.taskId);
       return { taskId: m.taskId, state: 'SETTLED', deliverable: output, bundle };
     } catch (e) {
+      if (
+        gateway &&
+        (wire.cancelHandled || cancelController.signal.aborted) &&
+        ['ACCEPTED', 'IN_PROGRESS', 'CANCELLED'].includes(gateway.machine.state)
+      ) {
+        try {
+          await wire.waitUntilCancelHandled();
+          const body = wire.lastCancel?.payload.payload as unknown as CancelPayload | undefined;
+          if (!body || body.cancelledBy !== m.requester.ownerDid || !body.transition)
+            throw new Error('INVALID_CANCEL');
+          if (gateway.machine.state !== 'CANCELLED') gateway.machine.apply(body.transition);
+          const bundle = await wire.finishWorker();
+          this.options.onEvent?.('CANCELLED', m.taskId);
+          return { taskId: m.taskId, state: 'CANCELLED', deliverable: null, bundle };
+        } catch (inner) {
+          await wire.rawSend('ERROR', { code: safeError(inner) }).catch(() => {});
+          throw inner;
+        }
+      }
       await wire.rawSend('ERROR', { code: safeError(e) }).catch(() => {});
       throw e;
     } finally {
@@ -511,9 +579,22 @@ export class WorkerNode {
       if (workspace) await rm(workspace, { recursive: true, force: true });
     }
   }
+  private assertInviteActive(data: Proposal): void {
+    const registry = this.options.revocation;
+    const token = data.inviteToken;
+    if (!registry || typeof token !== 'string' || token.length === 0) return;
+    registry.assertNotRevoked('invite', token);
+    registry.assertNotRevoked('invite', inviteRevocationId(token));
+  }
+}
+interface CancelPayload {
+  reason?: string;
+  cancelledBy: string;
+  transition: Signed<Transition>;
 }
 function safeError(e: unknown): string {
   const s = String(e);
+  if (s.includes('TOKEN_REVOKED')) return 'TOKEN_REVOKED';
   return (
     ['BUDGET', 'CAPABILITY', 'APPROVAL', 'HITL', 'INVALID', 'VERIFICATION', 'SCHEMA', 'ABORT'].find(
       (code) => s.includes(code),
@@ -521,6 +602,8 @@ function safeError(e: unknown): string {
   );
 }
 async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  // Attach before throwIfAborted. A quota abort can reject the adapter in the same turn.
+  promise.catch(() => undefined);
   signal.throwIfAborted();
   let listener = () => {};
   try {
@@ -557,6 +640,49 @@ export interface DelegateOptions {
   auditPath?: string;
   signal?: AbortSignal;
   capabilities?: TaskManifest['permissions']['grantedCapabilities'];
+  minimumIsolationLevel?: string;
+  onProgress?: (
+    progress: ProgressPayload,
+    envelope: ProtocolEnvelope<ProgressPayload>,
+  ) => void | Promise<void>;
+}
+export interface DelegateWorkerTarget {
+  workerDid: string;
+  inviteToken?: string;
+  relayUrl?: string;
+}
+export interface DelegateReceipt {
+  workerDid: string;
+  taskId: string;
+  outputDigest: string;
+  deliverable: Json;
+  bundle: AuditBundle;
+  accepted: boolean;
+}
+export interface DelegateMultiResult {
+  mode: 'race' | 'quorum';
+  status: 'SETTLED';
+  deliverable: Json;
+  outputDigest: string;
+  taskIds: string[];
+  winners: Array<{ workerDid: string; taskId: string; outputDigest: string }>;
+  receipts: DelegateReceipt[];
+  cancelled: string[];
+}
+export interface DelegateMultiOptions {
+  workers: DelegateWorkerTarget[];
+  mode: 'race' | 'quorum';
+  quorumSize?: number;
+  title: string;
+  description: string;
+  input: Json;
+  outputSchema?: Schema;
+  budget?: Partial<BudgetSpec>;
+  capabilities?: DelegateOptions['capabilities'];
+  minimumIsolationLevel?: string;
+  signal?: AbortSignal;
+  onProgress?: DelegateOptions['onProgress'];
+  auditPath?: string;
 }
 export class RequesterClient {
   readonly approvalProvider: ApprovalProvider;
@@ -564,7 +690,11 @@ export class RequesterClient {
     this.approvalProvider =
       options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner);
   }
-  async delegate(options: DelegateOptions): Promise<SessionResult> {
+  async delegate(
+    options: DelegateOptions,
+    hooks?: { onProgress?: DelegateOptions['onProgress'] },
+  ): Promise<SessionResult> {
+    const onProgress = hooks?.onProgress ?? options.onProgress;
     const invite = options.to.startsWith('acp')
       ? parseAndVerifyInviteToken(options.to, Date.now(), {
           allowPrivateRelay: this.options.allowPrivateRelay,
@@ -606,12 +736,21 @@ export class RequesterClient {
       Date.parse(manifest.deadline) <= Date.now()
     )
       throw new Error('INVALID_MANIFEST_PARTIES_OR_DEADLINE');
+    if (options.minimumIsolationLevel) {
+      manifest.sandboxPolicy = {
+        ...manifest.sandboxPolicy,
+        isolationLevel: options.minimumIsolationLevel,
+      };
+      if (options.minimumIsolationLevel === 'oci_container')
+        manifest.verification = { ...manifest.verification, requireExecutionAttestation: true };
+    }
     if (!validateOutput(manifest.io.inputSchema, options.input)) throw new Error('INPUT_SCHEMA');
     const auditPath = options.auditPath ?? this.options.auditPath;
     freshAudit(auditPath);
+    const bridge = new AbortController();
     const signal = sessionSignal(
       Math.min(this.options.timeoutMs ?? 120000, Date.parse(manifest.deadline) - Date.now()),
-      options.signal,
+      bridge.signal,
     );
     const mailbox = inbox.attach(manifest.taskId);
     const wire = new SessionWire(
@@ -623,7 +762,43 @@ export class RequesterClient {
       signal,
       auditPath,
     );
+    if (onProgress) {
+      wire.onProgress = async (progress, envelope) => {
+        await onProgress(progress, {
+          taskId: envelope.payload.taskId,
+          seq: envelope.payload.seq,
+          eventType: envelope.payload.eventType,
+          senderDid: envelope.payload.senderDid,
+          recipientDid: envelope.payload.recipientDid,
+          payload: progress,
+        });
+      };
+    }
     let gateway: OwnerGateway | undefined;
+    let deferredCancel = false;
+    let cancelStarted = false;
+    const startCancel = () => {
+      if (cancelStarted || !gateway) return;
+      const state = gateway.machine.state;
+      if (state !== 'ACCEPTED' && state !== 'IN_PROGRESS') return;
+      cancelStarted = true;
+      const transition = gateway.transition('CANCEL');
+      void wire
+        .cancelSession({
+          reason: String(options.signal?.reason ?? 'cancelled'),
+          cancelledBy: owner.did,
+          transition,
+        })
+        .catch(() => undefined);
+    };
+    const onUserAbort = () => {
+      const state = gateway?.machine.state;
+      if (state === 'IN_PROGRESS') startCancel();
+      else if (state === 'ACCEPTED') deferredCancel = true;
+      else bridge.abort(options.signal?.reason);
+    };
+    options.signal?.addEventListener('abort', onUserAbort);
+    if (options.signal?.aborted) onUserAbort();
     try {
       const capabilityChains = manifest.permissions.grantedCapabilities.map((g) => {
         const root = createCapability(
@@ -653,6 +828,7 @@ export class RequesterClient {
         proposal: signPayload(manifest, owner),
         input: options.input,
         capabilityChains,
+        ...(invite ? { inviteToken: options.to } : {}),
       });
       const accept = (await wire.receiveEvent('ACCEPT')).payload.payload as unknown as {
         contract: TaskContract;
@@ -676,6 +852,7 @@ export class RequesterClient {
       gateway.machine.apply(
         (await wire.receiveEvent('START')).payload.payload as unknown as Signed<Transition>,
       );
+      if (options.signal?.aborted || deferredCancel) startCancel();
       const envelope = await wire.receiveEvent('DELIVER'),
         data = envelope.payload.payload as unknown as Delivery & { transition: Signed<Transition> };
       gateway.machine.apply(data.transition);
@@ -706,12 +883,144 @@ export class RequesterClient {
         verification: result,
       };
     } catch (e) {
+      if (cancelStarted) {
+        try {
+          await wire.cancelSession();
+          const bundle = await wire.finishRequester();
+          throw Object.assign(new Error('CANCELLED'), { bundle });
+        } catch (inner) {
+          if (inner instanceof Error && inner.message === 'CANCELLED') throw inner;
+          await wire.rawSend('ERROR', { code: safeError(inner) }).catch(() => {});
+          throw inner;
+        }
+      }
       await wire.rawSend('ERROR', { code: safeError(e) }).catch(() => {});
       throw e;
     } finally {
+      options.signal?.removeEventListener('abort', onUserAbort);
       inbox.detach(manifest.taskId);
       gateway?.close();
     }
+  }
+  async delegateMulti(options: DelegateMultiOptions): Promise<DelegateMultiResult> {
+    if (!Array.isArray(options.workers) || options.workers.length === 0)
+      throw new Error('WORKERS_REQUIRED');
+    if (options.mode !== 'race' && options.mode !== 'quorum')
+      throw new Error('INVALID_DELEGATION_MODE');
+    const count = options.workers.length;
+    const quorumSize = options.quorumSize ?? Math.floor(count / 2) + 1;
+    if (
+      options.mode === 'quorum' &&
+      (!Number.isInteger(quorumSize) || quorumSize < 1 || quorumSize > count)
+    )
+      throw new Error('INVALID_QUORUM_SIZE');
+    const controllers = options.workers.map(() => new AbortController());
+    const finished = options.workers.map(() => false);
+    const receipts: DelegateReceipt[] = [];
+    let failures = 0;
+    let winnerDigest: string | undefined;
+    const abortUnfinished = (reason: string) => {
+      controllers.forEach((controller, index) => {
+        if (!finished[index]) controller.abort(reason);
+      });
+    };
+    const jobs = options.workers.map(async (worker, index) => {
+      const signal = options.signal
+        ? AbortSignal.any([options.signal, controllers[index].signal])
+        : controllers[index].signal;
+      try {
+        const result = await this.delegate({
+          to: worker.inviteToken ?? worker.workerDid,
+          relay: worker.relayUrl ?? this.options.relay,
+          title: options.title,
+          description: options.description,
+          input: options.input,
+          outputSchema: options.outputSchema,
+          budget: options.budget,
+          capabilities: options.capabilities,
+          minimumIsolationLevel: options.minimumIsolationLevel,
+          signal,
+          onProgress: options.onProgress,
+          auditPath: options.auditPath
+            ? options.auditPath.replace(/(\.jsonl)?$/, '.' + index + '.jsonl')
+            : undefined,
+        });
+        finished[index] = true;
+        if (result.state !== 'SETTLED' || result.deliverable === null)
+          throw new Error('VERIFICATION_REJECTED');
+        const outputDigest = digest(result.deliverable);
+        receipts.push({
+          workerDid: worker.workerDid,
+          taskId: result.taskId,
+          outputDigest,
+          deliverable: result.deliverable,
+          bundle: result.bundle,
+          accepted: true,
+        });
+        if (options.mode === 'quorum' && !winnerDigest) {
+          const matches = receipts.filter((receipt) => receipt.outputDigest === outputDigest);
+          if (matches.length >= quorumSize) {
+            winnerDigest = outputDigest;
+            abortUnfinished('QUORUM_REACHED');
+          }
+        }
+        return { index, result, outputDigest };
+      } catch (error) {
+        finished[index] = true;
+        failures += 1;
+        if (options.mode === 'quorum' && !winnerDigest && failures > count - quorumSize)
+          abortUnfinished('QUORUM_UNREACHABLE');
+        throw error;
+      }
+    });
+    if (options.mode === 'race') {
+      let winner: { index: number; result: SessionResult; outputDigest: string };
+      try {
+        winner = await Promise.any(jobs);
+      } catch {
+        throw new Error('RACE_FAILED');
+      }
+      abortUnfinished('RACE_LOST');
+      await Promise.allSettled(jobs);
+      const outputDigest = winner.outputDigest;
+      return {
+        mode: 'race',
+        status: 'SETTLED',
+        deliverable: winner.result.deliverable as Json,
+        outputDigest,
+        taskIds: receipts.map((receipt) => receipt.taskId),
+        winners: [
+          {
+            workerDid: options.workers[winner.index].workerDid,
+            taskId: winner.result.taskId,
+            outputDigest,
+          },
+        ],
+        receipts,
+        cancelled: options.workers
+          .filter((_, index) => index !== winner.index && controllers[index].signal.aborted)
+          .map((worker) => worker.workerDid),
+      };
+    }
+    await Promise.allSettled(jobs);
+    if (!winnerDigest) throw Object.assign(new Error('QUORUM_NOT_REACHED'), { receipts });
+    const winners = receipts.filter((receipt) => receipt.outputDigest === winnerDigest);
+    return {
+      mode: 'quorum',
+      status: 'SETTLED',
+      deliverable: winners[0].deliverable,
+      outputDigest: winnerDigest,
+      taskIds: receipts.map((receipt) => receipt.taskId),
+      winners: winners.map((receipt) => ({
+        workerDid: receipt.workerDid,
+        taskId: receipt.taskId,
+        outputDigest: receipt.outputDigest,
+      })),
+      receipts,
+      cancelled: options.workers
+        .filter((_, index) => controllers[index].signal.aborted)
+        .map((worker) => worker.workerDid),
+    };
   }
 }
 export function buildTaskManifest(options: {

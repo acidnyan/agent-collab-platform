@@ -83,6 +83,26 @@ pnpm test:security-proof
 
 外側の Ed25519 署名は暗号文を覆う。リレーは復号鍵なしで封筒の形を検査できる。平文の封筒も開くことができるので、既存の呼び出し側はそのまま動く。経路のメタデータは見えたままである。
 
+## 証明 10 — トークン失効と実行中の取り消し
+
+脅威: 発行者が失効させたあとに、盗まれた招待や能力が提示される。第三者が `RevocationNotice` を偽造する。依頼者が、監査ログに署名のない穴を残さず、実行中のサンドボックスを止める。
+
+| 脅威クラス | アーキテクチャ上の制御 | 敵対テスト |
+| --- | --- | --- |
+| 失効した招待が `PROPOSE` で提示される | `WorkerNode` は `ACCEPT` の前に、招待 URI とその JCS ダイジェストへ `RevocationRegistry.assertNotRevoked` を呼ぶ。 | `Proof 10: token revocation and live cancellation` の revoked invites |
+| 失効した能力がツールに提示される | `CapabilityGuard.authorize` は、`MCPProxy` がバックエンドを呼ぶ前に `TOKEN_REVOKED` を投げる。 | 同じ証明の revoked capabilities |
+| 発行者以外が署名した `RevocationNotice` | `verifyRevocationNotice` は Ed25519 の署名者が `issuerDid` であることを要求する。`revoke(notice, expectedIssuer)` は不一致を `INVALID_REVOCATION` で拒否する。 | 同じ証明の forged notice |
+| 依頼者が実行中のサンドボックスを中断する | `CANCEL` は署名、暗号化、相互署名される。ワーカーはタスクを中断し、子プロセスへ `SIGTERM` のあと `SIGKILL` を送る。封印されたログは `CANCEL` を含み `VALID` になる。 | 同じ証明の cancels a running sandbox |
+
+## 証明 11 — 暗号化された進捗とビザンチン・クォーラム
+
+脅威: リレーが `PROGRESS` を読む。侵害されたワーカーが、検証は通るが汚染された成果物を返し、それを結果にしようとする。
+
+| 脅威クラス | アーキテクチャ上の制御 | 敵対テスト |
+| --- | --- | --- |
+| リレーが進捗フレームを読む | `PROGRESS` は `SessionWire` のペイロード暗号を使う。イベント種別は見える。本文は直列化した封筒に現れない。 | `Proof 11: encrypted progress and Byzantine quorum` の keeps PROGRESS plaintext off the relay |
+| 1 人のワーカーが別の検証済み出力を返す | `delegateMulti({ mode: 'quorum' })` は RFC 8785 JCS の SHA-256 で出力をまとめる。一致した正直なダイジェストが勝つ。少数派を含む検証済み受領は残る。 | 同じ証明の outvotes a poisoned worker |
+
 ビルド済みのチェックアウト（Node.js 22、pnpm 10）で、リポジトリ直下から次を実行してください。
 
 ```sh

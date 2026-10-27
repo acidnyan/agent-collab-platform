@@ -7,12 +7,33 @@ export interface UsageMetrics {
   toolCalls: number;
   wallTimeMs: number;
 }
+export interface ProgressMetrics {
+  inputTokens?: number;
+  outputTokens?: number;
+  toolInvocations?: number;
+  elapsedMs?: number;
+}
+export interface ProgressPayload {
+  percent?: number;
+  step: string;
+  message?: string;
+  metrics?: ProgressMetrics;
+}
+export interface ProtocolEnvelope<T> {
+  taskId: string;
+  seq: number;
+  eventType: string;
+  senderDid: string;
+  recipientDid: string;
+  payload: T;
+}
 export interface AgentTaskContext {
   taskId: string;
   manifest: TaskManifest;
   input: Json;
   callTool: (tool: string, args: Json) => Promise<Json>;
   reportUsage: (delta: Partial<UsageMetrics>) => void;
+  reportProgress?: (progress: ProgressPayload) => void | Promise<void>;
   signal: AbortSignal;
   workspaceDir: string;
   reportIsolation?: (level: string) => void;

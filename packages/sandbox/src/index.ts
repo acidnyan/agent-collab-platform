@@ -40,6 +40,18 @@ export function sanitizedEnvironment(directory: string): NodeJS.ProcessEnv {
   // provider keys, SSH sockets and inherited PATH never enter the worker.
   return { LANG: 'C.UTF-8', TZ: 'UTC', HOME: directory, TMPDIR: directory };
 }
+/** SIGTERM, then SIGKILL if the child is still alive. `killed` is true after either signal. */
+export function terminateSubprocess(subprocess: {
+  exitCode: number | null;
+  kill: (signal?: NodeJS.Signals) => boolean;
+}): void {
+  if (subprocess.exitCode !== null) return;
+  subprocess.kill('SIGTERM');
+  const timer = setTimeout(() => {
+    if (subprocess.exitCode === null) subprocess.kill('SIGKILL');
+  }, 40);
+  timer.unref?.();
+}
 export async function runSandbox(options: SandboxOptions): Promise<Json> {
   if (
     !Number.isSafeInteger(options.timeoutMs) ||
@@ -94,7 +106,7 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
         done = true;
         clearTimeout(timer);
         options.signal?.removeEventListener('abort', abort);
-        if (subprocess.exitCode === null && !subprocess.killed) subprocess.kill('SIGKILL');
+        terminateSubprocess(subprocess);
         error ? reject(error) : resolve(result ?? null);
       };
       const abort = () => finish(new Error('SANDBOX_HALTED: ' + String(options.signal?.reason)));
@@ -144,7 +156,7 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
     });
   } finally {
     try {
-      if (child && child.exitCode === null && !child.killed) child.kill('SIGKILL');
+      if (child) terminateSubprocess(child);
       // Wait until the child has actually exited, then give Windows a short retry window.
       await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 250))]);
       await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });

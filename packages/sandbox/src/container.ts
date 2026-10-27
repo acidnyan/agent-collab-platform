@@ -6,7 +6,7 @@ import { mkdtemp, writeFile, rm, chown } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Json } from '@acp/core';
-import { runSandbox, sandboxWrapper, sanitizedEnvironment } from './index.js';
+import { runSandbox, sandboxWrapper, sanitizedEnvironment, terminateSubprocess } from './index.js';
 import type { SandboxOptions } from './index.js';
 export type DockerRuntime = 'docker' | 'podman';
 export type RuntimeProbe = (binary: string, args: string[]) => Promise<boolean>;
@@ -151,7 +151,7 @@ export async function runContainerOrSubprocessSandbox(
         done = true;
         clearTimeout(timer);
         options.signal?.removeEventListener('abort', abort);
-        child.kill('SIGKILL');
+        terminateSubprocess(child);
         error ? reject(error) : resolve(value ?? null);
       };
       const abort = () => finish(new Error('SANDBOX_HALTED'));

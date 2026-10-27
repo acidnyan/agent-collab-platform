@@ -131,6 +131,14 @@ stateDiagram-v2
 2. **`DELIVERED` には3点セットが必須**: 成果物マニフェスト（SHA-256 content-addressed）、実行証跡（`ExecutionAttestation`）、リソース消費証明（`UsageReceipt`）が欠けている場合、Requester Gatewayは自動的にスキーマエラーとして弾く。
 3. **終端状態（`SETTLED`）でのCapability即時失効**: タスクが `SETTLED` / `CANCELLED` / `TIMED_OUT` に達した瞬間、その `task_id` に紐づくすべての `CapabilityToken` は有効期限前であってもGatewayの失効リスト（Revocation Set）に登録され無効化される。
 
+### 進捗、取り消し、失効、クォーラム
+
+`PROGRESS` は通常のセッションイベントです。ワーカーは依頼者へ暗号化し、双方が監査項目に相互署名し、申告された途中の使用量は `QuotaMeter` に計上されます。`CANCEL` は `CANCELLED` への署名付き遷移です。ワーカーはタスクの `AbortSignal` を中断し、サンドボックスの子プロセスを `SIGTERM` のあと `SIGKILL` で止めてから、双方のログを封印します。
+
+招待と能力の失効は、タスク単位の `revokeTask` とは別です。`RevocationNotice` は Ed25519 の JCS 声明です。ワーカーは `ACCEPT` の前に招待トークンを検査します。`CapabilityGuard` はツール呼び出しの前に能力 ID とトークンダイジェストを検査し、`TOKEN_REVOKED` を投げます。
+
+`RequesterClient.delegateMulti` はワーカーごとに独立した契約を開きます。`race` は最初に検証を通過した成果物を採用します。`quorum` は検証済み出力を JCS SHA-256 でまとめ、`quorumSize` に達した時点で確定し、実行中のワーカーを取り消します。`acp mcp-server` はこれらの操作を stdio の MCP ツールとして公開します。
+
 ---
 
 ## 4. 異オーナー間の5大安全メカニズム（詳細設計）

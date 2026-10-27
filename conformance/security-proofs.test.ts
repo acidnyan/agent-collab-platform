@@ -5,10 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  createCapability,
   createContract,
   createInviteToken,
   createRelayAuthToken,
+  createRevocationNotice,
   createSignedAgentCard,
+  CapabilityGuard,
+  inviteRevocationId,
+  RevocationRegistry,
+  verifyRevocationNotice,
   decryptEnvelopePayload,
   digest,
   generateKeyPair,
@@ -33,6 +39,7 @@ import type {
   SignedEnvelope,
   TaskManifest,
 } from '../packages/core/src/index.js';
+import { verifyAudit } from '../packages/ledger/src/index.js';
 import { InMemoryRelay, createRelayFetchHandler } from '../packages/relay/src/index.js';
 import {
   ApprovalGate,
@@ -868,6 +875,286 @@ describe('Proof 9: end-to-end payload encryption', () => {
     expect(() =>
       decryptEnvelopePayload(propose!.payload.payload, bob, { ...context, seq: context.seq + 1 }),
     ).toThrow('ENVELOPE_DECRYPTION_FAILED');
+  });
+});
+
+describe('Proof 10: token revocation and live cancellation', () => {
+  it('rejects revoked invites, revoked capabilities, and a forged notice', async () => {
+    const alice = generateKeyPair();
+    const bob = generateKeyPair();
+    const mallory = generateKeyPair();
+    const relay = new InMemoryRelay();
+    const registry = new RevocationRegistry();
+    const worker = new WorkerNode({
+      owner: bob,
+      relay,
+      adapter: {
+        id: 'revoke-echo',
+        name: 'Revoke echo',
+        skills: [],
+        executeTask: async (context) => context.input,
+      },
+      approvalProvider: new PolicyAutoApprovalProvider(bob),
+      revocation: registry,
+      timeoutMs: 10000,
+    });
+    const token = worker.invite();
+    const targetId = inviteRevocationId(token);
+    const notice = createRevocationNotice(
+      { targetType: 'invite', targetId, reason: 'compromised' },
+      bob,
+    );
+    registry.revoke(notice);
+    expect(registry.isRevoked('invite', targetId)).toBe(true);
+    const forged = createRevocationNotice(
+      { targetType: 'invite', targetId, reason: 'forged' },
+      mallory,
+    );
+    expect(verifyRevocationNotice(forged, bob.did)).toBe(false);
+    expect(() => registry.revoke(forged, bob.did)).toThrow('INVALID_REVOCATION');
+    const tampered = structuredClone(notice);
+    tampered.signature.signature = forged.signature.signature;
+    expect(verifyRevocationNotice(tampered, bob.did)).toBe(false);
+    expect(() => registry.revoke(tampered)).toThrow('INVALID_REVOCATION');
+    const requester = new RequesterClient({
+      owner: alice,
+      relay,
+      approvalProvider: new PolicyAutoApprovalProvider(alice),
+      timeoutMs: 10000,
+    });
+    const pending = worker.start({ once: true });
+    const [settled, rejected] = await Promise.allSettled([
+      pending,
+      requester.delegate({
+        to: token,
+        title: 'Revoked invite',
+        description: 'Must not run',
+        input: { ok: true },
+      }),
+    ]);
+    worker.stop();
+    expect(rejected.status).toBe('rejected');
+    if (rejected.status === 'rejected') expect(String(rejected.reason)).toContain('TOKEN_REVOKED');
+    expect(settled.status).toBe('rejected');
+    if (settled.status === 'rejected') expect(String(settled.reason)).toContain('TOKEN_REVOKED');
+
+    const now = new Date().toISOString();
+    const capability = createCapability(
+      {
+        audience: bob.did,
+        taskId: 'task_revoke_cap',
+        resource: 'mcp://docs/item',
+        allowedTools: ['echo'],
+        argConstraints: { echo: { type: 'object' } },
+        maxCalls: 2,
+        notBefore: now,
+        expiresAt: new Date(Date.now() + 60000).toISOString(),
+        maxDepth: 0,
+      },
+      alice,
+    );
+    const guard = new CapabilityGuard(registry);
+    registry.revoke(
+      createRevocationNotice(
+        { targetType: 'capability', targetId: capability.payload.id, reason: 'retired' },
+        alice,
+      ),
+    );
+    const context = { rootDid: alice.did, audience: bob.did, taskId: 'task_revoke_cap' };
+    let called = false;
+    expect(() => {
+      guard.authorize([capability], context, 'echo', {}, 'mcp://docs/item');
+      called = true;
+    }).toThrow('TOKEN_REVOKED');
+    expect(called).toBe(false);
+  });
+
+  it('cancels a running sandbox and seals a CANCELLED audit trail', async () => {
+    const alice = generateKeyPair();
+    const bob = generateKeyPair();
+    const relay = new InMemoryRelay();
+    const abort = new AbortController();
+    const worker = new WorkerNode({
+      owner: bob,
+      relay,
+      adapter: new SandboxAgentAdapter('while (true) {}'),
+      approvalProvider: new PolicyAutoApprovalProvider(bob),
+      timeoutMs: 10000,
+      onEvent: (event) => {
+        if (event === 'IN_PROGRESS') setTimeout(() => abort.abort('owner'), 150);
+      },
+    });
+    const requester = new RequesterClient({
+      owner: alice,
+      relay,
+      approvalProvider: new PolicyAutoApprovalProvider(alice),
+      timeoutMs: 10000,
+    });
+    const pending = worker.start({ once: true });
+    const delegation = requester.delegate({
+      to: worker.invite(),
+      title: 'Cancel me',
+      description: 'Loop until cancelled',
+      input: { ok: true },
+      signal: abort.signal,
+      budget: { maxWallClockSeconds: 30 },
+    });
+    const [settled, rejected] = await Promise.allSettled([pending, delegation]);
+    worker.stop();
+    expect(settled.status).toBe('fulfilled');
+    if (settled.status !== 'fulfilled') return;
+    expect(settled.value?.state).toBe('CANCELLED');
+    expect(settled.value?.deliverable).toBeNull();
+    const bundle = settled.value!.bundle;
+    expect(
+      verifyAudit(bundle, {
+        taskId: bundle.checkpoint.actor.payload.taskId,
+        actors: bundle.checkpoint.actor.payload.actors,
+      }).valid,
+    ).toBe(true);
+    expect(bundle.entries.some((entry) => entry.body.eventType === 'CANCEL')).toBe(true);
+    const tampered = structuredClone(bundle);
+    tampered.entries[0].body.eventType = 'TAMPERED';
+    expect(verifyAudit(tampered).valid).toBe(false);
+    expect(rejected.status).toBe('rejected');
+    if (rejected.status === 'rejected') expect(String(rejected.reason)).toContain('CANCELLED');
+  });
+});
+
+describe('Proof 11: encrypted progress and Byzantine quorum', () => {
+  it('keeps PROGRESS plaintext off the relay and delivers it to the requester', async () => {
+    const secret = 'zk-progress-secret-44aa';
+    const alice = generateKeyPair();
+    const bob = generateKeyPair();
+    const traffic: SignedEnvelope[] = [];
+    const relay = new InMemoryRelay();
+    const send = relay.send.bind(relay);
+    relay.send = (envelope) => {
+      send(envelope);
+      traffic.push(structuredClone(envelope));
+    };
+    const worker = new WorkerNode({
+      owner: bob,
+      relay,
+      adapter: {
+        id: 'progress-echo',
+        name: 'Progress echo',
+        skills: [],
+        executeTask: async (context) => {
+          await context.reportProgress?.({
+            step: 'draft',
+            percent: 40,
+            message: secret,
+            metrics: { inputTokens: 3, outputTokens: 1, toolInvocations: 0, elapsedMs: 5 },
+          });
+          return { published: secret, echoed: context.input };
+        },
+      },
+      approvalProvider: new PolicyAutoApprovalProvider(bob),
+      timeoutMs: 10000,
+    });
+    const requester = new RequesterClient({
+      owner: alice,
+      relay,
+      approvalProvider: new PolicyAutoApprovalProvider(alice),
+      timeoutMs: 10000,
+    });
+    const seen: string[] = [];
+    const [settled, result] = await Promise.all([
+      worker.start({ once: true }),
+      requester.delegate({
+        to: worker.invite(),
+        title: 'Progress',
+        description: 'Report a step',
+        input: { secret },
+        onProgress: (progress, envelope) => {
+          seen.push(progress.step + ':' + progress.message);
+          expect(envelope.eventType).toBe('PROGRESS');
+          expect(envelope.payload.message).toBe(secret);
+        },
+      }),
+    ]);
+    worker.stop();
+    expect(result.state).toBe('SETTLED');
+    expect(settled?.state).toBe('SETTLED');
+    expect(seen).toEqual(['draft:' + secret]);
+    const progress = traffic.filter((envelope) => envelope.payload.eventType === 'PROGRESS');
+    expect(progress.length).toBeGreaterThan(0);
+    const visible = traffic.map((envelope) => JSON.stringify(envelope)).join('\n');
+    expect(visible).not.toContain(secret);
+    for (const envelope of progress)
+      expect(isEncryptedEnvelopePayload(envelope.payload.payload)).toBe(true);
+    expect(verifyAudit(result.bundle).valid).toBe(true);
+    expect(result.bundle.entries.some((entry) => entry.body.eventType === 'PROGRESS')).toBe(true);
+  });
+
+  it('outvotes a poisoned worker and keeps every verified receipt', async () => {
+    const alice = generateKeyPair();
+    const honestA = generateKeyPair();
+    const honestB = generateKeyPair();
+    const poison = generateKeyPair();
+    const relay = new InMemoryRelay();
+    const adapter = (tag: string, delayMs: number) => ({
+      id: tag,
+      name: tag,
+      skills: [],
+      executeTask: async () => {
+        if (delayMs) await new Promise((resolve) => setTimeout(resolve, delayMs));
+        return { tag };
+      },
+    });
+    const workers = [
+      new WorkerNode({
+        owner: honestA,
+        relay,
+        adapter: adapter('honest', 40),
+        approvalProvider: new PolicyAutoApprovalProvider(honestA),
+        timeoutMs: 10000,
+      }),
+      new WorkerNode({
+        owner: honestB,
+        relay,
+        adapter: adapter('honest', 40),
+        approvalProvider: new PolicyAutoApprovalProvider(honestB),
+        timeoutMs: 10000,
+      }),
+      new WorkerNode({
+        owner: poison,
+        relay,
+        adapter: adapter('poison', 0),
+        approvalProvider: new PolicyAutoApprovalProvider(poison),
+        timeoutMs: 10000,
+      }),
+    ];
+    const requester = new RequesterClient({
+      owner: alice,
+      relay,
+      approvalProvider: new PolicyAutoApprovalProvider(alice),
+      timeoutMs: 10000,
+    });
+    const pending = Promise.all(workers.map((worker) => worker.start({ once: true })));
+    const result = await requester.delegateMulti({
+      workers: workers.map((worker) => ({
+        workerDid: worker.options.owner.did,
+        inviteToken: worker.invite(),
+      })),
+      mode: 'quorum',
+      quorumSize: 2,
+      title: 'Quorum',
+      description: 'Agree on the tag',
+      input: { ok: true },
+    });
+    const settled = await pending;
+    for (const worker of workers) worker.stop();
+    expect(result.status).toBe('SETTLED');
+    expect(result.deliverable).toEqual({ tag: 'honest' });
+    expect(result.outputDigest).toBe(digest({ tag: 'honest' }));
+    expect(result.winners).toHaveLength(2);
+    expect(result.receipts.map((receipt) => receipt.deliverable)).toEqual(
+      expect.arrayContaining([{ tag: 'honest' }, { tag: 'poison' }]),
+    );
+    for (const receipt of result.receipts) expect(verifyAudit(receipt.bundle).valid).toBe(true);
+    expect(settled.every((item) => item?.state === 'SETTLED')).toBe(true);
   });
 });
 
