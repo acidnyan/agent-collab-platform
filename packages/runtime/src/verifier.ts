@@ -20,6 +20,7 @@ import type {
   UsageReceipt,
 } from '@acp/core';
 import { runSandbox } from '@acp/sandbox';
+import type { SandboxBoundaryMetadata } from '@acp/sandbox';
 import { ApprovalGate } from './policy.js';
 import { verifyUsage } from './quota.js';
 export interface ContentArtifact {
@@ -34,7 +35,16 @@ export interface Attestation {
   taskId: string;
   contractDigest: string;
   artifactDigest: string;
+  /** Path the host runner used. Task output cannot set this field. */
   effectiveIsolationLevel?: string;
+  /**
+   * Node permission-flag choice and whether the kernel network namespace was
+   * closed. Absent on older attestations. `permissionModelActive` is false when
+   * neither `--permission` nor `--experimental-permission` exists, and also for
+   * `oci_container` (that path uses the container runtime). `kernelNetworkIsolated`
+   * is true only for `oci_container`.
+   */
+  sandboxBoundary?: SandboxBoundaryMetadata;
 }
 export interface Delivery {
   artifact: Signed<ContentArtifact>;
@@ -47,7 +57,7 @@ export function createDelivery(
   data: Json,
   usage: UsageReceipt,
   worker: KeyPair,
-  execution?: { effectiveIsolationLevel: string },
+  execution?: { effectiveIsolationLevel: string; sandboxBoundary?: SandboxBoundaryMetadata },
 ): Delivery {
   const artifact = signPayload(
     { type: 'Artifact' as const, taskId, name: 'report.json', digest: digest(data), data },
@@ -62,7 +72,10 @@ export function createDelivery(
         taskId,
         contractDigest,
         artifactDigest: artifact.payload.digest,
-        ...(execution ?? {}),
+        ...(execution?.effectiveIsolationLevel
+          ? { effectiveIsolationLevel: execution.effectiveIsolationLevel }
+          : {}),
+        ...(execution?.sandboxBoundary ? { sandboxBoundary: execution.sandboxBoundary } : {}),
       },
       worker,
     ),
@@ -148,6 +161,9 @@ export class VerificationEngine {
         !verifyUsage(d.usage, worker, m.taskId, m.budget)
       )
         throw new Error('CRYPTO_ARTIFACT_OR_BUDGET');
+      // `subprocess_restricted` is not accepted for an `oci_container` contract.
+      // Node's permission model does not provide that kernel boundary, and a
+      // `sandboxBoundary` object cannot upgrade `effectiveIsolationLevel`.
       if (
         m.sandboxPolicy.isolationLevel === 'oci_container' &&
         m.verification.requireExecutionAttestation &&
@@ -163,6 +179,9 @@ export class VerificationEngine {
         const code = this.checks.get(check.target);
         if (check.kind !== 'deterministic_command' || !code)
           throw new Error('UNREGISTERED_DETERMINISTIC_CHECK');
+        // Same subprocess driver as task code: `node:vm` is not a security
+        // mechanism, and `--permission` does not block network syscalls.
+        // Tool access is denied. Kernel isolation is `oci_container`, not this check.
         const result = await runSandbox({
           code,
           input: { artifact: d.artifact.payload.data },

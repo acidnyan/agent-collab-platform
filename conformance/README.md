@@ -39,6 +39,17 @@ key was derived with header-only info, or whose ephemeral public key or recipien
 key context was altered, is rejected with `ENVELOPE_DECRYPTION_FAILED`. An
 encrypted session still settles with a `VALID` audit bundle.
 
+`p2-13-sandbox-boundary-accuracy.test.ts` checks that `detectNodePermissionFlag`
+pairs `--permission` (Node.js >= 22.13 and Node.js 23+) or `--experimental-permission`
+(earlier Node.js 20 and 22) with `--allow-fs-read` and `--allow-fs-write`.
+`subprocess_restricted` denies reads outside the scratch directory when that model
+is active, strips host environment variables, enforces a timeout, and reports
+`effectiveIsolationLevel: 'subprocess_restricted'`. `VerificationEngine` rejects
+that level when the contract requires `oci_container`. The same test reads
+`SECURITY_PROOF.md`, `SECURITY_PROOF.ja.md`, `ARCHITECTURE.md`, and
+`ARCHITECTURE.ja.md` and requires them to state that `node:vm` is not a security mechanism
+and that kernel network isolation is `oci_container` (`--network none`).
+
 `p2-12-audit-verify-trust-anchor-notice.test.ts` checks that `verifyAudit` and
 `acp audit-verify` report `VALID (no trust anchor: truncation not checked)` when
 no external anchor is supplied. `--expect-final-state`, `--expect-last-hash`,

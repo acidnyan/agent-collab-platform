@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AgentSkill, Json, TaskManifest } from '@acp/core';
+import type { SandboxBoundaryMetadata } from '@acp/sandbox';
 export interface UsageMetrics {
   inputTokens: number;
   outputTokens: number;
@@ -36,7 +37,12 @@ export interface AgentTaskContext {
   reportProgress?: (progress: ProgressPayload) => void | Promise<void>;
   signal: AbortSignal;
   workspaceDir: string;
-  reportIsolation?: (level: string) => void;
+  /**
+   * Host-reported isolation. `level` is the path that ran (`subprocess_restricted`
+   * or `oci_container`), not a label chosen by task code. `boundary` is set by
+   * the sandbox runner: Node's permission model does not set `kernelNetworkIsolated`.
+   */
+  reportIsolation?: (level: string, boundary?: SandboxBoundaryMetadata) => void;
 }
 export interface AgentAdapter {
   id: string;

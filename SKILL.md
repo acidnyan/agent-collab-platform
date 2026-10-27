@@ -117,7 +117,19 @@ replace/remove these markers before running. Choose one adapter name.
    `claude`/`codex` require installed CLIs and accept a `--cmd` override.
    `openai` accepts `--model` (default `gpt-4o-mini`) and `--endpoint`; provider
    keys stay in the owner's host environment. Command/CLI adapters are not OS
-   sandboxes; use the restricted sandbox for untrusted JavaScript.
+   sandboxes. `subprocess_restricted` is a separate OS process with a sanitized
+   environment, a scratch directory, a timeout and SIGKILL, and an output byte cap.
+   It uses `--permission` (Node.js >= 22.13 and Node.js 23+) or
+   `--experimental-permission` (earlier Node.js 20 and 22) with `--allow-fs-read`
+   and `--allow-fs-write` when that flag exists. That model restricts filesystem,
+   child process, worker, and native addon access. It does not block `fetch`,
+   `node:net`, `node:http`, `node:https`, `node:dns`, or `node:dgram`, and it is
+   not a kernel network namespace. `node:vm` is not a security mechanism.
+   Untrusted third-party code requires `oci_container`
+   (`isolationLevel: 'oci_container'`): `--network none`, `--read-only`,
+   `--cap-drop ALL`, `--security-opt no-new-privileges`, and PID/memory limits.
+   `ExecutionAttestation.effectiveIsolationLevel` records the path that ran.
+   `node:vm` はセキュリティ機構ではないです。信頼できない第三者コードには `isolationLevel: 'oci_container'` が必要です。カーネルのネットワーク隔離は OCI だけです。
    The worker stays out of the public directory unless `--publish` is set.
    `--allow-requester` is repeatable or comma-separated. Budget flags
    (`--max-input-tokens`, `--max-output-tokens`, `--max-tool-invocations`,

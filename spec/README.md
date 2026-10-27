@@ -125,4 +125,11 @@ the receiver returns `AUDIT_ACK` carrying its signed AckReceipt. Both sides
 append the identical AuditEntry. `CHECKPOINT` and `CHECKPOINT_ACK` exchange the
 final signed checkpoint and countersignature. DELIVER includes artifact, usage,
 attestation and its signed transition. Attestations may add
-`effectiveIsolationLevel`; original M1 attestations remain valid.
+`effectiveIsolationLevel` and `sandboxBoundary` (`nodePermissionFlag`,
+`permissionModelActive`, `kernelNetworkIsolated`). `node:vm` is not a security mechanism,
+and Node's `--permission` / `--experimental-permission` model does not block
+`fetch`, `node:net`, `node:http`, `node:https`, `node:dns`, or `node:dgram`.
+`kernelNetworkIsolated` is true only for `oci_container` (`isolationLevel: 'oci_container'`),
+which is the kernel network boundary: `--network none`, `--read-only`, `--cap-drop ALL`, and `no-new-privileges`.
+`subprocess_restricted` may add `--allow-fs-read` and `--allow-fs-write` with the
+permission flag. Original M1 attestations remain valid.

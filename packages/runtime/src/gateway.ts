@@ -20,6 +20,7 @@ import type {
   RevocationList,
 } from '@acp/core';
 import { runContainerOrSubprocessSandbox } from '@acp/sandbox';
+import type { SandboxBoundaryMetadata } from '@acp/sandbox';
 import { ApprovalGate } from './policy.js';
 import type { OwnerPolicy } from './policy.js';
 import { QuotaMeter } from './quota.js';
@@ -28,6 +29,8 @@ import { EnvelopeInbox } from './inbox.js';
 import { VerificationEngine } from './verifier.js';
 export class OwnerGateway {
   effectiveIsolationLevel = 'subprocess_restricted';
+  /** Set by `execute` from the runner. Undefined until a sandbox task has run. */
+  sandboxBoundary?: SandboxBoundaryMetadata;
   readonly capabilities: CapabilityGuard;
   readonly inbox: EnvelopeInbox;
   readonly machine: ContractMachine;
@@ -140,6 +143,7 @@ export class OwnerGateway {
       onUsage: (i, o) => this.quota.record(i, o),
     });
     this.effectiveIsolationLevel = result.effectiveIsolationLevel;
+    this.sandboxBoundary = result.sandboxBoundary;
     return result.output;
   }
   close(): void {

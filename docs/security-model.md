@@ -6,23 +6,42 @@ verify signatures against contract parties and require explicit owner receipts a
 all five gates. The demo simulates owner approvals with ephemeral keys; it does
 not claim an interactive human clicked an approval screen.
 
-The M1 subprocess driver runs only a trusted wrapper under Node 22's experimental
-filesystem permission model, without addons, inherited credentials, child-process
-permission or worker permission. Task code runs in a VM with dynamic code
-generation disabled and no Node imports, process, host functions, fetch or socket
-API. Input, output and tool requests cross as JSON. Each task gets a separate
-working directory that is removed on completion; the parent kills execution on
-quota abort, memory pressure or timeout. CapGuard and all real MCP handlers live
-in the gateway process, outside the worker. Verification checks run through the
-same driver with tool access denied.
+`subprocess_restricted` (`runSandbox` in `packages/sandbox/src/index.ts`) is a
+separate OS process. The parent passes a sanitized environment (no inherited
+credentials, `NODE_OPTIONS`, or `PATH`), a temporary scratch directory removed
+after the task, a wall-clock timeout followed by SIGTERM then SIGKILL, and an
+output byte cap. Input, output, and tool requests cross as JSON. CapGuard and
+real MCP handlers stay in the gateway process. `detectNodePermissionFlag` selects
+`--permission` on Node.js >= 22.13 and on Node.js 23+, or `--experimental-permission`
+on earlier Node.js 20 and 22 releases. `resolveNodePermissionArgs` pairs that flag
+with `--allow-fs-read` and `--allow-fs-write` for the scratch directory and does
+not grant child-process, worker, or native-addon permission. If neither flag is
+advertised, those `--allow-fs-*` arguments are omitted and
+`ExecutionAttestation.sandboxBoundary.permissionModelActive` is false.
 
-This is the M1 JavaScript subprocess adapter, not an OS container or a general
-arbitrary-binary sandbox. Node VM is not an independently hardened security
-boundary against engine vulnerabilities. Hardened multi-tenant execution requires
-the planned OCI/WASM driver. The runner deliberately exposes no arbitrary shell,
-filesystem or network interface to task JavaScript. M1 accepts the manifest's
+That permission model restricts filesystem, child processes, worker threads, and
+native addons. It does not block `fetch`, `node:net`, `node:http`, `node:https`,
+`node:dns`, or `node:dgram`, and it is not a kernel network namespace. Task source
+is evaluated with `node:vm` in that same process. Node.js documents that `node:vm`
+is not a security mechanism against untrusted code. A null-prototype context that
+omits `process`, `require`, `fetch`, and `WebSocket` reduces the guest API
+surface. It is not a kernel boundary. Deleting `globalThis.fetch` and `WebSocket`
+in the wrapper has the same limit.
+
+Untrusted third-party code requires `oci_container`
+(`isolationLevel: 'oci_container'`). `runContainerOrSubprocessSandbox` then runs
+Podman or Docker with `--network none`, `--read-only`, `--cap-drop ALL`,
+`--security-opt no-new-privileges`, and PID and memory limits.
+`ExecutionAttestation.effectiveIsolationLevel` is the path that actually ran.
+`VerificationEngine` rejects an `oci_container` contract whose attestation is not
+`oci_container` unless `sandboxPolicy.allowSubprocessFallback` is true
+(`ISOLATION_LEVEL_MISMATCH`). An unavailable container runtime falls back to
+`subprocess_restricted` and reports that level. A container that fails to start
+is not retried in the weaker sandbox. M1 accepts the manifest's
 `subprocess_restricted`, `networkAccess: none`, ephemeral-workspace policy;
-unsupported isolation/network/filesystem requests fail closed at the gateway.
+unsupported isolation, network, or filesystem requests fail closed at the gateway.
+Verification's deterministic checks use the same subprocess driver with tool
+access denied. They are not an `oci_container` run.
 
 BYOK credentials stay in a trusted owner-side provider adapter. Instrument it
 with `meteredProvider`: usage deltas are charged before output is released, and

@@ -55,6 +55,8 @@ import {
   detectDockerRuntime,
   runContainerOrSubprocessSandbox,
   containerArguments,
+  subprocessSandboxBoundary,
+  OCI_CONTAINER_BOUNDARY,
 } from '../packages/sandbox/src/index.js';
 import { parseJsonl, verifyAudit } from '../packages/ledger/src/index.js';
 const cleanup: (() => Promise<unknown>)[] = [];
@@ -541,6 +543,7 @@ describe('WP-9 production approvals and isolation fallback', () => {
     expect(result).toEqual({
       output: { ok: true },
       effectiveIsolationLevel: 'subprocess_restricted',
+      sandboxBoundary: subprocessSandboxBoundary(),
     });
     const flags = containerArguments('/tmp/acp');
     for (const flag of ['--read-only', '--cap-drop', '--security-opt', '--pids-limit', '--memory'])
@@ -975,7 +978,11 @@ it('exercises the OCI JSON tool/usage bridge with a simulated container process'
       usage += i + o;
     },
   });
-  expect(result).toEqual({ output: { value: 7 }, effectiveIsolationLevel: 'oci_container' });
+  expect(result).toEqual({
+    output: { value: 7 },
+    effectiveIsolationLevel: 'oci_container',
+    sandboxBoundary: OCI_CONTAINER_BOUNDARY,
+  });
   expect(toolCalls).toBe(1);
   expect(usage).toBe(5);
 });
