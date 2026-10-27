@@ -237,6 +237,8 @@ pnpm acp mcp-server \
 
 `RevocationRegistry` は Ed25519 の `RevocationNotice`（RFC 8785 JCS）を検査します。ワーカーは失効した招待を `ACCEPT` の前に拒否します。`CapabilityGuard` は失効した能力を、ツール実行の前に `TOKEN_REVOKED` で拒否します。`issuerDid` 以外の署名は無効です。
 
+ワーカーがオフラインでも失効は届きます。`deliverRevocation` と `RequesterClient.sendRevocation` は、`SignedRevocationNotice` を載せた暗号化 `REVOKE` 封筒を、そのワーカーのリレー受信箱へ並べます。`WorkerNode` は `runOnce()`、`start()`（`start({ once: true })` を含む）、`pumpUntil()` で、次の `PROPOSE` を読む前に先頭の `REVOKE` を取り込みます。招待の通知は、送信者がワーカーの所有者であるときだけ記録します。能力の通知は、`issuerDid` がそのトークンを発行した、または委任したときだけ記録します。偽造や第三者の `REVOKE` は無視し、保存しません。`ACCEPT` の前に `capabilityChains` の各能力 ID を `assertNotRevoked` で検査するので、失効済みの能力は `TOKEN_REVOKED` となり、タスクは受諾されません。オフラインのキューと偽装通知は `conformance/offline-revocation-inbox.test.ts` が覆います。
+
 `delegate` の `AbortSignal` は、タスクが `ACCEPTED` または `IN_PROGRESS` のとき、署名され暗号化された `CANCEL` を送ります。ワーカーはタスクを止め、サンドボックスへ `SIGTERM` のあと `SIGKILL` を送り、`CANCELLED` の監査ログを封印します。
 
 `delegateMulti({ mode: 'race' })` は、検証を通過した最初の成果物を採用し、残りを取り消します。`mode: 'quorum'` は、`quorumSize` 人（既定は `floor(n/2)+1`）が同じ JCS SHA-256 の出力ダイジェストを返した時点で確定し、残りを取り消します。合意が不可能なら `QUORUM_NOT_REACHED` で拒否し、検証済みの受領は残します。

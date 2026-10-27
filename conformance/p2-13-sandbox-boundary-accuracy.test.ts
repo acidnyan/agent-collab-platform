@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -192,8 +192,10 @@ describe('P2-13 Node permission flag selection', () => {
 describe('P2-13 subprocess_restricted boundary', () => {
   it('denies files outside the scratch directory, strips env, and leaves network APIs in place', async () => {
     expect(detectNodePermissionFlag()).not.toBeNull();
-    const directory = await mkdtemp(join(tmpdir(), 'acp-p213-'));
-    const outside = await mkdtemp(join(tmpdir(), 'acp-p213-out-'));
+    // Same symlink canonicalization as runSandbox. On macOS, leaving the
+    // /var/folders path makes --allow-fs-read stat '/var' and throw ERR_ACCESS_DENIED.
+    const directory = await realpath(await mkdtemp(join(tmpdir(), 'acp-p213-')));
+    const outside = await realpath(await mkdtemp(join(tmpdir(), 'acp-p213-out-')));
     const previous = process.env.OPENAI_API_KEY;
     const previousOptions = process.env.NODE_OPTIONS;
     process.env.OPENAI_API_KEY = 'sk-p213-should-not-leak';
@@ -262,10 +264,60 @@ describe('P2-13 subprocess_restricted boundary', () => {
       expect(body.outsideCode).toBe('ERR_ACCESS_DENIED');
       expect(body.insideText).toBe('hello');
       expect(body.childCode).toBe('ERR_ACCESS_DENIED');
-      expect(Object.keys(body.env).sort()).toEqual(['HOME', 'LANG', 'TMPDIR', 'TZ']);
-      expect(body.env.OPENAI_API_KEY).toBeUndefined();
-      expect(JSON.stringify(body)).not.toContain('sk-p213-should-not-leak');
       expect(body.env.HOME).toBe(directory);
+      expect(body.env.LANG).toBe('C.UTF-8');
+      expect(body.env.TMPDIR).toBe(directory);
+      expect(body.env.TZ).toBe('UTC');
+      // Windows/libuv still injects system variables after an explicit env block.
+      // Those keys are not credentials. Anything else, including provider keys
+      // and NODE_OPTIONS, must stay absent on every platform.
+      const allowed = new Set(['HOME', 'LANG', 'TMPDIR', 'TZ']);
+      const windowsOsKeys = new Set(
+        [
+          'ALLUSERSPROFILE',
+          'APPDATA',
+          'COMMONPROGRAMFILES',
+          'COMMONPROGRAMFILES(X86)',
+          'COMSPEC',
+          'DRIVERDATA',
+          'HOMEDRIVE',
+          'HOMEPATH',
+          'LOCALAPPDATA',
+          'LOGONSERVER',
+          'NUMBER_OF_PROCESSORS',
+          'OS',
+          'PATH',
+          'PATHEXT',
+          'PROCESSOR_ARCHITECTURE',
+          'PROCESSOR_IDENTIFIER',
+          'PROCESSOR_LEVEL',
+          'PROCESSOR_REVISION',
+          'PROGRAMDATA',
+          'PROGRAMFILES',
+          'PROGRAMFILES(X86)',
+          'PSMODULEPATH',
+          'PUBLIC',
+          'SYSTEM',
+          'SYSTEMDRIVE',
+          'SYSTEMROOT',
+          'TEMP',
+          'TMP',
+          'USERDOMAIN',
+          'USERDOMAIN_ROAMINGPROFILE',
+          'USERNAME',
+          'USERPROFILE',
+          'WINDIR',
+        ].map((key) => key.toUpperCase()),
+      );
+      const unexpected = Object.keys(body.env).filter((key) => {
+        if (allowed.has(key)) return false;
+        return process.platform === 'win32' ? !windowsOsKeys.has(key.toUpperCase()) : true;
+      });
+      expect(unexpected).toEqual([]);
+      expect(body.env.OPENAI_API_KEY).toBeUndefined();
+      expect(body.env.NODE_OPTIONS).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain('sk-p213-should-not-leak');
+      expect(JSON.stringify(body.env)).not.toContain('--inspect');
       // The permission model does not remove these. Kernel network isolation is OCI.
       expect(body).toMatchObject({
         fetch: 'function',
