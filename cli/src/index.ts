@@ -7,6 +7,7 @@ import { parseJsonl, verifyAudit } from '@acp/ledger';
 import type { AuditBundle } from '@acp/ledger';
 import { runDemo } from '@acp/two-owner-demo';
 import { networkCommand } from './network.js';
+import { mcpServerCommand } from './mcp.js';
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as unknown;
 function save(path: string, value: unknown, privateFile = false) {
   writeFileSync(path, JSON.stringify(value, null, 2) + '\n', {
@@ -23,6 +24,9 @@ async function main(args: string[]) {
     case 'discover':
     case 'invite':
       await networkCommand(command, rest);
+      break;
+    case 'mcp-server':
+      await mcpServerCommand(rest);
       break;
     case 'keygen': {
       if (rest.length !== 1) throw new Error('Usage: acp keygen <owner.private.json>');
@@ -91,7 +95,7 @@ async function main(args: string[]) {
     }
     default:
       throw new Error(
-        'Usage: acp <keygen|validate|approve|audit-verify|demo|relay|worker|delegate|discover|invite>',
+        'Usage: acp <keygen|validate|approve|audit-verify|demo|relay|worker|delegate|discover|invite|mcp-server>',
       );
   }
 }

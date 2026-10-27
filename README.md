@@ -134,6 +134,32 @@ Command and CLI adapters run owner-configured executables with fresh working fol
 
 Session payloads use ephemeral X25519, HKDF-SHA256, and AES-256-GCM, with the header bound into the ciphertext. Use HTTPS for transit. The relay has no owner keys and cannot authorize work or read task inputs, capability tokens, or results. It can still observe routing metadata or deny delivery. See [security details](docs/security-model.md) and [SECURITY_PROOF.md](SECURITY_PROOF.md).
 
+## MCP, live progress, revocation, and quorum
+
+```sh
+pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agent-collab.workers.dev
+```
+
+`acp mcp-server` is a dependency-free JSON-RPC 2.0 MCP server on stdio. It accepts newline-delimited JSON and `Content-Length` frames. Hosts such as Claude Code, Cursor, Codex, and Grok Bot can call:
+
+| Tool                       | Result                                                                                          |
+| -------------------------- | ----------------------------------------------------------------------------------------------- |
+| `acp_delegate_task`        | Verified deliverable, `taskId`, status, and audit summary                                      |
+| `acp_delegate_multi`       | `race` or `quorum` delegation across workers                                                    |
+| `acp_verify_audit_bundle`  | Cryptographic verification report for an `AuditBundle`                                         |
+| `acp_create_invite`        | Signed `acp-invite` token                                                                       |
+| `acp_revoke_token`         | Signed `RevocationNotice`                                                                       |
+
+`AcpMcpServer` in `@acp/runtime` is the same server for tests and embedded hosts. The server key signs requester approvals for the tools it runs.
+
+A worker reports `PROGRESS` (`percent`, `step`, `message`, and intermediate token or tool metrics) through the same encrypted, countersigned session log. `delegate(request, { onProgress })` receives each decrypted update before `DELIVER`. Reported metrics are charged against `QuotaMeter`.
+
+`RevocationRegistry` checks Ed25519 `RevocationNotice`s (RFC 8785 JCS). The worker rejects a revoked invite before `ACCEPT`. `CapabilityGuard` rejects a revoked capability with `TOKEN_REVOKED` before the tool runs. A notice signed by anyone other than `issuerDid` is invalid.
+
+`AbortSignal` on `delegate` sends a signed encrypted `CANCEL` while the task is `ACCEPTED` or `IN_PROGRESS`. The worker aborts the task and stops the sandbox with `SIGTERM`, then `SIGKILL`, and seals a `CANCELLED` audit log.
+
+`delegateMulti({ mode: 'race' })` keeps the first deliverable that passes verification and cancels the other workers. `mode: 'quorum'` resolves when `quorumSize` workers (default `floor(n/2)+1`) return the same JCS SHA-256 output digest, then cancels the rest. If that agreement is impossible, the call rejects with `QUORUM_NOT_REACHED` and still exposes the verified receipts.
+
 HTTP receives, SSE streams and WebSocket receives/subscriptions require a fresh recipient-signed `RelayAuth` token. `WorkerNode`, `RequesterClient` and the CLI sign automatically. For direct transport use, pass the recipient key as `new HttpRelayClient(url, key)`, `new SseRelayClient(url, fetch, key)` or `new WebSocketRelayClient(wsUrl, key)`. HTTP/SSE also accept an async token generator as their third argument; WebSocket accepts it as its second argument. Raw HTTP callers can send `createRelayAuthToken(key, { action })` through `Authorization: Bearer <token>`, `x-acp-relay-auth` or the `auth` query parameter. Use `receive`, `stream` or `subscribe` to match the operation. Tokens expire after five minutes of clock skew and each nonce can be used once while retained in the bounded replay cache. Direct `InMemoryRelay.receive(did)` remains available by default; construct with `{ requireAuth: true }` to require a token there too.
 
 Invite endpoints always block metadata and unspecified addresses. `parseAndVerifyInviteToken(uri, Date.now(), { allowPrivateRelay: false })` and `RequesterClient`'s `allowPrivateRelay: false` option also reject private and loopback endpoints. Local relays remain enabled by default.

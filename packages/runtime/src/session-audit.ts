@@ -10,10 +10,11 @@ import {
   verifySigned,
   verifySignature,
 } from '@acp/core';
-import type { AckReceipt, Json, KeyPair, Signed, SignedEnvelope } from '@acp/core';
+import type { AckReceipt, Json, KeyPair, Signed, SignedEnvelope, Transition } from '@acp/core';
 import { JsonlStore, verifyAudit } from '@acp/ledger';
 import type { AuditBody, AuditBundle, AuditEntry, Checkpoint } from '@acp/ledger';
 import type { RelayTransport } from '@acp/relay';
+import type { ProgressPayload } from './adapter.js';
 export const asJson = (v: unknown): Json => JSON.parse(JSON.stringify(v)) as Json;
 const pause = (signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -40,13 +41,40 @@ export async function receiveRelay(
     await pause(signal);
   }
 }
+interface EnvelopeWaiter {
+  allowed: string[];
+  resolve: (envelope: SignedEnvelope) => void;
+  reject: (error: Error) => void;
+}
+export interface CancelBody {
+  reason: string;
+  cancelledBy: string;
+  transition: Signed<Transition>;
+}
 /** Each side has only its own private key. All countersignatures arrive on wire. */
 export class SessionWire {
   private outgoing = 0;
   private incoming = 0;
   /** Opened session views keep the ciphertext envelope so delivery verification can check it. */
   private readonly sealedByView = new WeakMap<SignedEnvelope, SignedEnvelope>();
+  private readonly inbox: SignedEnvelope[] = [];
+  private readonly inboxWaiters: Array<() => void> = [];
+  private readonly stashed: SignedEnvelope[] = [];
+  private readonly waiters: EnvelopeWaiter[] = [];
+  private readonly waiterAdded: Array<() => void> = [];
+  private readonly cancelResolvers: Array<() => void> = [];
+  private pumpError?: Error;
+  private pumping = false;
+  private dispatching = false;
+  private detached = false;
+  private stopped = false;
+  private cancellation?: Promise<void>;
   readonly entries: AuditEntry[] = [];
+  onProgress?: (progress: ProgressPayload, envelope: SignedEnvelope) => void | Promise<void>;
+  /** Aborts the running task as soon as a CANCEL frame is queued. */
+  earlyCancel?: () => void;
+  lastCancel?: SignedEnvelope;
+  cancelHandled = false;
   constructor(
     readonly relay: RelayTransport,
     readonly owner: KeyPair,
@@ -55,7 +83,127 @@ export class SessionWire {
     readonly actors: [string, string],
     readonly signal: AbortSignal,
     readonly auditPath?: string,
-  ) {}
+  ) {
+    this.startPump();
+    void this.dispatch();
+  }
+  get cancellationStarted(): boolean {
+    return this.cancellation !== undefined;
+  }
+  /** Keep reading after the caller aborts the session signal, so CANCEL can still be sealed. */
+  detachSignal(): void {
+    this.detached = true;
+    this.pumpError = undefined;
+    if (!this.pumping) this.startPump();
+  }
+  cancelSession(payload?: CancelBody): Promise<void> {
+    if (!this.cancellation) {
+      if (!payload) return Promise.reject(new Error('CANCEL_PAYLOAD_REQUIRED'));
+      this.cancellation = this.sendCancel(payload);
+    }
+    return this.cancellation;
+  }
+  waitUntilCancelHandled(): Promise<void> {
+    if (this.cancelHandled) return Promise.resolve();
+    return new Promise((resolve) => this.cancelResolvers.push(resolve));
+  }
+  private startPump(): void {
+    if (this.pumping || this.stopped) return;
+    this.pumping = true;
+    void this.runPump();
+  }
+  private async runPump(): Promise<void> {
+    try {
+      while (!this.stopped) {
+        if (!this.detached && this.signal.aborted) throw new Error('SESSION_ABORTED');
+        const envelope = await receiveRelay(
+          this.relay,
+          this.owner.did,
+          this.detached ? undefined : this.signal,
+        );
+        if (envelope.payload.eventType === 'CANCEL' && envelope.payload.senderDid === this.peerDid)
+          this.earlyCancel?.();
+        this.inbox.push(envelope);
+        this.inboxWaiters.shift()?.();
+      }
+    } catch (error) {
+      if (!this.detached)
+        this.pumpError = error instanceof Error ? error : new Error(String(error));
+    } finally {
+      this.pumping = false;
+      this.inboxWaiters.shift()?.();
+      if (this.detached && !this.stopped) {
+        this.pumpError = undefined;
+        this.startPump();
+      }
+    }
+  }
+  private shift(): Promise<SignedEnvelope> {
+    const queued = this.inbox.shift();
+    if (queued) return Promise.resolve(queued);
+    if (this.pumpError) return Promise.reject(this.pumpError);
+    return new Promise((resolve, reject) => {
+      const wake = () => {
+        const next = this.inbox.shift();
+        if (next) resolve(next);
+        else if (this.pumpError) reject(this.pumpError);
+        else this.inboxWaiters.push(wake);
+      };
+      this.inboxWaiters.push(wake);
+    });
+  }
+  private async nextEnvelope(): Promise<SignedEnvelope> {
+    const ready = this.stashed.shift();
+    if (ready) return ready;
+    return this.check(await this.shift());
+  }
+  private rejectWaiters(error: Error): void {
+    for (const waiter of this.waiters.splice(0)) waiter.reject(error);
+  }
+  private async dispatch(): Promise<void> {
+    if (this.dispatching) return;
+    this.dispatching = true;
+    try {
+      for (;;) {
+        const envelope = await this.nextEnvelope();
+        const type = envelope.payload.eventType;
+        const index = this.waiters.findIndex((waiter) => waiter.allowed.includes(type));
+        if (index >= 0) {
+          this.waiters.splice(index, 1)[0].resolve(envelope);
+          continue;
+        }
+        if (type === 'PROGRESS') {
+          await this.acknowledgeControl(envelope);
+          const progress = envelope.payload.payload as unknown as ProgressPayload;
+          await this.onProgress?.(progress, envelope);
+          continue;
+        }
+        if (type === 'CANCEL' && envelope.payload.senderDid === this.peerDid) {
+          await this.acknowledgeControl(envelope);
+          this.lastCancel = envelope;
+          this.cancelHandled = true;
+          for (const resolve of this.cancelResolvers.splice(0)) resolve();
+          this.rejectWaiters(new Error('CANCELLED'));
+          continue;
+        }
+        if (this.waiters.length === 0) {
+          this.stashed.push(envelope);
+          await new Promise<void>((resolve) => this.waiterAdded.push(resolve));
+          continue;
+        }
+        this.waiters.shift()?.reject(new Error('UNEXPECTED_SESSION_EVENT: ' + type));
+      }
+    } catch (error) {
+      const wrapped = error instanceof Error ? error : new Error(String(error));
+      if (!this.pumpError) this.pumpError = wrapped;
+      this.rejectWaiters(wrapped);
+      for (const resolve of this.cancelResolvers.splice(0)) resolve();
+    } finally {
+      this.dispatching = false;
+      if (!this.stopped && !this.pumpError && (this.waiters.length > 0 || this.inbox.length > 0))
+        void this.dispatch();
+    }
+  }
   async rawSend(eventType: string, payload: unknown): Promise<void> {
     await this.relay.send(
       signEnvelope(
@@ -91,11 +239,23 @@ export class SessionWire {
       throw new Error('PEER_REJECTED: ' + JSON.stringify(view.payload.payload));
     return view;
   }
+  private acceptInitial(expected: string | string[], initial: SignedEnvelope): SignedEnvelope {
+    const envelope = this.check(initial);
+    const allowed = Array.isArray(expected) ? expected : [expected];
+    if (!allowed.includes(envelope.payload.eventType))
+      throw new Error('UNEXPECTED_SESSION_EVENT: ' + envelope.payload.eventType);
+    return envelope;
+  }
   async rawReceive(expected: string | string[], initial?: SignedEnvelope): Promise<SignedEnvelope> {
-    const e = this.check(initial ?? (await receiveRelay(this.relay, this.owner.did, this.signal)));
-    if (!(Array.isArray(expected) ? expected : [expected]).includes(e.payload.eventType))
-      throw new Error('UNEXPECTED_SESSION_EVENT: ' + e.payload.eventType);
-    return e;
+    if (initial) return this.acceptInitial(expected, initial);
+    if (this.pumpError && this.inbox.length === 0 && this.stashed.length === 0)
+      return Promise.reject(this.pumpError);
+    const allowed = Array.isArray(expected) ? expected : [expected];
+    return new Promise((resolve, reject) => {
+      this.waiters.push({ allowed, resolve, reject });
+      this.waiterAdded.shift()?.();
+      void this.dispatch();
+    });
   }
   private append(entry: AuditEntry): void {
     validateSchema('audit-entry', entry);
@@ -112,6 +272,44 @@ export class SessionWire {
       eventType,
       payload,
     };
+  }
+  private async acknowledgeControl(event: SignedEnvelope): Promise<void> {
+    const audit = await this.nextEnvelope();
+    if (audit.payload.eventType !== 'AUDIT_ENTRY')
+      throw new Error('UNEXPECTED_SESSION_EVENT: ' + audit.payload.eventType);
+    await this.recordPeer(event, audit);
+  }
+  private async recordPeer(event: SignedEnvelope, audit: SignedEnvelope): Promise<void> {
+    const signed = audit.payload.payload as unknown as Signed<AuditBody>;
+    const expected = this.body(
+      event.payload.eventType,
+      event.payload.payload,
+      this.peerDid,
+      this.owner.did,
+    );
+    if (
+      !verifySigned(signed, this.peerDid) ||
+      digest(signed.payload) !== digest(expected) ||
+      !verifySignature(expected, signed.signature, this.peerDid)
+    )
+      throw new Error('INVALID_AUDIT_ENTRY');
+    const ack = signAck(
+      {
+        type: 'AckReceipt',
+        taskId: this.taskId,
+        entryHash: digest(expected),
+        actorDid: this.peerDid,
+        receiverDid: this.owner.did,
+      },
+      this.owner,
+    );
+    this.append({
+      body: expected,
+      entryHash: digest(expected),
+      actorSignature: signed.signature,
+      counterSignature: ack,
+    });
+    await this.rawSend('AUDIT_ACK', ack);
   }
   async sendEvent(eventType: string, payload: unknown): Promise<void> {
     const data = asJson(payload),
@@ -141,38 +339,13 @@ export class SessionWire {
     initial?: SignedEnvelope,
   ): Promise<SignedEnvelope> {
     const e = await this.rawReceive(eventType, initial),
-      signed = (await this.rawReceive('AUDIT_ENTRY')).payload
-        .payload as unknown as Signed<AuditBody>;
-    const expected = this.body(
-      e.payload.eventType,
-      e.payload.payload,
-      this.peerDid,
-      this.owner.did,
-    );
-    if (
-      !verifySigned(signed, this.peerDid) ||
-      digest(signed.payload) !== digest(expected) ||
-      !verifySignature(expected, signed.signature, this.peerDid)
-    )
-      throw new Error('INVALID_AUDIT_ENTRY');
-    const ack = signAck(
-      {
-        type: 'AckReceipt',
-        taskId: this.taskId,
-        entryHash: digest(expected),
-        actorDid: this.peerDid,
-        receiverDid: this.owner.did,
-      },
-      this.owner,
-    );
-    this.append({
-      body: expected,
-      entryHash: digest(expected),
-      actorSignature: signed.signature,
-      counterSignature: ack,
-    });
-    await this.rawSend('AUDIT_ACK', ack);
+      signed = await this.rawReceive('AUDIT_ENTRY');
+    await this.recordPeer(e, signed);
     return e;
+  }
+  private async sendCancel(payload: CancelBody): Promise<void> {
+    await this.sendEvent('CANCEL', payload);
+    this.rejectWaiters(new Error('CANCELLED'));
   }
   private checkpoint(): Checkpoint {
     return {

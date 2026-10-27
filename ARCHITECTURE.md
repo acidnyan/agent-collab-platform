@@ -131,6 +131,14 @@ stateDiagram-v2
 2. **`DELIVERED` requires a three-part bundle.** The artifact manifest (SHA-256 content-addressed), the execution evidence (`ExecutionAttestation`), and the resource-consumption proof (`UsageReceipt`) are all required. If any piece is missing, the Requester Gateway rejects the delivery as a schema error.
 3. **Capabilities die at the terminal state (`SETTLED`).** The moment a task reaches `SETTLED`, `CANCELLED`, or `TIMED_OUT`, every `CapabilityToken` bound to that `task_id` is entered in the Gateway revocation set and invalidated, even if it has not yet expired.
 
+### Live progress, cancellation, revocation, and quorum
+
+`PROGRESS` is an ordinary session event. The worker encrypts it to the requester, both sides countersign the audit entry, and `QuotaMeter` charges any reported intermediate usage. `CANCEL` is a signed transition to `CANCELLED`. The worker aborts the task `AbortSignal` and terminates the sandbox child (`SIGTERM`, then `SIGKILL`) before sealing the bilateral log.
+
+Invite and capability revocation are separate from task-scoped `revokeTask`. A `RevocationNotice` is an Ed25519 JCS statement. The worker checks invite tokens before `ACCEPT`. `CapabilityGuard` checks capability ids and token digests before a tool call and throws `TOKEN_REVOKED`.
+
+`RequesterClient.delegateMulti` opens one independent contract per worker. `race` keeps the first verified deliverable. `quorum` groups verified outputs by JCS SHA-256 and resolves at `quorumSize`, cancelling workers that are still running. `acp mcp-server` exposes these operations as MCP tools over stdio.
+
 ---
 
 ## 4. Five cross-owner safety mechanisms

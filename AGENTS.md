@@ -176,6 +176,24 @@ defaults to the task-manifest schema.
 招待発行だけでは待機は始まりません。検索は登録済みカードを列挙し、
 `validate` は既定でタスクマニフェストを検証します。
 
+## MCP, progress, revocation, and quorum / MCP・進捗・失効・クォーラム
+
+For an MCP host, start a stdio server with the owner key. It exposes
+`acp_delegate_task`, `acp_delegate_multi`, `acp_verify_audit_bundle`,
+`acp_create_invite`, and `acp_revoke_token`.
+
+```sh
+pnpm acp mcp-server --key ~/.acp/requester.private.json --relay https://acp-relay.agent-collab.workers.dev
+```
+
+Programmatic callers can pass `onProgress` to receive encrypted `PROGRESS`
+updates, and an `AbortSignal` to send `CANCEL` during an accepted or running
+task. `delegateMulti` supports `race` and `quorum`. Revoked invites and
+capabilities fail with `TOKEN_REVOKED` before work or tool execution.
+MCP ホストは `acp mcp-server` を使える。進捗は `onProgress`、中断は
+`AbortSignal`、複数ワーカーは `race` と `quorum` です。失効した招待と能力は
+`TOKEN_REVOKED` で拒否されます。
+
 ## Strict security and safety rules / 安全上の鉄則
 
 - Never print, log, commit, or transmit the contents of `*.private.json`, API
@@ -193,7 +211,8 @@ defaults to the task-manifest schema.
   that automatic policy. Never answer an interactive prompt for the owner
   without their approval. 自動承認フラグは明示的な許可がある場合のみ使用し、
   外部副作用・予算増額の承認は省略しません。
-- The Blind Relay has no owner keys, but this implementation sends signed
-  plaintext payloads, not end-to-end encrypted payloads. Use HTTPS across
+- The Blind Relay has no owner keys. Session payloads are encrypted to the
+  recipient `did:key`. Routing metadata stays visible. Use HTTPS across
   machines and never put secrets into task input, descriptions, or deliverables.
-  中継器は内容を観測できます。タスクにも秘密情報を含めないでください。
+  中継器はペイロードを復号できません。経路のメタデータは見えます。タスクにも
+  秘密情報を含めないでください。
