@@ -31,11 +31,30 @@ export function verifyRelayEnvelope(e: SignedEnvelope, recipient?: string): bool
     return false;
   }
 }
+/** Single signed envelope JSON body. Larger bodies are rejected before they are queued. */
+export const DEFAULT_MAX_ENVELOPE_BYTES = 256 * 1024;
+/** Unread envelopes kept for one recipient. */
+export const DEFAULT_MAX_QUEUE_SIZE = 256;
+/** Sum of queued envelope JSON sizes for one recipient. */
+export const DEFAULT_MAX_QUEUE_BYTES_PER_RECIPIENT = 4 * 1024 * 1024;
+export const DEFAULT_ENVELOPE_TTL_MS = 10 * 60 * 1000;
+export const DEFAULT_SEEN_TTL_MS = 60 * 60 * 1000;
+export const DEFAULT_AUTH_SEEN_TTL_MS = 10 * 60 * 1000;
+export const DEFAULT_AGENT_CARD_TTL_MS = 60 * 60 * 1000;
+/** Caps the durable replay ring scanned when an inbox object wakes. */
+export const DEFAULT_MAX_SEEN_ENTRIES = 4096;
+export const DEFAULT_MAX_QUEUES = 10000;
+export const DEFAULT_MAX_AGENTS = 10000;
+
 export interface RelaySnapshot {
   queues: [string, SignedEnvelope[]][];
   seen: string[];
   authSeen?: string[];
   agents: SignedAgentCard[];
+  envelopeExpiry?: [string, number][];
+  seenExpiry?: [string, number][];
+  authExpiry?: [string, number][];
+  agentExpiry?: [string, number][];
 }
 export interface InMemoryRelayOptions {
   requireAuth?: boolean;
@@ -43,12 +62,57 @@ export interface InMemoryRelayOptions {
   maxAuthSeenEntries?: number;
   maxQueues?: number;
   maxQueueSize?: number;
+  maxEnvelopeBytes?: number;
+  maxQueueBytesPerRecipient?: number;
+  maxEnvelopesPerSender?: number;
+  maxAgents?: number;
+  envelopeTtlMs?: number;
+  seenTtlMs?: number;
+  authSeenTtlMs?: number;
+  agentCardTtlMs?: number;
+  now?: () => number;
   tamper?: (e: SignedEnvelope) => SignedEnvelope;
 }
+interface StoredEnvelope {
+  envelope: SignedEnvelope;
+  bytes: number;
+  expiresAt: number;
+}
+function positiveLimit(value: number | undefined, fallback: number): number {
+  const limit = value ?? fallback;
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('INVALID_RELAY_LIMIT');
+  return limit;
+}
+export function relayLimitsFromEnv(env?: Record<string, unknown>): InMemoryRelayOptions {
+  const read = (key: string): number | undefined => {
+    const value = env?.[key];
+    if (typeof value !== 'string' || value === '') return undefined;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : undefined;
+  };
+  return {
+    maxEnvelopeBytes: read('ACP_MAX_ENVELOPE_BYTES'),
+    maxQueueSize: read('ACP_MAX_QUEUE_SIZE'),
+    maxQueueBytesPerRecipient: read('ACP_MAX_QUEUE_BYTES'),
+    maxEnvelopesPerSender: read('ACP_MAX_ENVELOPES_PER_SENDER'),
+    maxSeenEntries: read('ACP_MAX_SEEN_ENTRIES'),
+    envelopeTtlMs: read('ACP_ENVELOPE_TTL_MS'),
+    seenTtlMs: read('ACP_SEEN_TTL_MS'),
+    authSeenTtlMs: read('ACP_AUTH_SEEN_TTL_MS'),
+    agentCardTtlMs: read('ACP_AGENT_CARD_TTL_MS'),
+    maxAgents: read('ACP_MAX_AGENTS'),
+  };
+}
+export function canonicalRelayPath(pathname: string): string {
+  if (pathname === '/v1') return '/';
+  if (pathname.startsWith('/v1/')) return pathname.slice(3);
+  return pathname;
+}
 export class InMemoryRelay {
-  private queues = new Map<string, SignedEnvelope[]>();
-  private seen = new Set<string>();
-  private authSeen = new Set<string>();
+  private queues = new Map<string, StoredEnvelope[]>();
+  private seen = new Map<string, number>();
+  private authSeen = new Map<string, number>();
+  private agentExpiry = new Map<string, number>();
   private version = 0;
   get mutationVersion(): number {
     return this.version;
@@ -61,36 +125,59 @@ export class InMemoryRelay {
   readonly maxAuthSeenEntries: number;
   readonly maxQueues: number;
   readonly maxQueueSize: number;
+  readonly maxEnvelopeBytes: number;
+  readonly maxQueueBytesPerRecipient: number;
+  readonly maxEnvelopesPerSender: number;
+  readonly maxAgents: number;
+  readonly envelopeTtlMs: number;
+  readonly seenTtlMs: number;
+  readonly authSeenTtlMs: number;
+  readonly agentCardTtlMs: number;
+  private readonly now: () => number;
   constructor(options?: InMemoryRelayOptions | ((e: SignedEnvelope) => SignedEnvelope)) {
     const config = typeof options === 'function' ? { tamper: options } : (options ?? {});
     this.tamper = config.tamper;
     this.requireAuth = config.requireAuth ?? false;
-    this.maxSeenEntries = config.maxSeenEntries ?? 100000;
-    this.maxAuthSeenEntries = config.maxAuthSeenEntries ?? this.maxSeenEntries;
-    this.maxQueues = config.maxQueues ?? 10000;
-    this.maxQueueSize = config.maxQueueSize ?? 1000;
-    for (const limit of [
+    this.maxSeenEntries = positiveLimit(config.maxSeenEntries, DEFAULT_MAX_SEEN_ENTRIES);
+    this.maxAuthSeenEntries = positiveLimit(
+      config.maxAuthSeenEntries,
       this.maxSeenEntries,
-      this.maxAuthSeenEntries,
-      this.maxQueues,
+    );
+    this.maxQueues = positiveLimit(config.maxQueues, DEFAULT_MAX_QUEUES);
+    this.maxQueueSize = positiveLimit(config.maxQueueSize, DEFAULT_MAX_QUEUE_SIZE);
+    this.maxEnvelopeBytes = positiveLimit(config.maxEnvelopeBytes, DEFAULT_MAX_ENVELOPE_BYTES);
+    this.maxQueueBytesPerRecipient = positiveLimit(
+      config.maxQueueBytesPerRecipient,
+      DEFAULT_MAX_QUEUE_BYTES_PER_RECIPIENT,
+    );
+    this.maxEnvelopesPerSender = positiveLimit(
+      config.maxEnvelopesPerSender,
       this.maxQueueSize,
-    ])
-      if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('INVALID_RELAY_LIMIT');
+    );
+    this.maxAgents = positiveLimit(config.maxAgents, DEFAULT_MAX_AGENTS);
+    this.envelopeTtlMs = positiveLimit(config.envelopeTtlMs, DEFAULT_ENVELOPE_TTL_MS);
+    this.seenTtlMs = positiveLimit(config.seenTtlMs, DEFAULT_SEEN_TTL_MS);
+    this.authSeenTtlMs = positiveLimit(config.authSeenTtlMs, DEFAULT_AUTH_SEEN_TTL_MS);
+    this.agentCardTtlMs = positiveLimit(config.agentCardTtlMs, DEFAULT_AGENT_CARD_TTL_MS);
+    this.now = config.now ?? Date.now;
   }
-  private remember(set: Set<string>, key: string, limit: number): void {
-    if (set.size >= limit) {
-      const oldest = set.values().next().value;
-      if (oldest !== undefined) set.delete(oldest);
+  private remember(map: Map<string, number>, key: string, limit: number, ttlMs: number): void {
+    const now = this.now();
+    for (const [entry, expiresAt] of map) if (expiresAt <= now) map.delete(entry);
+    if (map.size >= limit) {
+      const oldest = map.keys().next().value;
+      if (oldest !== undefined) map.delete(oldest);
     }
-    set.add(key);
+    map.set(key, now + ttlMs);
     this.version++;
   }
   authenticate(recipientDid: string, token?: string, action?: RelayAuthAction): boolean {
+    this.evictExpired();
     const result = verifyRelayAuthToken(token ?? '', recipientDid);
     if (!result.valid || (action !== undefined && result.action !== action)) return false;
     const key = recipientDid + ':' + result.nonce;
     if (this.authSeen.has(key)) return false;
-    this.remember(this.authSeen, key, this.maxAuthSeenEntries);
+    this.remember(this.authSeen, key, this.maxAuthSeenEntries, this.authSeenTtlMs);
     return true;
   }
   /** Authenticate once for a long poll or persistent stream, then read only this inbox. */
@@ -102,7 +189,7 @@ export class InMemoryRelay {
     if (!this.authenticate(recipientDid, token, action)) throw new Error('RELAY_UNAUTHORIZED');
     return () => this.dequeue(recipientDid);
   }
-  private ensureQueue(did: string): SignedEnvelope[] {
+  private ensureQueue(did: string): StoredEnvelope[] {
     let queue = this.queues.get(did);
     if (!queue) {
       if (this.queues.size >= this.maxQueues) throw new Error('RELAY_CAPACITY');
@@ -111,20 +198,60 @@ export class InMemoryRelay {
     }
     return queue;
   }
+  /** Drop queued envelopes, replay ids, and agent cards whose TTL has elapsed. */
+  evictExpired(): void {
+    const now = this.now();
+    let changed = false;
+    for (const [did, queue] of this.queues) {
+      const live = queue.filter((item) => item.expiresAt > now);
+      if (live.length === queue.length) continue;
+      changed = true;
+      if (live.length || this.listeners.get(did)?.size) this.queues.set(did, live);
+      else this.queues.delete(did);
+    }
+    for (const map of [this.seen, this.authSeen, this.agentExpiry]) {
+      for (const [key, expiresAt] of map) {
+        if (expiresAt > now) continue;
+        map.delete(key);
+        changed = true;
+        if (map === this.agentExpiry) this.agents.delete(key);
+      }
+    }
+    if (changed) this.version++;
+  }
+  private queuedBytes(queue: StoredEnvelope[]): number {
+    let total = 0;
+    for (const item of queue) total += item.bytes;
+    return total;
+  }
+  private senderCount(queue: StoredEnvelope[], senderDid: string): number {
+    let total = 0;
+    for (const item of queue) if (item.envelope.payload.senderDid === senderDid) total++;
+    return total;
+  }
   send(envelope: SignedEnvelope): void {
     if (!verifyRelayEnvelope(envelope)) throw new Error('INVALID_ENVELOPE');
+    this.evictExpired();
     if (this.seen.has(envelope.payload.envelopeId)) throw new Error('REPLAYED_ENVELOPE');
-    const did = envelope.payload.recipientDid,
-      queue = this.queues.get(did) ?? [];
-    if (
-      (!this.queues.has(did) && this.queues.size >= this.maxQueues) ||
-      queue.length >= this.maxQueueSize ||
-      Buffer.byteLength(JSON.stringify(envelope)) > 1048576
-    )
+    const did = envelope.payload.recipientDid;
+    const queue = this.queues.get(did) ?? [];
+    const bytes = Buffer.byteLength(JSON.stringify(envelope));
+    if (!this.queues.has(did) && this.queues.size >= this.maxQueues)
       throw new Error('RELAY_CAPACITY');
-    this.remember(this.seen, envelope.payload.envelopeId, this.maxSeenEntries);
+    if (queue.length >= this.maxQueueSize || bytes > this.maxEnvelopeBytes)
+      throw new Error('RELAY_CAPACITY');
+    if (this.queuedBytes(queue) + bytes > this.maxQueueBytesPerRecipient)
+      throw new Error('QUEUE_BYTES_EXCEEDED');
+    if (this.senderCount(queue, envelope.payload.senderDid) >= this.maxEnvelopesPerSender)
+      throw new Error('SENDER_QUOTA_EXCEEDED');
+    this.remember(this.seen, envelope.payload.envelopeId, this.maxSeenEntries, this.seenTtlMs);
     const wire = structuredClone(envelope);
-    queue.push(this.tamper ? this.tamper(wire) : wire);
+    const stored = this.tamper ? this.tamper(wire) : wire;
+    queue.push({
+      envelope: stored,
+      bytes: Buffer.byteLength(JSON.stringify(stored)),
+      expiresAt: this.now() + this.envelopeTtlMs,
+    });
     this.queues.set(did, queue);
     for (const fn of [...(this.listeners.get(did) ?? [])]) fn();
   }
@@ -145,13 +272,45 @@ export class InMemoryRelay {
     return this.dequeue(recipientDid);
   }
   private dequeue(recipientDid: string): SignedEnvelope | undefined {
-    const q = this.queues.get(recipientDid),
-      envelope = q?.shift();
-    if (q && !q.length) this.queues.delete(recipientDid);
-    if (envelope) this.version++;
-    if (envelope && !verifyRelayEnvelope(envelope, recipientDid))
+    this.evictExpired();
+    const q = this.queues.get(recipientDid);
+    const item = q?.shift();
+    if (q && !q.length && !this.listeners.get(recipientDid)?.size) this.queues.delete(recipientDid);
+    if (item) this.version++;
+    if (item && !verifyRelayEnvelope(item.envelope, recipientDid))
       throw new Error('RELAY_TAMPERING_DETECTED');
-    return envelope;
+    return item?.envelope;
+  }
+  /** Recipient-authenticated removal of one queued envelope. False when it is not queued. */
+  acknowledge(recipientDid: string, envelopeId: string, token?: string): boolean {
+    this.evictExpired();
+    if (!this.authenticate(recipientDid, token, 'receive')) throw new Error('RELAY_UNAUTHORIZED');
+    const queue = this.queues.get(recipientDid);
+    if (!queue) return false;
+    const index = queue.findIndex((item) => item.envelope.payload.envelopeId === envelopeId);
+    if (index < 0) return false;
+    queue.splice(index, 1);
+    if (!queue.length && !this.listeners.get(recipientDid)?.size) this.queues.delete(recipientDid);
+    this.version++;
+    return true;
+  }
+  /** Seconds until the soonest queued item expires, for Retry-After. */
+  retryAfterSeconds(): number {
+    const next = this.nextExpiry();
+    if (next === undefined) return 60;
+    return Math.max(1, Math.ceil((next - this.now()) / 1000));
+  }
+  nextExpiry(): number | undefined {
+    const now = this.now();
+    let soonest = Infinity;
+    const consider = (value: number) => {
+      if (value > now && value < soonest) soonest = value;
+    };
+    for (const queue of this.queues.values()) for (const item of queue) consider(item.expiresAt);
+    for (const expiresAt of this.seen.values()) consider(expiresAt);
+    for (const expiresAt of this.authSeen.values()) consider(expiresAt);
+    for (const expiresAt of this.agentExpiry.values()) consider(expiresAt);
+    return Number.isFinite(soonest) ? soonest : undefined;
   }
   withRecipient(key: KeyPair) {
     return {
@@ -175,6 +334,7 @@ export class InMemoryRelay {
     };
   }
   async wait(did: string, ms: number, signal?: AbortSignal): Promise<void> {
+    this.evictExpired();
     if (signal?.aborted || ms <= 0 || this.queues.get(did)?.length) return;
     await new Promise<void>((resolve) => {
       let settled = false;
@@ -194,38 +354,89 @@ export class InMemoryRelay {
     });
   }
   snapshot(): RelaySnapshot {
+    this.evictExpired();
+    const envelopeExpiry: [string, number][] = [];
+    const queues: [string, SignedEnvelope[]][] = [];
+    for (const [did, queue] of this.queues) {
+      const envelopes: SignedEnvelope[] = [];
+      for (const item of queue) {
+        envelopes.push(item.envelope);
+        envelopeExpiry.push([item.envelope.payload.envelopeId, item.expiresAt]);
+      }
+      queues.push([did, envelopes]);
+    }
     return structuredClone({
-      queues: [...this.queues],
-      seen: [...this.seen],
-      authSeen: [...this.authSeen],
+      queues,
+      seen: [...this.seen.keys()],
+      authSeen: [...this.authSeen.keys()],
       agents: [...this.agents.values()],
+      envelopeExpiry,
+      seenExpiry: [...this.seen],
+      authExpiry: [...this.authSeen],
+      agentExpiry: [...this.agentExpiry],
     });
   }
   restore(snapshot: RelaySnapshot): void {
+    const seenExpiry = new Map(snapshot.seenExpiry ?? []);
+    const authExpiry = new Map(snapshot.authExpiry ?? []);
+    const envelopeExpiry = new Map(snapshot.envelopeExpiry ?? []);
+    const agentExpiry = new Map(snapshot.agentExpiry ?? []);
     if (
       snapshot.seen.length > this.maxSeenEntries ||
       (snapshot.authSeen?.length ?? 0) > this.maxAuthSeenEntries ||
       snapshot.queues.length > this.maxQueues ||
-      snapshot.agents.length > 10000 ||
-      snapshot.queues.some(
-        ([did, q]) => q.length > this.maxQueueSize || q.some((e) => !verifyRelayEnvelope(e, did)),
-      ) ||
-      snapshot.agents.some((c) => !verifySignedAgentCard(c))
+      snapshot.agents.length > this.maxAgents ||
+      snapshot.queues.some(([did, queue]) => {
+        if (queue.length > this.maxQueueSize) return true;
+        let bytes = 0;
+        for (const envelope of queue) {
+          if (!verifyRelayEnvelope(envelope, did)) return true;
+          bytes += Buffer.byteLength(JSON.stringify(envelope));
+          if (bytes > this.maxQueueBytesPerRecipient || bytes > this.maxEnvelopeBytes * queue.length)
+            return true;
+        }
+        return queue.some((envelope) => Buffer.byteLength(JSON.stringify(envelope)) > this.maxEnvelopeBytes);
+      }) ||
+      snapshot.agents.some((card) => !verifySignedAgentCard(card))
     )
       throw new Error('INVALID_RELAY_SNAPSHOT');
-    this.queues = new Map(structuredClone(snapshot.queues));
-    this.seen = new Set(snapshot.seen);
-    this.authSeen = new Set(snapshot.authSeen ?? []);
+    this.queues = new Map();
+    for (const [did, envelopes] of structuredClone(snapshot.queues)) {
+      this.queues.set(
+        did,
+        envelopes.map((envelope) => ({
+          envelope,
+          bytes: Buffer.byteLength(JSON.stringify(envelope)),
+          expiresAt:
+            envelopeExpiry.get(envelope.payload.envelopeId) ?? this.now() + this.envelopeTtlMs,
+        })),
+      );
+    }
+    this.seen = new Map(
+      snapshot.seen.map((id) => [id, seenExpiry.get(id) ?? this.now() + this.seenTtlMs]),
+    );
+    this.authSeen = new Map(
+      (snapshot.authSeen ?? []).map((id) => [id, authExpiry.get(id) ?? this.now() + this.authSeenTtlMs]),
+    );
     this.agents.clear();
-    for (const card of snapshot.agents)
-      this.agents.set(card.payload.agentDid, structuredClone(card));
+    this.agentExpiry.clear();
+    for (const card of snapshot.agents) {
+      const copy = structuredClone(card);
+      this.agents.set(copy.payload.agentDid, copy);
+      this.agentExpiry.set(
+        copy.payload.agentDid,
+        agentExpiry.get(copy.payload.agentDid) ?? this.now() + this.agentCardTtlMs,
+      );
+    }
     this.version++;
   }
   discover(): SignedAgentCard[] {
+    this.evictExpired();
     return structuredClone([...this.agents.values()]);
   }
   register(card: SignedAgentCard): void {
     if (!verifySignedAgentCard(card)) throw new Error('INVALID_AGENT_CARD');
+    this.evictExpired();
     const old = this.agents.get(card.payload.agentDid);
     if (
       old &&
@@ -233,8 +444,10 @@ export class InMemoryRelay {
         Date.parse(old.signature.signedAt) > Date.parse(card.signature.signedAt))
     )
       throw new Error('AGENT_OWNER_OR_VERSION_MISMATCH');
-    if (!old && this.agents.size >= 10000) throw new Error('RELAY_CAPACITY');
-    this.agents.set(card.payload.agentDid, structuredClone(card));
+    if (!old && this.agents.size >= this.maxAgents) throw new Error('RELAY_CAPACITY');
+    const copy = structuredClone(card);
+    this.agents.set(copy.payload.agentDid, copy);
+    this.agentExpiry.set(copy.payload.agentDid, this.now() + this.agentCardTtlMs);
     this.version++;
   }
 }
@@ -257,10 +470,36 @@ export function relayHttpHeaders(kind: 'json' | 'empty' | 'sse' = 'json'): Recor
 function relayJson(value: unknown, status = 200): Response {
   return Response.json(value, { status, headers: relayHttpHeaders('json') });
 }
-export function relayErrorResponse(error: unknown): Response {
-  return error instanceof Error && error.message === 'RELAY_UNAUTHORIZED'
-    ? relayJson({ error: 'RELAY_UNAUTHORIZED' }, 401)
-    : relayJson({ error: String(error) }, 400);
+const RETRYABLE = new Set([
+  'QUEUE_BYTES_EXCEEDED',
+  'QUEUE_LIMIT_EXCEEDED',
+  'SENDER_QUOTA_EXCEEDED',
+  'RATE_LIMITED',
+]);
+export function relayErrorResponse(error: unknown, relay?: InMemoryRelay): Response {
+  if (error instanceof Error && error.message === 'RELAY_UNAUTHORIZED')
+    return relayJson({ error: 'RELAY_UNAUTHORIZED' }, 401);
+  if (error instanceof Error && RETRYABLE.has(error.message)) {
+    return Response.json(
+      { error: error.message },
+      {
+        status: 429,
+        headers: {
+          ...relayHttpHeaders('json'),
+          'retry-after': String(relay?.retryAfterSeconds() ?? 60),
+        },
+      },
+    );
+  }
+  return relayJson({ error: String(error) }, 400);
+}
+export function relayRequestToken(request: Request, url = new URL(request.url)): string | undefined {
+  return (
+    request.headers.get('authorization')?.match(/^Bearer (\S+)$/i)?.[1] ??
+    request.headers.get('x-acp-relay-auth') ??
+    url.searchParams.get('auth') ??
+    undefined
+  );
 }
 export type DurableLongPoll =
   | { mode: 'response'; response: Response }
@@ -282,11 +521,7 @@ export function beginDurableLongPoll(relay: InMemoryRelay, request: Request): Du
     const ms = Number(url.searchParams.get('waitMs'));
     if (!url.searchParams.has('waitMs') || !Number.isFinite(ms) || ms < 0)
       throw new Error('INVALID_WAIT');
-    const token =
-      request.headers.get('authorization')?.match(/^Bearer (\S+)$/i)?.[1] ??
-      request.headers.get('x-acp-relay-auth') ??
-      url.searchParams.get('auth') ??
-      undefined;
+    const token = relayRequestToken(request, url);
     // A request that is already aborted must not authenticate or pop.
     if (request.signal.aborted) return { mode: 'response', response: relayJson({ envelopes: [] }) };
     const receive = relay.openInbox(recipient, token, 'receive');
@@ -297,7 +532,7 @@ export function beginDurableLongPoll(relay: InMemoryRelay, request: Request): Du
     if (buffered.length) return { mode: 'response', response: relayJson({ envelopes: buffered }) };
     return { mode: 'wait', recipient, waitMs: Math.min(ms, 30000), receive };
   } catch (error) {
-    return { mode: 'response', response: relayErrorResponse(error) };
+    return { mode: 'response', response: relayErrorResponse(error, relay) };
   }
 }
 export function createRelayFetchHandler(
@@ -309,7 +544,8 @@ export function createRelayFetchHandler(
   const empty = (status: 202 | 204) =>
     new Response(null, { status, headers: relayHttpHeaders('empty') });
   async function body(request: Request): Promise<unknown> {
-    if (Number(request.headers.get('content-length')) > 1048576) throw new Error('BODY_TOO_LARGE');
+    const limit = relay.maxEnvelopeBytes;
+    if (Number(request.headers.get('content-length')) > limit) throw new Error('BODY_TOO_LARGE');
     const reader = request.body?.getReader();
     if (!reader) throw new Error('MISSING_BODY');
     const chunks: Uint8Array[] = [];
@@ -319,7 +555,7 @@ export function createRelayFetchHandler(
         const { value, done } = await reader.read();
         if (done) break;
         size += value.byteLength;
-        if (size > 1048576) {
+        if (size > limit) {
           await reader.cancel();
           throw new Error('BODY_TOO_LARGE');
         }
@@ -332,8 +568,9 @@ export function createRelayFetchHandler(
   }
   return async (request) => {
     try {
+      relay.evictExpired();
       const url = new URL(request.url),
-        path = url.pathname;
+        path = canonicalRelayPath(url.pathname);
       if (request.method === 'GET' && path === '/health') return json({ status: 'ok' });
       if (request.method === 'POST' && path === '/agents') {
         relay.register((await body(request)) as SignedAgentCard);
@@ -352,6 +589,19 @@ export function createRelayFetchHandler(
         relay.send((await body(request)) as SignedEnvelope);
         return empty(202);
       }
+      if (
+        request.method === 'DELETE' &&
+        (path === '/envelopes' || path.startsWith('/envelopes/'))
+      ) {
+        const envelopeId = path.startsWith('/envelopes/')
+          ? decodeURIComponent(path.slice('/envelopes/'.length))
+          : (url.searchParams.get('id') ?? '');
+        if (!envelopeId) throw new Error('MISSING_ENVELOPE_ID');
+        const recipient = url.searchParams.get('recipient') ?? '';
+        resolveDid(recipient);
+        const removed = relay.acknowledge(recipient, envelopeId, relayRequestToken(request, url));
+        return removed ? empty(204) : json({ error: 'NOT_FOUND' }, 404);
+      }
       if (request.method === 'GET' && ['/envelopes', '/stream'].includes(path)) {
         const recipient = url.searchParams.get('recipient') ?? '';
         resolveDid(recipient);
@@ -359,11 +609,7 @@ export function createRelayFetchHandler(
           ? Number(url.searchParams.get('waitMs'))
           : undefined;
         if (ms !== undefined && (!Number.isFinite(ms) || ms < 0)) throw new Error('INVALID_WAIT');
-        const token =
-          request.headers.get('authorization')?.match(/^Bearer (\S+)$/i)?.[1] ??
-          request.headers.get('x-acp-relay-auth') ??
-          url.searchParams.get('auth') ??
-          undefined;
+        const token = relayRequestToken(request, url);
         const receive = relay.openInbox(
           recipient,
           token,
@@ -447,9 +693,7 @@ export function createRelayFetchHandler(
       }
       return json({ error: 'NOT_FOUND' }, 404);
     } catch (error) {
-      return error instanceof Error && error.message === 'RELAY_UNAUTHORIZED'
-        ? json({ error: 'RELAY_UNAUTHORIZED' }, 401)
-        : json({ error: String(error) }, 400);
+      return relayErrorResponse(error, relay);
     }
   };
 }

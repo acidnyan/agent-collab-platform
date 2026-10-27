@@ -537,7 +537,7 @@ describe('M3.1 bounded relay state', () => {
     );
     expect(() => relay.send(oversized)).toThrow('RELAY_CAPACITY');
     expect(relay.snapshot().seen).toEqual([]);
-    for (let i = 0; i < 1000; i++) relay.send(envelope());
+    for (let i = 0; i < relay.maxQueueSize; i++) relay.send(envelope());
     expect(() => relay.send(envelope())).toThrow('RELAY_CAPACITY');
   });
   it.each(['ascii', 'utf8'])(
