@@ -6,16 +6,21 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
+  createInviteToken,
   createRelayAuthToken,
   createSignedAgentCard,
+  digest,
   generateKeyPair,
+  parseAndVerifyInviteToken,
   signEnvelope,
 } from '../packages/core/src/index.js';
 import type { Json } from '../packages/core/src/index.js';
+import { verifyAudit } from '../packages/ledger/src/index.js';
 import { InMemoryRelay, createRelayFetchHandler } from '../packages/relay/src/fetch.js';
 import { startLocalRelay } from '../packages/relay/src/index.js';
 import { RelayDurableObject } from '../packages/relay/src/worker.js';
 import {
+  AcpMcpServer,
   PolicyAutoApprovalProvider,
   RequesterClient,
   WorkerNode,
@@ -986,5 +991,368 @@ describe('issue 23: cancelled durable long-poll leaves the envelope queued', () 
     expect(postStatus).toBe(202);
     expect(cancelledPoll).toMatchObject({ status: 200, labels: [] });
     expect(remaining).toMatchObject({ status: 200, labels: ['after_cancel'] });
+  });
+});
+
+describe('issue 27: delegateMulti counts distinct verified workers', () => {
+  it('rejects a repeated worker and a workerDid that disagrees with the invite', async () => {
+    for (const variant of ['duplicate-worker', 'mismatched-labels'] as const) {
+      const owner = generateKeyPair();
+      const workerKey = generateKeyPair();
+      const relay = new InMemoryRelay();
+      let executions = 0;
+      const worker = new WorkerNode({
+        owner: workerKey,
+        relay,
+        timeoutMs: 1500,
+        approvalProvider: new PolicyAutoApprovalProvider(workerKey),
+        adapter: {
+          id: 'synthetic',
+          name: 'synthetic',
+          skills: [],
+          executeTask: async () => {
+            executions += 1;
+            return { ok: true };
+          },
+        },
+      });
+      const running = worker
+        .start()
+        .catch((error: unknown) => (error instanceof Error ? error.message : String(error)));
+      const client = new RequesterClient({
+        owner,
+        relay,
+        timeoutMs: 1500,
+        approvalProvider: new PolicyAutoApprovalProvider(owner),
+      });
+      const target = { workerDid: workerKey.did, inviteToken: worker.invite() };
+      const workers =
+        variant === 'duplicate-worker'
+          ? [target, target]
+          : [
+              { ...target, workerDid: generateKeyPair().did },
+              { ...target, workerDid: generateKeyPair().did },
+            ];
+      await expect(
+        client.delegateMulti({
+          workers,
+          mode: 'quorum',
+          quorumSize: 2,
+          title: 'synthetic boundary',
+          description: 'synthetic',
+          input: {},
+        }),
+      ).rejects.toThrow(
+        variant === 'duplicate-worker' ? 'DUPLICATE_WORKER_TARGET' : 'WORKER_DID_MISMATCH',
+      );
+      expect(executions).toBe(0);
+      worker.stop();
+      await running;
+    }
+  });
+
+  it('reaches quorum only across two verified worker identities', async () => {
+    const owner = generateKeyPair();
+    const leftKey = generateKeyPair();
+    const rightKey = generateKeyPair();
+    const relay = new InMemoryRelay();
+    const workers = [leftKey, rightKey].map(
+      (key) =>
+        new WorkerNode({
+          owner: key,
+          relay,
+          timeoutMs: 5000,
+          approvalProvider: new PolicyAutoApprovalProvider(key),
+          adapter: {
+            id: 'same',
+            name: 'same',
+            skills: [],
+            executeTask: async () => ({ ok: true }),
+          },
+        }),
+    );
+    const pending = Promise.all(workers.map((worker) => worker.start({ once: true })));
+    const client = new RequesterClient({
+      owner,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(owner),
+    });
+    const result = await client.delegateMulti({
+      workers: workers.map((worker) => ({
+        workerDid: worker.options.owner.did,
+        inviteToken: worker.invite(),
+      })),
+      mode: 'quorum',
+      quorumSize: 2,
+      title: 'two workers',
+      description: 'synthetic',
+      input: {},
+    });
+    for (const worker of workers) worker.stop();
+    await pending;
+    expect(result.status).toBe('SETTLED');
+    expect(result.winners).toHaveLength(2);
+    expect(new Set(result.winners.map((winner) => winner.workerDid))).toEqual(
+      new Set([leftKey.did, rightKey.did]),
+    );
+    expect(result.outputDigest).toBe(digest({ ok: true }));
+  });
+});
+
+describe('issue 28: concurrent reportProgress stays ordered', () => {
+  async function run(parallel: boolean, fireAndForget = false) {
+    const owner = generateKeyPair();
+    const key = generateKeyPair();
+    const relay = new InMemoryRelay();
+    const steps: string[] = [];
+    const worker = new WorkerNode({
+      owner: key,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(key),
+      adapter: {
+        id: 'progress',
+        name: 'progress',
+        skills: [],
+        executeTask: async (ctx) => {
+          const report = ctx.reportProgress;
+          if (!report) throw new Error('PROGRESS_REQUIRED');
+          if (fireAndForget) {
+            void report({ step: 'A' });
+            void report({ step: 'B' });
+          } else if (parallel) {
+            await Promise.all([report({ step: 'A' }), report({ step: 'B' })]);
+          } else {
+            await report({ step: 'A' });
+            await report({ step: 'B' });
+          }
+          return { ok: true };
+        },
+      },
+    });
+    const pending = worker.start({ once: true });
+    const client = new RequesterClient({
+      owner,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(owner),
+    });
+    const result = await client.delegate({
+      to: worker.invite(),
+      title: 'progress',
+      description: 'two synthetic updates',
+      input: {},
+      onProgress: (progress) => {
+        steps.push(progress.step);
+      },
+    });
+    const workerResult = await pending;
+    worker.stop();
+    return { result, workerResult, steps };
+  }
+
+  it('settles sequential and concurrent progress with both steps audited', async () => {
+    for (const parallel of [false, true]) {
+      const { result, workerResult, steps } = await run(parallel);
+      expect(result.state).toBe('SETTLED');
+      expect(verifyAudit(result.bundle).valid).toBe(true);
+      expect(workerResult?.state).toBe('SETTLED');
+      expect(workerResult ? verifyAudit(workerResult.bundle).valid : false).toBe(true);
+      expect(steps).toEqual(['A', 'B']);
+    }
+  });
+
+  it('waits for queued progress before DELIVER when the task does not await it', async () => {
+    const { result, steps } = await run(true, true);
+    expect(result.state).toBe('SETTLED');
+    expect(verifyAudit(result.bundle).valid).toBe(true);
+    expect(steps).toEqual(['A', 'B']);
+    expect(
+      result.bundle.entries.filter((entry) => entry.body.eventType === 'PROGRESS'),
+    ).toHaveLength(2);
+  });
+});
+
+describe('issue 29: delegateMulti accepts a verified JSON null deliverable', () => {
+  it('keeps null, false, zero, and empty values that a single delegate already accepts', async () => {
+    const owner = generateKeyPair();
+    const workerKey = generateKeyPair();
+    const otherKey = generateKeyPair();
+    const relay = new InMemoryRelay();
+    let executions = 0;
+    const worker = new WorkerNode({
+      owner: workerKey,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(workerKey),
+      adapter: {
+        id: 'synthetic',
+        name: 'synthetic',
+        skills: [],
+        executeTask: async (ctx) => {
+          executions += 1;
+          return (ctx.input as { value: Json }).value;
+        },
+      },
+    });
+    const other = new WorkerNode({
+      owner: otherKey,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(otherKey),
+      adapter: {
+        id: 'synthetic-other',
+        name: 'synthetic-other',
+        skills: [],
+        executeTask: async (ctx) => (ctx.input as { value: Json }).value,
+      },
+    });
+    const pending = Promise.all([worker.start(), other.start()]);
+    const client = new RequesterClient({
+      owner,
+      relay,
+      timeoutMs: 5000,
+      approvalProvider: new PolicyAutoApprovalProvider(owner),
+    });
+    const target = { workerDid: workerKey.did, inviteToken: worker.invite() };
+    const control = await client.delegate({
+      to: target.inviteToken,
+      title: 'null control',
+      description: 'synthetic',
+      input: { value: null },
+    });
+    expect(control.state).toBe('SETTLED');
+    expect(control.deliverable).toBeNull();
+    const raced = await client.delegateMulti({
+      workers: [target],
+      mode: 'race',
+      quorumSize: 2,
+      title: 'synthetic boundary',
+      description: 'synthetic',
+      input: { value: null },
+    });
+    expect(raced.status).toBe('SETTLED');
+    expect(raced.deliverable).toBeNull();
+    expect(raced.outputDigest).toBe(digest(null));
+    expect(executions).toBe(2);
+    for (const value of [false, 0, '', {}] as const) {
+      const result = await client.delegateMulti({
+        workers: [target],
+        mode: 'race',
+        title: 'falsy deliverable',
+        description: 'synthetic',
+        input: { value },
+      });
+      expect(result.status).toBe('SETTLED');
+      expect(result.deliverable).toEqual(value);
+      expect(result.outputDigest).toBe(digest(value));
+    }
+    const quorum = await client.delegateMulti({
+      workers: [target, { workerDid: otherKey.did, inviteToken: other.invite() }],
+      mode: 'quorum',
+      quorumSize: 2,
+      title: 'null quorum',
+      description: 'synthetic',
+      input: { value: null },
+    });
+    expect(quorum.status).toBe('SETTLED');
+    expect(quorum.deliverable).toBeNull();
+    expect(quorum.winners).toHaveLength(2);
+    expect(quorum.outputDigest).toBe(digest(null));
+    worker.stop();
+    other.stop();
+    await pending;
+  });
+});
+
+describe('issue 30: MCP invite expiry preserves an explicit zero', () => {
+  it('rejects expiresInSeconds 0 and other invalid TTLs instead of defaulting to 3600', async () => {
+    const owner = generateKeyPair();
+    const server = new AcpMcpServer({ owner, relay: new InMemoryRelay() });
+    async function call(expiresInSeconds: unknown) {
+      const response = await server.handle({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: {
+          name: 'acp_create_invite',
+          arguments: { relayUrl: 'http://127.0.0.1:9', expiresInSeconds },
+        },
+      });
+      const result = (
+        response as { result: { isError?: boolean; content: Array<{ text: string }> } }
+      ).result;
+      return {
+        isError: result.isError === true,
+        value: JSON.parse(result.content[0].text) as { error?: string; inviteToken?: string },
+      };
+    }
+    for (const expiresInSeconds of [0, -1, 2592001, Number.NaN, '3600']) {
+      const created = await call(expiresInSeconds);
+      expect(created.isError).toBe(true);
+      expect(created.value.error).toBe('INVALID_INVITE_EXPIRY');
+      expect(created.value.inviteToken).toBeUndefined();
+    }
+    expect(() =>
+      createInviteToken(
+        {
+          agentCard: createSignedAgentCard(
+            {
+              name: 'synthetic',
+              agentDid: owner.did,
+              relayEndpoint: 'http://127.0.0.1:9',
+              skills: [],
+            },
+            owner,
+          ),
+          expiresInSeconds: 0,
+        },
+        owner,
+      ),
+    ).toThrow('INVALID_INVITE_EXPIRY');
+    const accepted = await call(60);
+    expect(accepted.isError).toBe(false);
+    const invite = parseAndVerifyInviteToken(accepted.value.inviteToken!);
+    expect((Date.parse(invite.expiresAt) - Date.parse(invite.issuedAt)) / 1000).toBe(60);
+    const multi = await server.handle({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: {
+        name: 'acp_delegate_multi',
+        arguments: {
+          mode: 'quorum',
+          quorumSize: 0,
+          title: 'zero quorum',
+          description: 'synthetic',
+          workers: [{ workerDid: owner.did }, { workerDid: generateKeyPair().did }],
+        },
+      },
+    });
+    const quorum = (multi as { result: { isError?: boolean; content: Array<{ text: string }> } })
+      .result;
+    expect(quorum.isError).toBe(true);
+    expect(JSON.parse(quorum.content[0].text)).toMatchObject({ error: 'INVALID_QUORUM_SIZE' });
+    const textual = await server.handle({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'acp_delegate_multi',
+        arguments: {
+          mode: 'quorum',
+          quorumSize: '2',
+          title: 'text quorum',
+          description: 'synthetic',
+          workers: [{ workerDid: owner.did }, { workerDid: generateKeyPair().did }],
+        },
+      },
+    });
+    const textQuorum = (
+      textual as { result: { isError?: boolean; content: Array<{ text: string }> } }
+    ).result;
+    expect(textQuorum.isError).toBe(true);
+    expect(JSON.parse(textQuorum.content[0].text)).toMatchObject({ error: 'INVALID_QUORUM_SIZE' });
   });
 });

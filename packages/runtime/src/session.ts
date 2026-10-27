@@ -24,6 +24,7 @@ import {
   digest,
   openEnvelope,
   inviteRevocationId,
+  resolveDid,
 } from '@acp/core';
 import type {
   Json,
@@ -38,8 +39,9 @@ import type {
   CapabilityToken,
   BudgetSpec,
   RevocationList,
+  Invite,
 } from '@acp/core';
-import type { AuditBundle } from '@acp/ledger';
+import { verifyAudit, type AuditBundle } from '@acp/ledger';
 import { HttpRelayClient } from '@acp/relay';
 import type { RelayTransport } from '@acp/relay';
 import type {
@@ -474,6 +476,26 @@ export class WorkerNode {
         cancelController.signal,
       ]);
       let effectiveIsolationLevel = 'host_adapter';
+      // Concurrent reportProgress calls must not put two PROGRESS frames on the wire
+      // before the first bilateral ACK. The queue also keeps DELIVER behind them.
+      let progressTail: Promise<void> = Promise.resolve();
+      let progressFailure: unknown;
+      const enqueueProgress = (operation: () => Promise<void>): Promise<void> => {
+        const run = progressTail.then(async () => {
+          if (progressFailure) throw progressFailure;
+          if (executionSignal.aborted)
+            throw new Error('EXECUTION_ABORTED: ' + String(executionSignal.reason));
+          await operation();
+        });
+        progressTail = run.then(
+          () => undefined,
+          (error: unknown) => {
+            progressFailure ??= error;
+          },
+        );
+        void run.catch(() => undefined);
+        return run;
+      };
       const context: AgentTaskContext = {
         taskId: m.taskId,
         manifest: structuredClone(m),
@@ -481,30 +503,31 @@ export class WorkerNode {
         workspaceDir: workspace,
         signal: executionSignal,
         reportUsage: (delta) => gateway!.quota.recordMetrics(delta),
-        reportProgress: async (progress) => {
-          if (!progress || typeof progress.step !== 'string' || progress.step.length === 0)
-            throw new Error('INVALID_PROGRESS');
-          if (progress.percent !== undefined && typeof progress.percent !== 'number')
-            throw new Error('INVALID_PROGRESS');
-          if (progress.metrics) {
-            const delta: {
-              inputTokens?: number;
-              outputTokens?: number;
-              toolCalls?: number;
-              wallTimeMs?: number;
-            } = {};
-            if (progress.metrics.inputTokens !== undefined)
-              delta.inputTokens = progress.metrics.inputTokens;
-            if (progress.metrics.outputTokens !== undefined)
-              delta.outputTokens = progress.metrics.outputTokens;
-            if (progress.metrics.toolInvocations !== undefined)
-              delta.toolCalls = progress.metrics.toolInvocations;
-            if (progress.metrics.elapsedMs !== undefined)
-              delta.wallTimeMs = progress.metrics.elapsedMs;
-            if (Object.keys(delta).length > 0) gateway!.quota.recordMetrics(delta);
-          }
-          await wire.sendEvent('PROGRESS', progress);
-        },
+        reportProgress: (progress) =>
+          enqueueProgress(async () => {
+            if (!progress || typeof progress.step !== 'string' || progress.step.length === 0)
+              throw new Error('INVALID_PROGRESS');
+            if (progress.percent !== undefined && typeof progress.percent !== 'number')
+              throw new Error('INVALID_PROGRESS');
+            if (progress.metrics) {
+              const delta: {
+                inputTokens?: number;
+                outputTokens?: number;
+                toolCalls?: number;
+                wallTimeMs?: number;
+              } = {};
+              if (progress.metrics.inputTokens !== undefined)
+                delta.inputTokens = progress.metrics.inputTokens;
+              if (progress.metrics.outputTokens !== undefined)
+                delta.outputTokens = progress.metrics.outputTokens;
+              if (progress.metrics.toolInvocations !== undefined)
+                delta.toolCalls = progress.metrics.toolInvocations;
+              if (progress.metrics.elapsedMs !== undefined)
+                delta.wallTimeMs = progress.metrics.elapsedMs;
+              if (Object.keys(delta).length > 0) gateway!.quota.recordMetrics(delta);
+            }
+            await wire.sendEvent('PROGRESS', progress);
+          }),
         reportIsolation: (level) => {
           effectiveIsolationLevel = level;
         },
@@ -530,6 +553,12 @@ export class WorkerNode {
         },
       };
       const output = await abortable(this.options.adapter.executeTask(context), executionSignal);
+      // A task may return while a queued progress update is still waiting for its ACK.
+      // Skip the drain once the task is already aborted, cancelled, or over budget.
+      if (!executionSignal.aborted && !wire.cancelHandled) {
+        await progressTail;
+        if (progressFailure) throw progressFailure;
+      }
       executionSignal.throwIfAborted();
       gateway.quota.record();
       const delivery = createDelivery(
@@ -648,7 +677,7 @@ export interface DelegateOptions {
 }
 export interface DelegateWorkerTarget {
   workerDid: string;
-  inviteToken?: string;
+  inviteToken?: string | Signed<Invite>;
   relayUrl?: string;
 }
 export interface DelegateReceipt {
@@ -914,6 +943,14 @@ export class RequesterClient {
       (!Number.isInteger(quorumSize) || quorumSize < 1 || quorumSize > count)
     )
       throw new Error('INVALID_QUORUM_SIZE');
+    const resolved = options.workers.map((worker) =>
+      resolveWorkerTarget(worker, this.options.allowPrivateRelay),
+    );
+    const seenWorkers = new Set<string>();
+    for (const worker of resolved) {
+      if (seenWorkers.has(worker.workerDid)) throw new Error('DUPLICATE_WORKER_TARGET');
+      seenWorkers.add(worker.workerDid);
+    }
     const controllers = options.workers.map(() => new AbortController());
     const finished = options.workers.map(() => false);
     const receipts: DelegateReceipt[] = [];
@@ -924,7 +961,7 @@ export class RequesterClient {
         if (!finished[index]) controller.abort(reason);
       });
     };
-    const jobs = options.workers.map(async (worker, index) => {
+    const jobs = resolved.map(async (worker, index) => {
       const signal = options.signal
         ? AbortSignal.any([options.signal, controllers[index].signal])
         : controllers[index].signal;
@@ -946,11 +983,12 @@ export class RequesterClient {
             : undefined,
         });
         finished[index] = true;
-        if (result.state !== 'SETTLED' || result.deliverable === null)
-          throw new Error('VERIFICATION_REJECTED');
+        // SETTLED always carries a verified deliverable, including JSON null.
+        if (result.state !== 'SETTLED') throw new Error('VERIFICATION_REJECTED');
+        const workerDid = verifiedWorkerDid(result.bundle, worker.workerDid);
         const outputDigest = digest(result.deliverable);
         receipts.push({
-          workerDid: worker.workerDid,
+          workerDid,
           taskId: result.taskId,
           outputDigest,
           deliverable: result.deliverable,
@@ -958,13 +996,17 @@ export class RequesterClient {
           accepted: true,
         });
         if (options.mode === 'quorum' && !winnerDigest) {
-          const matches = receipts.filter((receipt) => receipt.outputDigest === outputDigest);
-          if (matches.length >= quorumSize) {
+          const distinct = new Set(
+            receipts
+              .filter((receipt) => receipt.outputDigest === outputDigest)
+              .map((receipt) => receipt.workerDid),
+          );
+          if (distinct.size >= quorumSize) {
             winnerDigest = outputDigest;
             abortUnfinished('QUORUM_REACHED');
           }
         }
-        return { index, result, outputDigest };
+        return { index, result, outputDigest, workerDid };
       } catch (error) {
         finished[index] = true;
         failures += 1;
@@ -974,7 +1016,7 @@ export class RequesterClient {
       }
     });
     if (options.mode === 'race') {
-      let winner: { index: number; result: SessionResult; outputDigest: string };
+      let winner: { index: number; result: SessionResult; outputDigest: string; workerDid: string };
       try {
         winner = await Promise.any(jobs);
       } catch {
@@ -991,20 +1033,25 @@ export class RequesterClient {
         taskIds: receipts.map((receipt) => receipt.taskId),
         winners: [
           {
-            workerDid: options.workers[winner.index].workerDid,
+            workerDid: winner.workerDid,
             taskId: winner.result.taskId,
             outputDigest,
           },
         ],
         receipts,
-        cancelled: options.workers
+        cancelled: resolved
           .filter((_, index) => index !== winner.index && controllers[index].signal.aborted)
           .map((worker) => worker.workerDid),
       };
     }
     await Promise.allSettled(jobs);
     if (!winnerDigest) throw Object.assign(new Error('QUORUM_NOT_REACHED'), { receipts });
-    const winners = receipts.filter((receipt) => receipt.outputDigest === winnerDigest);
+    const seenWinners = new Set<string>();
+    const winners = receipts.filter((receipt) => {
+      if (receipt.outputDigest !== winnerDigest || seenWinners.has(receipt.workerDid)) return false;
+      seenWinners.add(receipt.workerDid);
+      return true;
+    });
     return {
       mode: 'quorum',
       status: 'SETTLED',
@@ -1017,11 +1064,52 @@ export class RequesterClient {
         outputDigest: receipt.outputDigest,
       })),
       receipts,
-      cancelled: options.workers
+      cancelled: resolved
         .filter((_, index) => controllers[index].signal.aborted)
         .map((worker) => worker.workerDid),
     };
   }
+}
+function canonicalInviteToken(token: string | Signed<Invite>): string {
+  if (typeof token === 'string') return token;
+  return 'acp-invite:' + Buffer.from(JSON.stringify(token)).toString('base64url');
+}
+function resolveWorkerTarget(
+  target: DelegateWorkerTarget,
+  allowPrivateRelay?: boolean,
+): DelegateWorkerTarget & { inviteToken?: string } {
+  let workerDid = target.workerDid;
+  let inviteToken: string | undefined;
+  if (target.inviteToken !== undefined && target.inviteToken !== '') {
+    inviteToken = canonicalInviteToken(target.inviteToken);
+    const invite = parseAndVerifyInviteToken(inviteToken, Date.now(), { allowPrivateRelay });
+    const verified = invite.agentCard.payload.agentDid;
+    if (verified !== invite.agentDid) throw new Error('WORKER_DID_MISMATCH');
+    if (workerDid && workerDid !== verified) throw new Error('WORKER_DID_MISMATCH');
+    workerDid = verified;
+  } else {
+    if (typeof workerDid !== 'string' || workerDid.length === 0) throw new Error('INVALID_DID');
+    resolveDid(workerDid);
+  }
+  return { workerDid, inviteToken, relayUrl: target.relayUrl };
+}
+function verifiedWorkerDid(bundle: AuditBundle, expectedDid: string): string {
+  if (!verifyAudit(bundle).valid) throw new Error('VERIFICATION_REJECTED');
+  const accept = bundle.entries.find((entry) => entry.body.eventType === 'ACCEPT');
+  const payload = accept?.body.payload;
+  const worker =
+    payload && typeof payload === 'object' && !Array.isArray(payload)
+      ? (payload as { contract?: { manifest?: TaskManifest } }).contract?.manifest?.worker
+      : undefined;
+  const actors = bundle.checkpoint.actor.payload.actors;
+  if (
+    !worker ||
+    worker.agentDid !== expectedDid ||
+    !actors.includes(worker.ownerDid) ||
+    !verifySigned(bundle.checkpoint.actor, actors[0])
+  )
+    throw new Error('WORKER_DID_MISMATCH');
+  return worker.agentDid;
 }
 export function buildTaskManifest(options: {
   ownerDid: string;

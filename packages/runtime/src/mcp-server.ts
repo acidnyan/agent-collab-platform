@@ -310,10 +310,16 @@ export class AcpMcpServer {
         relayUrl: typeof item.relayUrl === 'string' ? item.relayUrl : relay,
       };
     });
+    const quorumSize =
+      args.quorumSize === undefined
+        ? undefined
+        : typeof args.quorumSize === 'number'
+          ? args.quorumSize
+          : Number.NaN;
     const request: DelegateMultiOptions = {
       workers,
       mode: args.mode,
-      quorumSize: typeof args.quorumSize === 'number' ? args.quorumSize : undefined,
+      quorumSize,
       title: args.title,
       description: typeof args.description === 'string' ? args.description : '',
       input: (args.input ?? null) as Json,
@@ -361,13 +367,15 @@ export class AcpMcpServer {
       },
       this.options.owner,
     );
-    const expiresInSeconds =
-      typeof args.expiresInSeconds === 'number' ? args.expiresInSeconds : undefined;
+    const inviteOptions: { agentCard: typeof card; expiresInSeconds?: number } = {
+      agentCard: card,
+    };
+    if (args.expiresInSeconds !== undefined) {
+      if (typeof args.expiresInSeconds !== 'number') throw new Error('INVALID_INVITE_EXPIRY');
+      inviteOptions.expiresInSeconds = args.expiresInSeconds;
+    }
     return {
-      inviteToken: createInviteToken(
-        { agentCard: card, ...(expiresInSeconds ? { expiresInSeconds } : {}) },
-        this.options.owner,
-      ),
+      inviteToken: createInviteToken(inviteOptions, this.options.owner),
     };
   }
   private revokeToken(args: Record<string, unknown>): Json {

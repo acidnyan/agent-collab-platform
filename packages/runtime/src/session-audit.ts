@@ -69,6 +69,8 @@ export class SessionWire {
   private detached = false;
   private stopped = false;
   private cancellation?: Promise<void>;
+  /** One bilateral send at a time so PROGRESS cannot overtake its own ACK. */
+  private sendTail: Promise<void> = Promise.resolve();
   readonly entries: AuditEntry[] = [];
   onProgress?: (progress: ProgressPayload, envelope: SignedEnvelope) => void | Promise<void>;
   /** Aborts the running task as soon as a CANCEL frame is queued. */
@@ -312,6 +314,14 @@ export class SessionWire {
     await this.rawSend('AUDIT_ACK', ack);
   }
   async sendEvent(eventType: string, payload: unknown): Promise<void> {
+    const run = this.sendTail.then(() => this.transmit(eventType, payload));
+    this.sendTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+  private async transmit(eventType: string, payload: unknown): Promise<void> {
     const data = asJson(payload),
       body = this.body(eventType, data, this.owner.did, this.peerDid),
       draft = signPayload(body, this.owner);
