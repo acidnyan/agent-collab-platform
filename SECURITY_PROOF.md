@@ -67,6 +67,8 @@ Threat class: oversized relay bodies, queue floods, nonce replay, and relay URLs
 
 Public `http:` and `ws:` relay endpoints stay allowed. `conformance/security-hardening.test.ts` (`accepts public http: endpoints`) locks that policy. This proof does not claim cleartext public HTTP is blocked.
 
+`AcpMcpServer` in `packages/runtime/src/mcp-server.ts` applies the same outbound boundary to MCP hosts such as Claude Desktop or Cursor. `acp_delegate_task` and `acp_delegate_multi` parse invite tokens locally. Before any dial they reject a worker DID outside `allowedWorkerDids` with `MCP_WORKER_NOT_ALLOWED`, and a relay URL outside `allowedRelayUrls` with `MCP_RELAY_NOT_ALLOWED`. A plain worker DID must be listed. An invite matches when either `agentDid` or `ownerDid` is listed. Relay URLs from the configured relay, tool arguments, and invite tokens are normalized to origin plus pathname with no trailing slash. A configured relay is not replaced unless `allowAnyRelay` is set or the new URL is allowlisted. `approvalWebhookUrl` posts `{ taskId, summaryHash, reason, approverDid }` and signs the owner decision only when the webhook returns `{ approved: true }`. `{ approved: false }` and non-2xx responses throw `APPROVAL_REJECTED` before task input is sent. The tool descriptions state that input is transmitted externally. `conformance/p1-7-mcp-outbound-policy.test.ts` locks these checks (`pnpm test`).
+
 ## Proof 5 — Envelope and artifact tampering
 
 Threat class: one-byte or one-field edits to a signed `TaskContract` budget or scope, an artifact hash / `UsageReceipt`, or a `RelayAuth` timestamp or signature. Canonicalization is RFC 8785 JCS and the signature algorithm is Ed25519 (`packages/core/src/crypto.ts`).

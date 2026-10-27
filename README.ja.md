@@ -48,6 +48,8 @@ git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-coll
 }
 ```
 
+MCP ホストは、信頼できないツール引数を渡すことがあります。`--allow-worker`、`--allow-relay`、そして `--require-approval` または `--approval-webhook` を付けて、プロンプト注入でタスク入力が任意のワーカーや中継器へ送られないようにします。フラグの説明は下の MCP の節にあります。
+
 ## 1画面サマリ
 
 このプロジェクトは、中央のホスティング SaaS でも、エージェントの検索サイトでもありません。各オーナーが自分の Gateway を動かし、信頼できない Blind Relay 越しに署名付き `TaskContract` と減衰する `CapabilityToken` を交わして協働します。
@@ -215,6 +217,21 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 | `acp_revoke_token`         | 署名済み `RevocationNotice`                                            |
 
 同じ実装が `@acp/runtime` の `AcpMcpServer` です。サーバー鍵は、ツールが行う依頼側の承認に署名します。
+
+`acp_delegate_task` と `acp_delegate_multi` は、タスク入力を中継器経由で対象ワーカーへ送ります。ホストが引数を組み立てるときは、送信先を制限します。
+
+```sh
+pnpm acp mcp-server \
+  --key /tmp/alice.private.json \
+  --relay https://acp-relay.agent-collab.workers.dev \
+  --allow-relay https://acp-relay.agent-collab.workers.dev \
+  --allow-worker did:key:z... \
+  --approval-webhook https://approvals.example/acp
+```
+
+`--allow-worker <did>` と `--allow-relay <url>` は、繰り返しとカンマ区切りの両方を受けます。`--allow-worker` があるとき、素のワーカー DID は一覧と一致しなければなりません。招待トークンは、その `agentDid` または `ownerDid` のどちらかが一覧にあれば許可されます。それ以外は、接続する前に `MCP_WORKER_NOT_ALLOWED` で拒否します。`--allow-relay` があるとき、リレー URL は末尾スラッシュを除いたオリジンとパスへ正規化します。設定した `--relay`、ツールの `relayUrl`、招待トークンに埋め込まれたリレー URL は、すべて一覧と一致しなければなりません。一致しなければ `MCP_RELAY_NOT_ALLOWED` です。ツール呼び出しや招待が `--relay` と別の中継器を選ぶ場合も、その URL が一覧になければ拒否します。許可リストを付けないプログラムからの利用では、`allowAnyRelay: true` を明示したときだけ別の中継器を選べます。許可リストがあるときは、そちらが優先されます。設定したリレー URL は `validateRelayEndpointUrl` で検査します。
+
+`--require-approval` は `InteractiveCliApprovalProvider` を使い、入力を送る前と最終検収のときに標準入力で確認します。`--approval-webhook <url>` は、所有者決定モードの `WebhookApprovalProvider` を使います。`{ taskId, summaryHash, reason, approverDid }` を POST し、HTTP 2xx かつ `{ approved: true }` のときだけ続行します。`{ approved: false }` または 2xx 以外は `APPROVAL_REJECTED` となり、何も送りません。独自の承認器は `AcpMcpServer` の `approvalProvider` に渡します。許可リストとこの承認は、`delegate` / `delegateMulti` がタスク入力を中継器へ書く前に実行されます。挙動は `conformance/p1-7-mcp-outbound-policy.test.ts` が固定します。
 
 ワーカーは実行中に `PROGRESS`（`percent`、`step`、`message`、途中のトークン数やツール回数）を送れます。ほかのセッション封筒と同じ暗号と相互署名の監査に入ります。`delegate(request, { onProgress })` は、`DELIVER` の前に復号した更新を受け取ります。申告された使用量は `QuotaMeter` に計上されます。
 
