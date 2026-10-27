@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFileSync } from 'node:fs';
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -66,6 +66,60 @@ function readDoc(name: string): string {
 
 function probe(nodeVersion: string, flags: string[]): NodePermissionProbe {
   return { nodeVersion, flags };
+}
+
+const SANDBOX_ENV_KEYS = ['HOME', 'LANG', 'TMPDIR', 'TZ'] as const;
+
+// Windows/libuv and macOS CoreFoundation inject these after an explicit env
+// block. They are not credentials. Issue 60: an exact key-set comparison fails
+// on Windows even though sanitizedEnvironment only passed the four keys above.
+const WINDOWS_OS_ENV_KEYS = new Set(
+  [
+    'ALLUSERSPROFILE',
+    'APPDATA',
+    'COMMONPROGRAMFILES',
+    'COMMONPROGRAMFILES(X86)',
+    'COMSPEC',
+    'DRIVERDATA',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'LOCALAPPDATA',
+    'LOGONSERVER',
+    'NUMBER_OF_PROCESSORS',
+    'OS',
+    'PATH',
+    'PATHEXT',
+    'PROCESSOR_ARCHITECTURE',
+    'PROCESSOR_IDENTIFIER',
+    'PROCESSOR_LEVEL',
+    'PROCESSOR_REVISION',
+    'PROGRAMDATA',
+    'PROGRAMFILES',
+    'PROGRAMFILES(X86)',
+    'PSMODULEPATH',
+    'PUBLIC',
+    'SYSTEM',
+    'SYSTEMDRIVE',
+    'SYSTEMROOT',
+    'TEMP',
+    'TMP',
+    'USERDOMAIN',
+    'USERDOMAIN_ROAMINGPROFILE',
+    'USERNAME',
+    'USERPROFILE',
+    'WINDIR',
+  ].map((key) => key.toUpperCase()),
+);
+const DARWIN_OS_ENV_KEYS = new Set(['__CF_USER_TEXT_ENCODING']);
+
+function unexpectedChildEnvKeys(env: Record<string, string | undefined>): string[] {
+  const allowed = new Set<string>(SANDBOX_ENV_KEYS);
+  return Object.keys(env).filter((key) => {
+    if (allowed.has(key)) return false;
+    if (process.platform === 'win32') return !WINDOWS_OS_ENV_KEYS.has(key.toUpperCase());
+    if (process.platform === 'darwin') return !DARWIN_OS_ENV_KEYS.has(key);
+    return true;
+  });
 }
 
 function runNode(
@@ -268,55 +322,7 @@ describe('P2-13 subprocess_restricted boundary', () => {
       expect(body.env.LANG).toBe('C.UTF-8');
       expect(body.env.TMPDIR).toBe(directory);
       expect(body.env.TZ).toBe('UTC');
-      // Windows/libuv and macOS CoreFoundation still inject system variables
-      // after an explicit env block. Those keys are not credentials. Anything
-      // else, including provider keys and NODE_OPTIONS, must stay absent.
-      const allowed = new Set(['HOME', 'LANG', 'TMPDIR', 'TZ']);
-      const windowsOsKeys = new Set(
-        [
-          'ALLUSERSPROFILE',
-          'APPDATA',
-          'COMMONPROGRAMFILES',
-          'COMMONPROGRAMFILES(X86)',
-          'COMSPEC',
-          'DRIVERDATA',
-          'HOMEDRIVE',
-          'HOMEPATH',
-          'LOCALAPPDATA',
-          'LOGONSERVER',
-          'NUMBER_OF_PROCESSORS',
-          'OS',
-          'PATH',
-          'PATHEXT',
-          'PROCESSOR_ARCHITECTURE',
-          'PROCESSOR_IDENTIFIER',
-          'PROCESSOR_LEVEL',
-          'PROCESSOR_REVISION',
-          'PROGRAMDATA',
-          'PROGRAMFILES',
-          'PROGRAMFILES(X86)',
-          'PSMODULEPATH',
-          'PUBLIC',
-          'SYSTEM',
-          'SYSTEMDRIVE',
-          'SYSTEMROOT',
-          'TEMP',
-          'TMP',
-          'USERDOMAIN',
-          'USERDOMAIN_ROAMINGPROFILE',
-          'USERNAME',
-          'USERPROFILE',
-          'WINDIR',
-        ].map((key) => key.toUpperCase()),
-      );
-      const darwinOsKeys = new Set(['__CF_USER_TEXT_ENCODING']);
-      const unexpected = Object.keys(body.env).filter((key) => {
-        if (allowed.has(key)) return false;
-        if (process.platform === 'win32') return !windowsOsKeys.has(key.toUpperCase());
-        if (process.platform === 'darwin') return !darwinOsKeys.has(key);
-        return true;
-      });
-      expect(unexpected).toEqual([]);
+      expect(unexpectedChildEnvKeys(body.env)).toEqual([]);
       expect(body.env.OPENAI_API_KEY).toBeUndefined();
       expect(body.env.NODE_OPTIONS).toBeUndefined();
       expect(JSON.stringify(body)).not.toContain('sk-p213-should-not-leak');
@@ -338,6 +344,122 @@ describe('P2-13 subprocess_restricted boundary', () => {
       else process.env.NODE_OPTIONS = previousOptions;
       await rm(directory, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('issue 60: tolerates injected OS env keys and strips credentials', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'acp-issue60-'));
+    const saved = {
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      NODE_OPTIONS: process.env.NODE_OPTIONS,
+    };
+    process.env.OPENAI_API_KEY = 'sk-issue60-should-not-leak';
+    process.env.ANTHROPIC_API_KEY = 'sk-ant-issue60-should-not-leak';
+    process.env.NODE_OPTIONS = '--inspect';
+    try {
+      const env = sanitizedEnvironment(directory);
+      expect(Object.keys(env).sort()).toEqual([...SANDBOX_ENV_KEYS]);
+      const ran = await runNode(
+        [
+          '-e',
+          'const values=Object.values(process.env).map(String);' +
+            'console.log(JSON.stringify({' +
+            'keys:Object.keys(process.env).sort(),' +
+            'home:process.env.HOME,lang:process.env.LANG,tmpdir:process.env.TMPDIR,tz:process.env.TZ,' +
+            'leaked:values.some(v=>v.includes("sk-issue60")||v.includes("sk-ant-issue60")' +
+            '||v.includes("--inspect"))' +
+            '}))',
+        ],
+        { cwd: directory, env },
+      );
+      expect(ran.code).toBe(0);
+      expect(ran.stderr).not.toContain('sk-issue60-should-not-leak');
+      const body = JSON.parse(ran.stdout) as {
+        keys: string[];
+        home: string;
+        lang: string;
+        tmpdir: string;
+        tz: string;
+        leaked: boolean;
+      };
+      expect(body.home).toBe(directory);
+      expect(body.lang).toBe('C.UTF-8');
+      expect(body.tmpdir).toBe(directory);
+      expect(body.tz).toBe('UTC');
+      expect(body.leaked).toBe(false);
+      expect(body.keys).toEqual(expect.arrayContaining([...SANDBOX_ENV_KEYS]));
+      expect(unexpectedChildEnvKeys(Object.fromEntries(body.keys.map((key) => [key, ''])))).toEqual(
+        [],
+      );
+      if (process.platform !== 'win32' && process.platform !== 'darwin')
+        expect(body.keys).toEqual([...SANDBOX_ENV_KEYS]);
+    } finally {
+      for (const key of Object.keys(saved) as Array<keyof typeof saved>) {
+        if (saved[key] === undefined) delete process.env[key];
+        else process.env[key] = saved[key];
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('issue 61: canonicalizes a symlinked scratch parent before --permission', async () => {
+    expect(detectNodePermissionFlag()).not.toBeNull();
+    const base = await mkdtemp(join(tmpdir(), 'acp-issue61-'));
+    const physicalFolders = join(base, 'private', 'var', 'folders');
+    await mkdir(physicalFolders, { recursive: true });
+    // macOS tmpdir() is /var/folders/... -> /private/var/folders/...
+    // 'junction' is a directory link on Windows without extra privileges.
+    await symlink(join(base, 'private', 'var'), join(base, 'var'), 'junction');
+    const linkedFolders = join(base, 'var', 'folders');
+    const scratch = await mkdtemp(join(linkedFolders, 'acp-task-'));
+    const canonical = await realpath(scratch);
+    const savedTemp = {
+      TMPDIR: process.env.TMPDIR,
+      TMP: process.env.TMP,
+      TEMP: process.env.TEMP,
+    };
+    process.env.TMPDIR = linkedFolders;
+    process.env.TMP = linkedFolders;
+    process.env.TEMP = linkedFolders;
+    try {
+      expect(canonical).not.toBe(scratch);
+      expect(canonical.endsWith(join('private', 'var', 'folders', basename(scratch)))).toBe(true);
+      expect(tmpdir()).toBe(linkedFolders);
+      const script = join(scratch, 'probe.cjs');
+      await writeFile(script, "require('node:fs').readFileSync('probe.cjs'); console.log('ok');\n");
+      const linked = resolveNodePermissionArgs(scratch);
+      const physical = resolveNodePermissionArgs(canonical);
+      expect(linked.args).toContain('--allow-fs-read=' + scratch);
+      expect(physical.args).toContain('--allow-fs-read=' + canonical);
+      expect(linked.args).not.toEqual(physical.args);
+      const denied = await runNode(buildRestrictedSubprocessArgv(scratch, script), {
+        cwd: scratch,
+        env: sanitizedEnvironment(scratch),
+      });
+      expect(denied.code).not.toBe(0);
+      expect(denied.stderr).toContain('ERR_ACCESS_DENIED');
+      expect(denied.stderr).toContain(join(base, 'var'));
+      const allowed = await runNode(
+        buildRestrictedSubprocessArgv(canonical, join(canonical, 'probe.cjs')),
+        { cwd: canonical, env: sanitizedEnvironment(canonical) },
+      );
+      expect(allowed.code).toBe(0);
+      expect(allowed.stdout).toContain('ok');
+      expect(allowed.stderr).not.toContain('ERR_ACCESS_DENIED');
+      const guest = await runSandbox({
+        code: 'return input;',
+        input: { ok: true },
+        timeoutMs: 5000,
+        onTool: async () => null,
+      });
+      expect(guest).toEqual({ ok: true });
+    } finally {
+      for (const key of Object.keys(savedTemp) as Array<keyof typeof savedTemp>) {
+        if (savedTemp[key] === undefined) delete process.env[key];
+        else process.env[key] = savedTemp[key];
+      }
+      await rm(base, { recursive: true, force: true });
     }
   });
 
