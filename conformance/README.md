@@ -26,6 +26,11 @@ A new implementation can consume these JSON vectors without TypeScript. It must
 produce the exact canonical bytes and signatures, accept the valid attenuations,
 reject every invalid attenuation, and implement the same transition table.
 
+`p1-3-adapter-tool-restrictions.test.ts` checks that the Claude Code and Codex
+CLI adapters default to read-only tool flags, that adapter options and
+`extraArgs` can relax a flag without emitting a second copy, and that a mock
+executable receives that argv.
+
 `network-collab.test.ts` covers M2/M3: all five adapters, genuine SDK MCP calls,
 signed discovery/invites, HTTP/SSE/long-poll/WebSocket routes, approval providers,
 OCI fallback, quota/CapGuard rejection and separate-process CLI collaboration.

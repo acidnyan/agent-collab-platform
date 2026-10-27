@@ -33,6 +33,8 @@ pnpm test:security-proof
 | タスク入力をシェルへ継ぎ足す | `CommandAgentAdapter` は入力を `workspaceDir/input.json` と子プロセスの標準入力へ書く。`argv` へは連結しない。文字列の `command` はオーナーが書いた `/bin/sh -c` であり、入力はやはり標準入力だけに届く。 | 同じ証明の adapter argv と workspace listing                                        |
 | スキーマとプロトタイプ汚染   | `packages/core/src/schema.ts` の `validateOutput` と、`parseJsonDeliverable` が使う `JSON.parse`。                                                                                                        | 同じ証明の schema と `__proto__`                                                    |
 
+LLM の CLI アダプタ（`claude`、`codex`、`openai`）も、遠隔のピアから信頼できない入力を受け取ります。`packages/adapters/src/command.ts` の `ClaudeCodeAdapter` / `ClaudeCodeCliAdapter` は、既定で `--tools Read,Glob,Grep`、`--disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch`、`--permission-mode dontAsk` を渡し、シェル実行、ファイル書き込み、Web ツールを無効にします。`CodexCliAdapter` は既定で `--sandbox read-only` を渡します。`extraArgs` または明示的なアダプタオプションは、そのフラグを1つだけ置き換え、同じフラグを重ねて出しません。運用者は、これらのアダプタを OCI コンテナの中で動かす（`--isolation oci`）か、信頼できる依頼者 DID にタスクを制限する（`--allow-requester <did>`）かしなければなりません。既定値、緩和、モック実行ファイルが実際に受け取る引数は `conformance/p1-3-adapter-tool-restrictions.test.ts` が固定します（`pnpm test`）。
+
 ### 証明 3 — セッション間の漏えいと隔離レベルの格下げ
 
 並行する主体が互いの受信箱を読んだり、終わったタスクの状態が残ったり、実行は子プロセスなのに `oci_container` や `container` だと主張したりする攻撃です。`CVE-2026-109619` と `CVE-2026-115419` に対応づけています。
