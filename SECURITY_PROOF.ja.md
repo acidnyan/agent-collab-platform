@@ -112,6 +112,8 @@ HKDF-SHA256 の salt は 12 バイトの AES-GCM nonce である。info は、�
 | 失効した招待が `PROPOSE` で提示される | `WorkerNode` は `ACCEPT` の前に、招待 URI とその JCS ダイジェストへ `RevocationRegistry.assertNotRevoked` を呼ぶ。 | `Proof 10: token revocation and live cancellation` の revoked invites |
 | 失効した能力がツールに提示される | `CapabilityGuard.authorize` は、`MCPProxy` がバックエンドを呼ぶ前に `TOKEN_REVOKED` を投げる。 | 同じ証明の revoked capabilities |
 | 発行者以外が署名した `RevocationNotice` | `verifyRevocationNotice` は Ed25519 の署名者が `issuerDid` であることを要求する。`revoke(notice, expectedIssuer)` は不一致を `INVALID_REVOCATION` で拒否する。 | 同じ証明の forged notice |
+| オフラインのワーカーが `PROPOSE` より前の `REVOKE` を取りこぼす | `deliverRevocation` は暗号化された `SignedRevocationNotice` を並べる。`WorkerNode` は `runOnce`、`start`、`pumpUntil` で、次の `PROPOSE` の前に先頭の `REVOKE` を取り込む。失効した招待または能力は `ACCEPT` の前に `TOKEN_REVOKED` になる。 | `conformance/offline-revocation-inbox.test.ts` の offline worker |
+| 第三者が他人のトークンを `REVOKE` する | 送信者は `issuerDid` でなければならない。招待の通知はワーカー所有者からのものだけを保存する。能力の通知は、その発行者がトークンを発行または委任したときだけ適用する。それ以外は無視し、保存しない。 | 同じファイルの spoofed revocation |
 | 依頼者が実行中のサンドボックスを中断する | `CANCEL` は署名、暗号化、相互署名される。ワーカーはタスクを中断し、子プロセスへ `SIGTERM` のあと `SIGKILL` を送る。封印されたログは `CANCEL` を含み `VALID` になる。 | 同じ証明の cancels a running sandbox |
 
 ## 証明 11 — 暗号化された進捗とビザンチン・クォーラム
