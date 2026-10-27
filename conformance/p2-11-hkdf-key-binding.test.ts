@@ -27,7 +27,7 @@ import type {
   KeyPair,
   SignedEnvelope,
 } from '../packages/core/src/index.js';
-import { verifyAudit } from '../packages/ledger/src/index.js';
+import { AUDIT_VALID_WITHOUT_TRUST_ANCHOR, verifyAudit } from '../packages/ledger/src/index.js';
 import { InMemoryRelay } from '../packages/relay/src/index.js';
 import {
   PolicyAutoApprovalProvider,
@@ -257,8 +257,20 @@ describe('P2-11 HKDF info binds both X25519 public keys', () => {
     expect(result.state).toBe('SETTLED');
     expect(settled?.state).toBe('SETTLED');
     expect(result.deliverable).toEqual({ echoed: input });
-    expect(verifyAudit(result.bundle)).toEqual({ valid: true, status: 'VALID' });
-    expect(verifyAudit(settled!.bundle)).toEqual({ valid: true, status: 'VALID' });
+    expect(verifyAudit(result.bundle)).toEqual({
+      valid: true,
+      status: 'VALID',
+      statusLabel: AUDIT_VALID_WITHOUT_TRUST_ANCHOR,
+      trustAnchorVerified: false,
+      truncationChecked: false,
+    });
+    expect(verifyAudit(settled!.bundle)).toEqual({
+      valid: true,
+      status: 'VALID',
+      statusLabel: AUDIT_VALID_WITHOUT_TRUST_ANCHOR,
+      trustAnchorVerified: false,
+      truncationChecked: false,
+    });
     expect(traffic.length).toBeGreaterThan(0);
     for (const envelope of traffic)
       expect(isEncryptedEnvelopePayload(envelope.payload.payload)).toBe(true);

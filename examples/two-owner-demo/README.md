@@ -12,6 +12,12 @@ pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl
 pnpm acp audit-verify /tmp/acp-demo-audit/bob.jsonl
 ```
 
+Those two commands do not pass a trust anchor, so a valid file prints
+`VALID (no trust anchor: truncation not checked)` in `statusLabel`. `status`
+stays `VALID`. Pin the tail with `--expect-final-state`, `--expect-last-hash`,
+`--expect-entry-count`, or a positional trust-anchor JSON file.
+
+
 Use a fresh audit directory for each run. Sealed logs cannot be appended to.
 
 Alice and Bob generate independent ephemeral Ed25519 did:key identities. Alice

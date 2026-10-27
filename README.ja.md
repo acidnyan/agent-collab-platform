@@ -179,7 +179,7 @@ pnpm acp audit-verify /tmp/alice-audit.jsonl
 pnpm acp discover --relay http://127.0.0.1:8787 --allow-private-relay
 ```
 
-期待する結果は、双方の `SETTLED`、JSON の成果物、監査ステータス `VALID` です。Alice は署名・ダイジェスト・予算、JSON Schema、登録済みの隔離チェックを検証し、最後に署名付きの最終承認を取ります。`--auto-approve` は最終検収をポリシー承認にする明示的な選択です。人間が確認するときは外してください。`acp://invite?token=...` も受け付けます。招待の代わりに `--to <Bob の DID> --relay <URL>` も使えます。Bob は手元の `/tmp/bob-audit.jsonl` を自分で検証できます。
+期待する結果は、双方の `SETTLED`、JSON の成果物、`"valid":true` と `"status":"VALID"` です。トラストアンカーファイルも `--expect-final-state` / `--expect-last-hash` / `--expect-entry-count` も無いとき、`statusLabel` は `VALID (no trust anchor: truncation not checked)` です。ハッシュ鎖は検証できていますが、より古い妥当な接頭辞は排除していません。Alice は署名・ダイジェスト・予算、JSON Schema、登録済みの隔離チェックを検証し、最後に署名付きの最終承認を取ります。`--auto-approve` は最終検収をポリシー承認にする明示的な選択です。人間が確認するときは外してください。`acp://invite?token=...` も受け付けます。招待の代わりに `--to <Bob の DID> --relay <URL>` も使えます。Bob は手元の `/tmp/bob-audit.jsonl` を自分で検証できます。
 
 **アダプタを選ぶ**
 
@@ -212,7 +212,7 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 | -------------------------- | ---------------------------------------------------------------------- |
 | `acp_delegate_task`        | 検証済み成果物、`taskId`、状態、監査の要約                             |
 | `acp_delegate_multi`       | 複数ワーカーへの `race` または `quorum` 委任                           |
-| `acp_verify_audit_bundle`  | `AuditBundle` の暗号検証レポート                                       |
+| `acp_verify_audit_bundle`  | 暗号検証レポート。トラストアンカーで末尾切断を見たかも含む             |
 | `acp_create_invite`        | 署名済み `acp-invite` トークン                                         |
 | `acp_revoke_token`         | 署名済み `RevocationNotice`                                            |
 
@@ -301,7 +301,16 @@ pnpm acp validate approval-receipt /tmp/approval.json
 pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
 ```
 
-承認対象ファイルには、承認する JSON アクションそのものを入れます。トラストアンカーは `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }` です。検証する束とは別に、期待する最新の head を入手してください。ビルド済み CLI は `node cli/dist/index.js <command>` でも起動でき、ワークスペースのバイナリ名は `acp` です。
+承認対象ファイルには、承認する JSON アクションそのものを入れます。位置引数のトラストアンカーは `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }` です。`head` は検証する束とは別に入手してください。`acp audit-verify` は `--expect-final-state <state>`、`--expect-last-hash <hash>`、`--expect-entry-count <n>` も受け付けます。これらの制約もトラストアンカーファイルも無いとき、鎖が検証できても `"status":"VALID"` と `"statusLabel":"VALID (no trust anchor: truncation not checked)"` を出します（`trustAnchorVerified` と `truncationChecked` は false）。この表示は、より古い妥当な接頭辞を排除していないという意味です。制約が一致すると `statusLabel` は `VALID` になり、両方のフラグは true です。アンカーと一致しない接頭辞は、終了コードが非ゼロで `"statusLabel":"INVALID"` になります。
+
+```sh
+pnpm acp audit-verify /tmp/alice-audit.jsonl \
+  --expect-final-state SETTLED \
+  --expect-last-hash sha256:<hex> \
+  --expect-entry-count <n>
+```
+
+ビルド済み CLI は `node cli/dist/index.js <command>` でも起動でき、ワークスペースのバイナリ名は `acp` です。
 
 [デモの手順](examples/two-owner-demo/README.md)、[ワイヤ規約](spec/README.ja.md)、[適合性テスト](conformance/README.md)、[M1 セキュリティモデル](docs/security-model.md)、[セキュリティ証明](SECURITY_PROOF.ja.md) を読んでください。M1 は署名付きリレーエンベロープと、制限付き JavaScript 子プロセスです。M2/M3 は任意の強化 OCI 実行と、ペイロードのエンドツーエンド暗号化を追加します。ルートのコードは Apache-2.0 です。DelegateOS から取り込んだ部分の MIT 表記は [NOTICE](NOTICE) に残しています。
 
