@@ -214,9 +214,11 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 | `acp_delegate_multi`       | 複数ワーカーへの `race` または `quorum` 委任                           |
 | `acp_verify_audit_bundle`  | 暗号検証レポート。トラストアンカーで末尾切断を見たかも含む             |
 | `acp_create_invite`        | 署名済み `acp-invite` トークン                                         |
-| `acp_revoke_token`         | 署名済み `RevocationNotice`                                            |
+| `acp_revoke_token`         | このプロセスに保存した署名済み `RevocationNotice`                      |
+| `acp_discover_workers`     | 中継器に登録された署名済みエージェントカード                           |
+| `acp_inspect_revocations`  | このサーバープロセスに記録された失効通知                               |
 
-同じ実装が `@acp/runtime` の `AcpMcpServer` です。サーバー鍵は、ツールが行う依頼側の承認に署名します。
+`initialize` は、この手順を示したサーバー `instructions` を返します。同じ実装が `@acp/runtime` の `AcpMcpServer` です。サーバー鍵は、ツールが行う依頼側の承認に署名します。`acp_discover_workers` はディレクトリの読み取り専用です。`GET /agents` の前に、委任と同じリレー許可リストと `validateRelayEndpointUrl` を使い、タスク入力は送りません。`acp_inspect_revocations` はメモリ上のレジストリを読むだけで、ワーカーには接続しません。
 
 `acp_delegate_task` と `acp_delegate_multi` は、タスク入力を中継器経由で対象ワーカーへ送ります。ホストが引数を組み立てるときは、送信先を制限します。
 

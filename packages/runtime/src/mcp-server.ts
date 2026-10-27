@@ -7,12 +7,15 @@ import {
   parseAndVerifyInviteToken,
   resolveDid,
   validateRelayEndpointUrl,
+  verifySignedAgentCard,
 } from '@acp/core';
 import type { BudgetSpec, Invite, Json, KeyPair, Schema } from '@acp/core';
 import { RevocationRegistry } from '@acp/core';
 import type { AuditBundle, AuditVerificationOptions } from '@acp/ledger';
 import { verifyAudit } from '@acp/ledger';
+import { HttpRelayClient } from '@acp/relay';
 import type { RelayTransport } from '@acp/relay';
+import { mcpTools } from './mcp-tool-catalog.js';
 import type { Readable, Writable } from 'node:stream';
 import {
   InteractiveCliApprovalProvider,
@@ -85,16 +88,27 @@ class RpcError extends Error {
 
 const PROTOCOL_VERSION = '2024-11-05';
 const OUTBOUND_REASON = 'outbound delegation to a remote ACP worker';
+/**
+ * Guidance MCP clients place ahead of the tool catalog. Keep the workflow,
+ * the sibling-tool split, and the outbound security boundary in this text.
+ */
+const SERVER_INSTRUCTIONS =
+  "This server delegates JSON tasks to remote ACP workers over an encrypted Blind Relay and checks the bilateral audit trail. Call acp_discover_workers or start from an acp-invite, mint one with acp_create_invite when you are the worker owner, then use acp_delegate_task for one worker or acp_delegate_multi for race or quorum. Use acp_verify_audit_bundle with an anchor or expected tail fields when truncation must be ruled out, and use acp_revoke_token with acp_inspect_revocations to record and read local invite or capability revocation. Delegation signs with this process's Ed25519 owner key, and task input is transmitted externally only after allowedWorkerDids, allowedRelayUrls, and the approval provider or webhook allow the dial. Verify and inspect stay on this machine, discover only reads a relay directory, and revoke does not push a notice to a worker. Do not put secrets in arguments: delegation is synchronous and returns the verified result in that same call.";
 
 function rpcError(id: unknown, code: number, message: string): Json {
   return { jsonrpc: '2.0', id: (id ?? null) as Json, error: { code, message } };
 }
 
-function toolResult(value: unknown, isError = false): Json {
-  return {
+function toolResult(value: Json, isError = false): Json {
+  const result: { [key: string]: Json } = {
     content: [{ type: 'text', text: JSON.stringify(value) }],
     isError,
   };
+  // Success payloads are also exposed as structuredContent for outputSchema.
+  // Failures stay in content text so they are not validated as the success schema.
+  if (!isError && value && typeof value === 'object' && !Array.isArray(value))
+    result.structuredContent = value;
+  return result;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -165,99 +179,7 @@ function selectApproval(options: AcpMcpServerOptions): ApprovalProvider {
   return new PolicyAutoApprovalProvider(options.owner);
 }
 
-const tools: Array<{ name: string; description: string; inputSchema: Json }> = [
-  {
-    name: 'acp_delegate_task',
-    description:
-      'Delegate a task to a remote ACP worker and verify its signed audit bundle. Input data is transmitted externally to the worker over the relay.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        relayUrl: { type: 'string' },
-        inviteToken: { type: 'string' },
-        workerDid: { type: 'string' },
-        title: { type: 'string' },
-        description: { type: 'string' },
-        input: {},
-        outputSchema: { type: 'object' },
-        budget: { type: 'object' },
-        minimumIsolationLevel: { type: 'string' },
-      },
-      required: ['title'],
-    },
-  },
-  {
-    name: 'acp_delegate_multi',
-    description:
-      'Delegate a task to multiple remote ACP workers and verify their signed audit bundles. Input data is transmitted externally to the worker agents over the relay. race returns the first verified deliverable. quorum returns the matching verified digest.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        workers: { type: 'array' },
-        mode: { type: 'string', enum: ['race', 'quorum'] },
-        quorumSize: { type: 'integer' },
-        relayUrl: { type: 'string' },
-        title: { type: 'string' },
-        description: { type: 'string' },
-        input: {},
-        outputSchema: { type: 'object' },
-        budget: { type: 'object' },
-        minimumIsolationLevel: { type: 'string' },
-      },
-      required: ['workers', 'mode', 'title'],
-    },
-  },
-  {
-    name: 'acp_verify_audit_bundle',
-    description:
-      'Verify a bilateral AuditBundle and return the verification report. Without expectedFinalState, expectedLastEntryHash, expectedEntryCount, or anchor, a valid result does not check tail truncation and statusLabel says so.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        bundle: { type: 'object' },
-        anchor: { type: 'object' },
-        expectedFinalState: { type: 'string' },
-        expectedLastEntryHash: { type: 'string' },
-        expectedEntryCount: { type: 'integer', minimum: 0 },
-      },
-      required: ['bundle'],
-    },
-  },
-  {
-    name: 'acp_create_invite',
-    description: 'Sign an acp-invite token for this server owner.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        relayUrl: { type: 'string' },
-        name: { type: 'string' },
-        expiresInSeconds: { type: 'integer' },
-        agentDid: { type: 'string' },
-      },
-      required: ['relayUrl'],
-    },
-  },
-  {
-    name: 'acp_revoke_token',
-    description: 'Sign a RevocationNotice and record it in this server registry.',
-    inputSchema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        targetType: { type: 'string', enum: ['invite', 'capability'] },
-        targetId: { type: 'string' },
-        reason: { type: 'string' },
-      },
-      required: ['targetType', 'targetId', 'reason'],
-    },
-  },
-];
-
-/** Dependency-free MCP server for ACP delegation, audit verification, and revocation. */
+/** Dependency-free MCP server for ACP delegation, discovery, audit verification, and revocation. */
 export class AcpMcpServer {
   readonly revocation: RevocationRegistry;
   private readonly allowedWorkers?: ReadonlySet<string>;
@@ -354,11 +276,12 @@ export class AcpMcpServer {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'acp-mcp-server', version: '0.1.0' },
+        instructions: SERVER_INSTRUCTIONS,
       };
     }
     if (method === 'notifications/initialized') return {};
     if (method === 'ping') return {};
-    if (method === 'tools/list') return { tools: tools as unknown as Json };
+    if (method === 'tools/list') return { tools: mcpTools };
     if (method === 'tools/call') return this.toolsCall(params);
     throw new RpcError(-32601, 'Method not found');
   }
@@ -381,6 +304,8 @@ export class AcpMcpServer {
     if (name === 'acp_verify_audit_bundle') return this.verifyBundle(args);
     if (name === 'acp_create_invite') return this.createInvite(args);
     if (name === 'acp_revoke_token') return this.revokeToken(args);
+    if (name === 'acp_discover_workers') return this.discoverWorkers(args);
+    if (name === 'acp_inspect_revocations') return this.inspectRevocations(args);
     throw new RpcError(-32602, 'Unknown tool');
   }
   private client(relay: RelayTransport | string | undefined): RequesterClient {
@@ -664,5 +589,73 @@ export class AcpMcpServer {
     );
     this.revocation.revoke(notice);
     return { notice: notice as unknown as Json };
+  }
+  private async discoverWorkers(args: Record<string, unknown>): Promise<Json> {
+    if (args.relayUrl !== undefined && typeof args.relayUrl !== 'string')
+      throw new RpcError(-32602, 'Invalid params');
+    const explicitRelay = typeof args.relayUrl === 'string' ? args.relayUrl : undefined;
+    this.assertRelays(explicitRelay ? [explicitRelay] : [], []);
+    const selected = explicitRelay ?? this.options.relay;
+    if (!selected) throw new Error('RELAY_REQUIRED');
+    if (typeof selected === 'string')
+      validateRelayEndpointUrl(selected, { allowPrivateRelay: this.options.allowPrivateRelay });
+    const transport: RelayTransport =
+      typeof selected === 'string'
+        ? new HttpRelayClient(selected, { allowPrivateRelay: this.options.allowPrivateRelay })
+        : selected;
+    if (!transport.discover) throw new Error('DISCOVERY_UNAVAILABLE');
+    const cards = await transport.discover();
+    if (!Array.isArray(cards) || cards.some((card) => !verifySignedAgentCard(card)))
+      throw new Error('INVALID_AGENT_CARD');
+    return {
+      relayUrl: typeof selected === 'string' ? selected : null,
+      count: cards.length,
+      workers: cards.map((card) => {
+        const worker: { [key: string]: Json } = {
+          name: card.payload.name,
+          description: card.payload.description,
+          ownerDid: card.payload.ownerDid,
+          agentDid: card.payload.agentDid,
+          relayEndpoint: card.payload.relayEndpoint,
+          expiresAt: card.payload.expiresAt,
+          version: card.payload.version,
+          costModes: card.payload.costModes,
+          skills: card.payload.skills.map((skill) => {
+            const item: { [key: string]: Json } = { id: skill.id, name: skill.name };
+            if (typeof skill.description === 'string') item.description = skill.description;
+            return item;
+          }),
+          signerDid: card.signature.signerDid,
+          signedAt: card.signature.signedAt,
+          signature: card.signature as unknown as Json,
+        };
+        if (card.payload.agentDelegation)
+          worker.agentDelegation = card.payload.agentDelegation as unknown as Json;
+        return worker;
+      }),
+    };
+  }
+  private inspectRevocations(args: Record<string, unknown>): Json {
+    const hasType = args.targetType !== undefined;
+    const hasId = args.targetId !== undefined;
+    if (hasId && !hasType) throw new RpcError(-32602, 'Invalid params');
+    if (hasType && args.targetType !== 'invite' && args.targetType !== 'capability')
+      throw new RpcError(-32602, 'Invalid params');
+    if (hasId && (typeof args.targetId !== 'string' || args.targetId.length === 0))
+      throw new RpcError(-32602, 'Invalid params');
+    const targetType = hasType ? (args.targetType as 'invite' | 'capability') : undefined;
+    const targetId = hasId ? (args.targetId as string) : undefined;
+    const notices = this.revocation.exportNotices().filter((notice) => {
+      if (targetType && notice.payload.targetType !== targetType) return false;
+      if (targetId !== undefined && notice.payload.targetId !== targetId) return false;
+      return true;
+    });
+    const result: { [key: string]: Json } = {
+      count: notices.length,
+      notices: notices as unknown as Json,
+    };
+    if (targetType && targetId !== undefined)
+      result.revoked = this.revocation.isRevoked(targetType, targetId);
+    return result;
   }
 }
