@@ -550,31 +550,179 @@ export function relayHttpHeaders(kind: 'json' | 'empty' | 'sse' = 'json'): Recor
 function relayJson(value: unknown, status = 200): Response {
   return Response.json(value, { status, headers: relayHttpHeaders('json') });
 }
-const RETRYABLE = new Set([
+/**
+ * Protocol codes the relay may place in an HTTP or WebSocket error body.
+ * A thrown message is returned only when it matches one of these strings exactly.
+ * Names that the live relay does not throw today stay listed so a later
+ * constant code is not replaced by RELAY_INTERNAL_ERROR.
+ */
+export const KNOWN_RELAY_ERROR_CODES = [
+  'INVALID_ENVELOPE',
+  'INVALID_SIGNED_ENVELOPE',
+  'ENVELOPE_EXPIRED',
+  'REPLAYED_ENVELOPE',
+  'DUPLICATE_ENVELOPE_ID',
+  'ENVELOPE_TOO_LARGE',
+  'RELAY_CAPACITY',
+  'RELAY_QUEUE_FULL',
   'QUEUE_BYTES_EXCEEDED',
   'QUEUE_LIMIT_EXCEEDED',
+  'RELAY_BYTE_BUDGET_EXCEEDED',
   'SENDER_QUOTA_EXCEEDED',
-  'RATE_LIMITED',
-]);
-const RELAY_AUTH_FAILURES = new Set([
+  'INVALID_RECIPIENT_DID',
+  'MISSING_RECIPIENT_DID',
+  'INVALID_DID',
+  'RELAY_TAMPERING_DETECTED',
+  'INVALID_AGENT_CARD',
+  'AGENT_CARD_EXPIRED',
+  'AGENT_CARD_EXPIRY_TOO_LONG',
+  'AGENT_CARD_DELEGATION_REQUIRED',
+  'AGENT_DELEGATION_REQUIRED',
+  'AGENT_CARD_DELEGATION_INVALID',
+  'AGENT_CARD_TOO_LARGE',
+  'AGENT_REGISTRY_FULL',
+  'AGENT_CARD_TTL_INVALID',
+  'AGENT_OWNER_OR_VERSION_MISMATCH',
+  'NO_AGENT_REGISTERED',
   'RELAY_UNAUTHORIZED',
   'RELAY_AUTH_REQUIRED',
-  'RELAY_AUTH_ORIGIN_MISMATCH',
+  'RELAY_AUTH_INVALID',
+  'RELAY_AUTH_SIGNATURE_INVALID',
+  'RELAY_AUTH_RECIPIENT_MISMATCH',
+  'RELAY_AUTH_ACTION_MISMATCH',
+  'RELAY_AUTH_EXPIRED',
+  'RELAY_AUTH_FUTURE_ISSUED_AT',
+  'RELAY_AUTH_REPLAYED',
+  'RELAY_AUTH_NONCE_INVALID',
   'RELAY_AUTH_ORIGIN_REQUIRED',
+  'RELAY_AUTH_ORIGIN_MISMATCH',
   'RELAY_QUERY_AUTH_DISABLED',
-]);
+  'INVALID_RELAY_ORIGIN',
+  'RATE_LIMITED',
+  'RATE_LIMITER_UNAVAILABLE',
+  'PAYLOAD_TOO_LARGE',
+  'BODY_TOO_LARGE',
+  'MISSING_BODY',
+  'INVALID_JSON',
+  'INVALID_UNICODE',
+  'INVALID_LIMIT',
+  'INVALID_RELAY_LIMIT',
+  'INVALID_TIMEOUT',
+  'INVALID_WAIT',
+  'MISSING_ENVELOPE_ID',
+  'UNSUPPORTED_METHOD',
+  'NOT_FOUND',
+  'WEBSOCKET_UPGRADE_REQUIRED',
+  'INVALID_REQUEST',
+  'INVALID_RELAY_SNAPSHOT',
+  'RELAY_INTERNAL_ERROR',
+] as const;
+const KNOWN_RELAY_ERROR_CODE_SET: ReadonlySet<string> = new Set(KNOWN_RELAY_ERROR_CODES);
+/** HTTP status for each public code. Anything else is 500 RELAY_INTERNAL_ERROR. */
+const RELAY_ERROR_STATUS: Readonly<Record<string, number>> = {
+  INVALID_ENVELOPE: 400,
+  INVALID_SIGNED_ENVELOPE: 400,
+  ENVELOPE_EXPIRED: 400,
+  REPLAYED_ENVELOPE: 400,
+  DUPLICATE_ENVELOPE_ID: 400,
+  ENVELOPE_TOO_LARGE: 400,
+  RELAY_CAPACITY: 400,
+  RELAY_QUEUE_FULL: 400,
+  INVALID_RECIPIENT_DID: 400,
+  MISSING_RECIPIENT_DID: 400,
+  INVALID_DID: 400,
+  RELAY_TAMPERING_DETECTED: 400,
+  INVALID_AGENT_CARD: 400,
+  AGENT_CARD_EXPIRED: 400,
+  AGENT_CARD_EXPIRY_TOO_LONG: 400,
+  AGENT_CARD_DELEGATION_REQUIRED: 400,
+  AGENT_DELEGATION_REQUIRED: 400,
+  AGENT_CARD_DELEGATION_INVALID: 400,
+  AGENT_CARD_TOO_LARGE: 400,
+  AGENT_REGISTRY_FULL: 400,
+  AGENT_CARD_TTL_INVALID: 400,
+  AGENT_OWNER_OR_VERSION_MISMATCH: 400,
+  INVALID_RELAY_ORIGIN: 400,
+  PAYLOAD_TOO_LARGE: 400,
+  BODY_TOO_LARGE: 400,
+  MISSING_BODY: 400,
+  INVALID_JSON: 400,
+  INVALID_UNICODE: 400,
+  INVALID_LIMIT: 400,
+  INVALID_RELAY_LIMIT: 400,
+  INVALID_TIMEOUT: 400,
+  INVALID_WAIT: 400,
+  MISSING_ENVELOPE_ID: 400,
+  UNSUPPORTED_METHOD: 400,
+  WEBSOCKET_UPGRADE_REQUIRED: 400,
+  INVALID_REQUEST: 400,
+  INVALID_RELAY_SNAPSHOT: 400,
+  RELAY_UNAUTHORIZED: 401,
+  RELAY_AUTH_REQUIRED: 401,
+  RELAY_AUTH_INVALID: 401,
+  RELAY_AUTH_SIGNATURE_INVALID: 401,
+  RELAY_AUTH_RECIPIENT_MISMATCH: 401,
+  RELAY_AUTH_ACTION_MISMATCH: 401,
+  RELAY_AUTH_EXPIRED: 401,
+  RELAY_AUTH_FUTURE_ISSUED_AT: 401,
+  RELAY_AUTH_REPLAYED: 401,
+  RELAY_AUTH_NONCE_INVALID: 401,
+  RELAY_AUTH_ORIGIN_REQUIRED: 401,
+  RELAY_AUTH_ORIGIN_MISMATCH: 401,
+  RELAY_QUERY_AUTH_DISABLED: 401,
+  QUEUE_BYTES_EXCEEDED: 429,
+  QUEUE_LIMIT_EXCEEDED: 429,
+  RELAY_BYTE_BUDGET_EXCEEDED: 429,
+  SENDER_QUOTA_EXCEEDED: 429,
+  RATE_LIMITED: 429,
+  NOT_FOUND: 404,
+  NO_AGENT_REGISTERED: 404,
+  RATE_LIMITER_UNAVAILABLE: 503,
+  RELAY_INTERNAL_ERROR: 500,
+};
+if (
+  KNOWN_RELAY_ERROR_CODE_SET.size !== KNOWN_RELAY_ERROR_CODES.length ||
+  KNOWN_RELAY_ERROR_CODES.some((code) => RELAY_ERROR_STATUS[code] === undefined) ||
+  Object.keys(RELAY_ERROR_STATUS).some((code) => !KNOWN_RELAY_ERROR_CODE_SET.has(code))
+)
+  throw new Error('RELAY_ERROR_CATALOG_MISMATCH');
+function malformedClientCode(error: unknown): string | undefined {
+  if (error instanceof SyntaxError || error instanceof URIError) return 'INVALID_REQUEST';
+  if (error instanceof TypeError && error.message === 'Invalid URL') return 'INVALID_REQUEST';
+  return undefined;
+}
+/**
+ * Public error code for an untrusted caller.
+ * Parser and URL failures become INVALID_REQUEST. Any other message is returned
+ * only when it is an allowlisted code; otherwise the result is the fallback
+ * when that fallback is itself allowlisted, or RELAY_INTERNAL_ERROR.
+ */
+export function sanitizeRelayErrorCode(error: unknown, fallback = 'RELAY_INTERNAL_ERROR'): string {
+  const raw =
+    malformedClientCode(error) ?? (error instanceof Error ? error.message : String(error));
+  if (KNOWN_RELAY_ERROR_CODE_SET.has(raw)) return raw;
+  return KNOWN_RELAY_ERROR_CODE_SET.has(fallback) ? fallback : 'RELAY_INTERNAL_ERROR';
+}
+export interface MappedRelayError {
+  status: number;
+  error: string;
+}
+/** Status and public code for one relay failure. Internal detail never leaves this function. */
+export function mapRelayError(error: unknown): MappedRelayError {
+  const code = sanitizeRelayErrorCode(error);
+  return { status: RELAY_ERROR_STATUS[code] ?? 500, error: code };
+}
 /** Auth failures that must stay 401s with a stable error code. */
 export function relayAuthFailure(error: unknown): string | undefined {
-  return error instanceof Error && RELAY_AUTH_FAILURES.has(error.message)
-    ? error.message
-    : undefined;
+  if (!(error instanceof Error)) return undefined;
+  const code = sanitizeRelayErrorCode(error);
+  return RELAY_ERROR_STATUS[code] === 401 ? code : undefined;
 }
 export function relayErrorResponse(error: unknown, relay?: InMemoryRelay): Response {
-  const authFailure = relayAuthFailure(error);
-  if (authFailure) return relayJson({ error: authFailure }, 401);
-  if (error instanceof Error && RETRYABLE.has(error.message)) {
+  const mapped = mapRelayError(error);
+  if (mapped.status === 429) {
     return Response.json(
-      { error: error.message },
+      { error: mapped.error },
       {
         status: 429,
         headers: {
@@ -584,7 +732,7 @@ export function relayErrorResponse(error: unknown, relay?: InMemoryRelay): Respo
       },
     );
   }
-  return relayJson({ error: String(error) }, 400);
+  return relayJson({ error: mapped.error }, mapped.status);
 }
 /**
  * Bearer credential for a relay request.

@@ -449,7 +449,7 @@ describe.each(['receive', 'subscribe'] as const)('M3.1 WebSocket %s authenticati
     server.relay.send(e);
     expect(
       await wsRequest(socket, { method: action, recipientDid: bob.did, authToken: token }),
-    ).toEqual({ error: 'RELAY_UNAUTHORIZED' });
+    ).toEqual({ ok: false, error: 'RELAY_UNAUTHORIZED' });
     // An unauthorized subscription must not receive later messages either.
     const later = envelope();
     server.relay.send(later);

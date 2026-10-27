@@ -22,6 +22,7 @@ pnpm test:security-proof
 | ゲスト JavaScript が `process` を読む        | `runSandbox` はタスクコードをプロトタイプ無しの `vm` で評価する。Node API はラッパープロセス側だけが持つ。                                                                                                                        | 同じ証明の sandbox guest                                                    |
 | 本物のプロバイダー鍵と、タスク単位のハンドル | `packages/adapters/src/credential-proxy.ts` の `startCredentialProxy` がランダムなループバックトークンを発行する。`ClaudeCodeAdapter.executeTask` は子プロセスへそのトークンだけを置き、本物の鍵はホストの `fetch` にだけ付ける。 | 同じ証明の credential proxy と Claude adapter                               |
 | 偽造・別タスク・クローズ済みハンドル         | プロキシは `Authorization` / `x-api-key` をそのタスクのトークンと比較し、`close()` までしか待たない。                                                                                                                             | 同じ証明の forged, other-task, and closed handles                           |
+| リレーのエラー本文がパスやトークンを漏らす   | `packages/relay/src/fetch.ts` の `sanitizeRelayErrorCode` と `mapRelayError` は、許可リストのプロトコルコードだけを返す。`startLocalRelay` は Node HTTP の catch と WebSocket の `message` catch に同じフィルタを使う。それ以外の例外は HTTP 500 `RELAY_INTERNAL_ERROR`。壊れた JSON と不正な URL は HTTP 400 `INVALID_REQUEST`。 | `conformance/p2-10-relay-error-sanitization.test.ts` |
 
 ### 証明 2 — コマンド注入とパストラバーサル
 
