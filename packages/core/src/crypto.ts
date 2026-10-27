@@ -2,15 +2,28 @@
 // Adapted from newtro/delegateos src/core/crypto.ts (MIT), Scott Smith.
 // ACP uses Node Ed25519, SHA-256 and did:key; it is not DelegateOS SJT wire format.
 import {
+  createCipheriv,
+  createDecipheriv,
   createHash,
-  generateKeyPairSync,
-  createPublicKey,
   createPrivateKey,
+  createPublicKey,
+  diffieHellman,
+  generateKeyPairSync,
+  hkdfSync,
+  randomBytes,
   sign,
   verify,
 } from 'node:crypto';
+import type { KeyObject } from 'node:crypto';
 import canonicalizeJson from 'canonicalize';
-import type { KeyPair, Signature, Signed } from './types.js';
+import type {
+  EncryptedEnvelopePayload,
+  Json,
+  KeyPair,
+  Signature,
+  Signed,
+  SignedEnvelope,
+} from './types.js';
 const alphabet = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 function base58(bytes: Uint8Array): string {
   let n = BigInt('0x' + Buffer.from(bytes).toString('hex'));
@@ -146,4 +159,180 @@ export function verifySignature(
   expectedDid?: string,
 ): boolean {
   return verifySigned({ payload, signature }, expectedDid);
+}
+const X25519_P = (1n << 255n) - 19n;
+const X25519_SPKI_PREFIX = Buffer.from('302a300506032b656e032100', 'hex');
+const X25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b656e04220420', 'hex');
+export interface EnvelopeHeaderContext {
+  taskId: string;
+  seq: number;
+  eventType: string;
+  senderDid: string;
+  recipientDid: string;
+}
+function mod(n: bigint, p: bigint): bigint {
+  const r = n % p;
+  return r >= 0n ? r : r + p;
+}
+function modInverse(a: bigint, p: bigint): bigint {
+  let result = 1n;
+  let base = mod(a, p);
+  let exp = p - 2n;
+  while (exp > 0n) {
+    if (exp & 1n) result = (result * base) % p;
+    base = (base * base) % p;
+    exp >>= 1n;
+  }
+  return result;
+}
+function readLe(bytes: Uint8Array): bigint {
+  let n = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) n = (n << 8n) + BigInt(bytes[i]!);
+  return n;
+}
+function writeLe(value: bigint, length = 32): Buffer {
+  const out = Buffer.alloc(length);
+  let n = value;
+  for (let i = 0; i < length; i++) {
+    out[i] = Number(n & 0xffn);
+    n >>= 8n;
+  }
+  return out;
+}
+/**
+ * Montgomery u from an Ed25519 public key. RFC 8032 encodes y little-endian
+ * with the x sign in bit 255; RFC 7748 uses u = (1 + y) / (1 - y).
+ */
+function x25519PublicFromDid(did: string): KeyObject {
+  const y =
+    readLe(resolveDid(did).export({ format: 'der', type: 'spki' }).subarray(-32)) &
+    ((1n << 255n) - 1n);
+  const yMod = y % X25519_P;
+  const denom = mod(1n - yMod, X25519_P);
+  if (denom === 0n) throw new Error('INVALID_DID');
+  const u = mod((1n + yMod) * modInverse(denom, X25519_P), X25519_P);
+  return createPublicKey({
+    key: Buffer.concat([X25519_SPKI_PREFIX, writeLe(u)]),
+    format: 'der',
+    type: 'spki',
+  });
+}
+/** Ed25519 seed to the clamped X25519 scalar from the SHA-512 prefix. */
+function x25519PrivateFromKey(key: KeyPair): KeyObject {
+  const seed = createPrivateKey(key.privateKey)
+    .export({ format: 'der', type: 'pkcs8' })
+    .subarray(-32);
+  const scalar = Buffer.from(createHash('sha512').update(seed).digest().subarray(0, 32));
+  scalar[0] &= 248;
+  scalar[31] &= 127;
+  scalar[31] |= 64;
+  return createPrivateKey({
+    key: Buffer.concat([X25519_PKCS8_PREFIX, scalar]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+}
+function envelopeAad(context: EnvelopeHeaderContext): Buffer {
+  return Buffer.from(
+    canonicalize({
+      taskId: context.taskId,
+      seq: context.seq,
+      eventType: context.eventType,
+      senderDid: context.senderDid,
+      recipientDid: context.recipientDid,
+    }),
+  );
+}
+function importEphemeralPublic(encoded: string): KeyObject {
+  const raw = Buffer.from(encoded, 'base64url');
+  const der = raw.length === 32 ? Buffer.concat([X25519_SPKI_PREFIX, raw]) : raw;
+  return createPublicKey({ key: der, format: 'der', type: 'spki' });
+}
+export function isEncryptedEnvelopePayload(payload: unknown): payload is EncryptedEnvelopePayload {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const value = payload as Record<string, unknown>;
+  return (
+    value.__acpEncrypted === 'X25519-HKDF-AES256GCM' &&
+    typeof value.ephemeralPublicKey === 'string' &&
+    typeof value.iv === 'string' &&
+    typeof value.ciphertext === 'string' &&
+    typeof value.tag === 'string'
+  );
+}
+export function encryptEnvelopePayload(
+  payload: Json,
+  context: EnvelopeHeaderContext,
+): EncryptedEnvelopePayload {
+  const ephemeral = generateKeyPairSync('x25519');
+  const shared = diffieHellman({
+    privateKey: ephemeral.privateKey,
+    publicKey: x25519PublicFromDid(context.recipientDid),
+  });
+  const iv = randomBytes(12);
+  const aad = envelopeAad(context);
+  const key = Buffer.from(hkdfSync('sha256', shared, iv, aad, 32));
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(aad);
+  const ciphertext = Buffer.concat([
+    cipher.update(Buffer.from(JSON.stringify(payload), 'utf8')),
+    cipher.final(),
+  ]);
+  return {
+    __acpEncrypted: 'X25519-HKDF-AES256GCM',
+    ephemeralPublicKey: ephemeral.publicKey
+      .export({ format: 'der', type: 'spki' })
+      .toString('base64url'),
+    iv: iv.toString('base64url'),
+    ciphertext: ciphertext.toString('base64url'),
+    tag: cipher.getAuthTag().toString('base64url'),
+  };
+}
+export function decryptEnvelopePayload<T = Json>(
+  payload: Json,
+  recipient: KeyPair,
+  context: EnvelopeHeaderContext,
+  options?: { requireEncrypted?: boolean },
+): T {
+  if (!isEncryptedEnvelopePayload(payload)) {
+    if (options?.requireEncrypted) throw new Error('ENVELOPE_DECRYPTION_FAILED');
+    return payload as T;
+  }
+  try {
+    const iv = Buffer.from(payload.iv, 'base64url');
+    const aad = envelopeAad(context);
+    const shared = diffieHellman({
+      privateKey: x25519PrivateFromKey(recipient),
+      publicKey: importEphemeralPublic(payload.ephemeralPublicKey),
+    });
+    const key = Buffer.from(hkdfSync('sha256', shared, iv, aad, 32));
+    const decipher = createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAAD(aad);
+    decipher.setAuthTag(Buffer.from(payload.tag, 'base64url'));
+    const plain = Buffer.concat([
+      decipher.update(Buffer.from(payload.ciphertext, 'base64url')),
+      decipher.final(),
+    ]);
+    return JSON.parse(plain.toString('utf8')) as T;
+  } catch (error) {
+    if (error instanceof Error && error.message === 'ENVELOPE_DECRYPTION_FAILED') throw error;
+    throw new Error('ENVELOPE_DECRYPTION_FAILED');
+  }
+}
+export function openEnvelope<T = Json>(
+  envelope: SignedEnvelope,
+  recipient: KeyPair,
+  options?: { requireEncrypted?: boolean },
+): T {
+  return decryptEnvelopePayload<T>(
+    envelope.payload.payload,
+    recipient,
+    {
+      taskId: envelope.payload.taskId,
+      seq: envelope.payload.seq,
+      eventType: envelope.payload.eventType,
+      senderDid: envelope.payload.senderDid,
+      recipientDid: envelope.payload.recipientDid,
+    },
+    options,
+  );
 }

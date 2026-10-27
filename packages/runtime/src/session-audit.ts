@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
   digest,
+  openEnvelope,
   signAck,
   signEnvelope,
   signPayload,
@@ -43,6 +44,8 @@ export async function receiveRelay(
 export class SessionWire {
   private outgoing = 0;
   private incoming = 0;
+  /** Opened session views keep the ciphertext envelope so delivery verification can check it. */
+  private readonly sealedByView = new WeakMap<SignedEnvelope, SignedEnvelope>();
   readonly entries: AuditEntry[] = [];
   constructor(
     readonly relay: RelayTransport,
@@ -64,8 +67,13 @@ export class SessionWire {
           payload: asJson(payload),
         },
         this.owner,
+        { encrypt: true },
       ),
     );
+  }
+  /** Ciphertext that still matches the outer signature, when `view` was opened for the session. */
+  sealed(view: SignedEnvelope): SignedEnvelope {
+    return this.sealedByView.get(view) ?? view;
   }
   private check(e: SignedEnvelope): SignedEnvelope {
     if (
@@ -75,9 +83,13 @@ export class SessionWire {
       e.payload.seq !== this.incoming++
     )
       throw new Error('INVALID_OR_REPLAYED_SESSION_ENVELOPE');
-    if (e.payload.eventType === 'ERROR')
-      throw new Error('PEER_REJECTED: ' + JSON.stringify(e.payload.payload));
-    return e;
+    // The signature covers ciphertext. Open a copy so later session code reads plaintext.
+    const view = structuredClone(e);
+    view.payload.payload = asJson(openEnvelope(e, this.owner));
+    this.sealedByView.set(view, e);
+    if (view.payload.eventType === 'ERROR')
+      throw new Error('PEER_REJECTED: ' + JSON.stringify(view.payload.payload));
+    return view;
   }
   async rawReceive(expected: string | string[], initial?: SignedEnvelope): Promise<SignedEnvelope> {
     const e = this.check(initial ?? (await receiveRelay(this.relay, this.owner.did, this.signal)));

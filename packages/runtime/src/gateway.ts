@@ -85,7 +85,13 @@ export class OwnerGateway {
       this.machine.state !== 'DELIVERED'
     )
       throw new Error('INVALID_VERIFICATION_STATE');
-    const result = await engine.verify(this.contract, envelope, this.approvals, approval);
+    const result = await engine.verify(
+      this.contract,
+      envelope,
+      this.approvals,
+      approval,
+      this.owner,
+    );
     const verification = this.applyOwn(result.event);
     const settlement = result.accepted ? this.applyOwn('SETTLE') : undefined;
     return { result, verification, settlement };

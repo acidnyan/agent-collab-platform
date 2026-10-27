@@ -77,7 +77,7 @@ pnpm build
 --relay https://acp-relay.agent-collab.workers.dev
 ```
 
-公開中継器は非信頼の転送路です。エンベロープは署名付き平文のまま運ばれます。自前で動かす場合は `packages/relay/wrangler.toml.example` を `packages/relay/wrangler.toml` にコピーし、自分の Wrangler アカウントでデプロイします。例は、キューとレジストリを保持する Durable Object をバインドします。
+公開中継器は非信頼の転送路です。セッションのペイロードは受信者の `did:key` へ暗号化され、中継器が保存するのは暗号文です。経路のメタデータは見えたままです。自前で動かす場合は `packages/relay/wrangler.toml.example` を `packages/relay/wrangler.toml` にコピーし、自分の Wrangler アカウントでデプロイします。例は、キューとレジストリを保持する Durable Object をバインドします。
 
 **ターミナル 1 — 同一マシン・オフラインの中継器**
 
@@ -132,7 +132,7 @@ Claude / Codex のバイナリは、あらかじめインストールされて�
 
 Command と CLI アダプタは、オーナーが設定した実行ファイルを新しい作業ディレクトリで動かします。これはプロセスの衛生管理であり、OS レベルのファイルシステム隔離やネットワーク隔離ではありません。信頼できない JavaScript には制限付きサンドボックスを使います。OCI は、すでに存在する `node:22-bookworm-slim` イメージを使い、Podman を優先し、ネットワークを切り、Linux capability を落とし、メモリと PID を制限します。ランタイムが無いときは制限付き子プロセスへフォールバックし、実際の隔離レベルを署名付き証明に記録します。コンテナの実行失敗は、再実行せずに表面化します。実行証明が必須のとき、署名済みマニフェストが `sandboxPolicy.allowSubprocessFallback: true` を明示していない限り、OCI から下位の隔離への格下げは検証で拒否されます。
 
-リレーのエンベロープは M1 の署名付き平文のままです。転送には HTTPS を使います。中継器はオーナーの鍵を持たず、仕事を認可できません。ただしメタデータとペイロードを観測したり、配送を拒否したりはできます。このマイルストーンではエンドツーエンド暗号化は未実装です。詳細は [セキュリティモデル](docs/security-model.md) と [SECURITY_PROOF.ja.md](SECURITY_PROOF.ja.md) を見てください。
+セッションのペイロードは、一時的な X25519、HKDF-SHA256、AES-256-GCM で暗号化し、ヘッダを暗号文に束縛します。転送には HTTPS を使います。中継器はオーナーの鍵を持たず、仕事を認可できず、タスク入力も CapabilityToken も結果も読めません。経路のメタデータの観測と、配送の拒否はできます。詳細は [セキュリティモデル](docs/security-model.md) と [SECURITY_PROOF.ja.md](SECURITY_PROOF.ja.md) を見てください。
 
 HTTP の受信、SSE ストリーム、WebSocket の受信と購読には、受信者が新しく署名した `RelayAuth` トークンが必要です。`WorkerNode`、`RequesterClient`、CLI は自動で署名します。トランスポートを直接使うときは、受信者の鍵を `new HttpRelayClient(url, key)`、`new SseRelayClient(url, fetch, key)`、`new WebSocketRelayClient(wsUrl, key)` に渡します。HTTP / SSE は第3引数に非同期のトークン生成関数も受け付け、WebSocket は第2引数で受け付けます。生の HTTP では `createRelayAuthToken(key, { action })` を `Authorization: Bearer <token>`、`x-acp-relay-auth`、または `auth` クエリに載せて送れます。操作に合わせて `receive`、`stream`、`subscribe` を使います。トークンは時計のずれ5分で期限切れになり、ノンスは境界付きの再生キャッシュに残っているあいだ一度だけ使えます。`InMemoryRelay.receive(did)` は既定ではトークンなしで使えます。そこでも要求するときは `{ requireAuth: true }` で構築します。
 
@@ -196,4 +196,4 @@ pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
 
 承認対象ファイルには、承認する JSON アクションそのものを入れます。トラストアンカーは `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }` です。検証する束とは別に、期待する最新の head を入手してください。ビルド済み CLI は `node cli/dist/index.js <command>` でも起動でき、ワークスペースのバイナリ名は `acp` です。
 
-[デモの手順](examples/two-owner-demo/README.md)、[ワイヤ規約](spec/README.ja.md)、[適合性テスト](conformance/README.md)、[M1 セキュリティモデル](docs/security-model.md)、[セキュリティ証明](SECURITY_PROOF.ja.md) を読んでください。M1 は署名付き平文のリレーと、制限付き JavaScript 子プロセスです。M2/M3 は任意の強化 OCI 実行を追加します。ペイロードのエンドツーエンド暗号化は今後の作業です。ルートのコードは Apache-2.0 です。DelegateOS から取り込んだ部分の MIT 表記は [NOTICE](NOTICE) に残しています。
+[デモの手順](examples/two-owner-demo/README.md)、[ワイヤ規約](spec/README.ja.md)、[適合性テスト](conformance/README.md)、[M1 セキュリティモデル](docs/security-model.md)、[セキュリティ証明](SECURITY_PROOF.ja.md) を読んでください。M1 は署名付きリレーエンベロープと、制限付き JavaScript 子プロセスです。M2/M3 は任意の強化 OCI 実行と、ペイロードのエンドツーエンド暗号化を追加します。ルートのコードは Apache-2.0 です。DelegateOS から取り込んだ部分の MIT 表記は [NOTICE](NOTICE) に残しています。

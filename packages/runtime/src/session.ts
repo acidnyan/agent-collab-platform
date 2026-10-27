@@ -22,6 +22,7 @@ import {
   verifySignedAgentCard,
   schemaNarrows,
   digest,
+  openEnvelope,
 } from '@acp/core';
 import type {
   Json,
@@ -339,7 +340,8 @@ export class WorkerNode {
       first.payload.seq !== 0
     )
       throw new Error('INVALID_PROPOSAL_ENVELOPE');
-    const data = first.payload.payload as unknown as Proposal,
+    // PROPOSE arrives before the session wire is constructed. Open it with the same rule.
+    const data = openEnvelope(first, this.options.owner) as unknown as Proposal,
       m = data.proposal?.payload;
     if (!m || first.payload.senderDid !== m.requester.ownerDid || first.payload.taskId !== m.taskId)
       throw new Error('INVALID_PROPOSAL');
@@ -686,7 +688,7 @@ export class RequesterClient {
           signal,
         });
       const { result, verification, settlement } = await gateway.verifyAndSettle(
-        envelope,
+        wire.sealed(envelope),
         this.options.verificationEngine ?? new VerificationEngine(),
         approval,
       );

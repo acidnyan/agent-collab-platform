@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from 'node:crypto';
-import { digest, signPayload, verifySigned } from './crypto.js';
+import { digest, encryptEnvelopePayload, signPayload, verifySigned } from './crypto.js';
 import { validateSchema } from './schema.js';
 import type {
   Ack,
@@ -65,11 +65,23 @@ export function signAck(payload: Ack, key: KeyPair) {
 export function signEnvelope(
   payload: Omit<Envelope, 'type' | 'envelopeId' | 'senderDid'>,
   key: KeyPair,
+  options?: { encrypt?: boolean },
 ): SignedEnvelope {
-  return signPayload(
-    { ...payload, type: 'SignedEnvelope', envelopeId: randomUUID(), senderDid: key.did },
-    key,
-  );
+  const envelope: Envelope = {
+    ...payload,
+    type: 'SignedEnvelope',
+    envelopeId: randomUUID(),
+    senderDid: key.did,
+  };
+  if (options?.encrypt)
+    envelope.payload = encryptEnvelopePayload(envelope.payload, {
+      taskId: envelope.taskId,
+      seq: envelope.seq,
+      eventType: envelope.eventType,
+      senderDid: envelope.senderDid,
+      recipientDid: envelope.recipientDid,
+    });
+  return signPayload(envelope, key);
 }
 export function verifyEnvelope(envelope: SignedEnvelope, recipientDid?: string): boolean {
   try {
