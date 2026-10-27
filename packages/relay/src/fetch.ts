@@ -58,6 +58,11 @@ export interface RelaySnapshot {
 }
 export interface InMemoryRelayOptions {
   requireAuth?: boolean;
+  /**
+   * Direct and network checks accept a `RelayAuth` token that omits `origin`.
+   * A token that includes a different origin is still rejected.
+   */
+  allowUnboundRelayAuth?: boolean;
   maxSeenEntries?: number;
   maxAuthSeenEntries?: number;
   maxQueues?: number;
@@ -143,6 +148,7 @@ export class InMemoryRelay {
   readonly agents = new Map<string, SignedAgentCard>();
   readonly tamper?: (e: SignedEnvelope) => SignedEnvelope;
   readonly requireAuth: boolean;
+  readonly allowUnboundRelayAuth: boolean;
   readonly maxSeenEntries: number;
   readonly maxAuthSeenEntries: number;
   readonly maxQueues: number;
@@ -160,6 +166,7 @@ export class InMemoryRelay {
     const config = typeof options === 'function' ? { tamper: options } : (options ?? {});
     this.tamper = config.tamper;
     this.requireAuth = config.requireAuth ?? false;
+    this.allowUnboundRelayAuth = config.allowUnboundRelayAuth ?? false;
     this.maxSeenEntries = positiveLimit(config.maxSeenEntries, DEFAULT_MAX_SEEN_ENTRIES);
     this.maxAuthSeenEntries = positiveLimit(
       config.maxAuthSeenEntries,
@@ -193,10 +200,26 @@ export class InMemoryRelay {
     map.set(key, now + ttlMs);
     this.version++;
   }
-  authenticate(recipientDid: string, token?: string, action?: RelayAuthAction): boolean {
+  authenticate(
+    recipientDid: string,
+    token?: string,
+    action?: RelayAuthAction,
+    check?: RelayAuthContext,
+  ): boolean {
     this.evictExpired();
-    const result = verifyRelayAuthToken(token ?? '', recipientDid);
-    if (!result.valid || (action !== undefined && result.action !== action)) return false;
+    const result = verifyRelayAuthToken(token ?? '', recipientDid, {
+      expectedOrigin: check?.expectedOrigin,
+      requireOrigin: check?.requireOrigin,
+    });
+    if (!result.valid) {
+      if (
+        result.reason === 'RELAY_AUTH_ORIGIN_MISMATCH' ||
+        result.reason === 'RELAY_AUTH_ORIGIN_REQUIRED'
+      )
+        throw new Error(result.reason);
+      return false;
+    }
+    if (action !== undefined && result.action !== action) return false;
     const key = recipientDid + ':' + result.nonce;
     if (this.authSeen.has(key)) return false;
     this.remember(this.authSeen, key, this.maxAuthSeenEntries, this.authSeenTtlMs);
@@ -207,8 +230,10 @@ export class InMemoryRelay {
     recipientDid: string,
     token?: string,
     action: RelayAuthAction = 'receive',
+    check?: RelayAuthContext,
   ): () => SignedEnvelope | undefined {
-    if (!this.authenticate(recipientDid, token, action)) throw new Error('RELAY_UNAUTHORIZED');
+    if (!this.authenticate(recipientDid, token, action, check))
+      throw new Error('RELAY_UNAUTHORIZED');
     return () => this.dequeue(recipientDid);
   }
   private ensureQueue(did: string): StoredEnvelope[] {
@@ -281,6 +306,7 @@ export class InMemoryRelay {
     recipientDid: string,
     authToken?: string | number,
     _signal?: AbortSignal,
+    check?: RelayAuthContext,
   ): SignedEnvelope | undefined {
     if (
       (typeof authToken === 'string' || this.requireAuth) &&
@@ -288,6 +314,7 @@ export class InMemoryRelay {
         recipientDid,
         typeof authToken === 'string' ? authToken : undefined,
         'receive',
+        check,
       )
     )
       throw new Error('RELAY_UNAUTHORIZED');
@@ -304,9 +331,15 @@ export class InMemoryRelay {
     return item?.envelope;
   }
   /** Recipient-authenticated removal of one queued envelope. False when it is not queued. */
-  acknowledge(recipientDid: string, envelopeId: string, token?: string): boolean {
+  acknowledge(
+    recipientDid: string,
+    envelopeId: string,
+    token?: string,
+    check?: RelayAuthContext,
+  ): boolean {
     this.evictExpired();
-    if (!this.authenticate(recipientDid, token, 'receive')) throw new Error('RELAY_UNAUTHORIZED');
+    if (!this.authenticate(recipientDid, token, 'receive', check))
+      throw new Error('RELAY_UNAUTHORIZED');
     const queue = this.queues.get(recipientDid);
     if (!queue) return false;
     const index = queue.findIndex((item) => item.envelope.payload.envelopeId === envelopeId);
@@ -489,7 +522,16 @@ export class InMemoryRelay {
     this.version++;
   }
 }
-export interface RelayFetchOptions {
+export interface RelayAuthContext {
+  expectedOrigin?: string;
+  requireOrigin?: boolean;
+}
+export interface RelayRequestAuthOptions {
+  allowQueryAuth?: boolean;
+  requireOrigin?: boolean;
+  allowUnboundRelayAuth?: boolean;
+}
+export interface RelayFetchOptions extends RelayRequestAuthOptions {
   relay?: InMemoryRelay;
   agentCard?: SignedAgentCard;
 }
@@ -514,9 +556,22 @@ const RETRYABLE = new Set([
   'SENDER_QUOTA_EXCEEDED',
   'RATE_LIMITED',
 ]);
+const RELAY_AUTH_FAILURES = new Set([
+  'RELAY_UNAUTHORIZED',
+  'RELAY_AUTH_REQUIRED',
+  'RELAY_AUTH_ORIGIN_MISMATCH',
+  'RELAY_AUTH_ORIGIN_REQUIRED',
+  'RELAY_QUERY_AUTH_DISABLED',
+]);
+/** Auth failures that must stay 401s with a stable error code. */
+export function relayAuthFailure(error: unknown): string | undefined {
+  return error instanceof Error && RELAY_AUTH_FAILURES.has(error.message)
+    ? error.message
+    : undefined;
+}
 export function relayErrorResponse(error: unknown, relay?: InMemoryRelay): Response {
-  if (error instanceof Error && error.message === 'RELAY_UNAUTHORIZED')
-    return relayJson({ error: 'RELAY_UNAUTHORIZED' }, 401);
+  const authFailure = relayAuthFailure(error);
+  if (authFailure) return relayJson({ error: authFailure }, 401);
   if (error instanceof Error && RETRYABLE.has(error.message)) {
     return Response.json(
       { error: error.message },
@@ -531,13 +586,40 @@ export function relayErrorResponse(error: unknown, relay?: InMemoryRelay): Respo
   }
   return relayJson({ error: String(error) }, 400);
 }
-export function relayRequestToken(request: Request, url = new URL(request.url)): string | undefined {
+/**
+ * Bearer credential for a relay request.
+ * `?auth=` is ignored unless `allowQueryAuth` is set, so tokens do not land in
+ * access logs, proxy logs, or Referer headers by default.
+ */
+export function extractRelayAuthToken(
+  request: Request,
+  options: { allowQueryAuth?: boolean } = {},
+  url = new URL(request.url),
+): string | undefined {
+  if (url.searchParams.has('auth') && options.allowQueryAuth !== true)
+    throw new Error('RELAY_QUERY_AUTH_DISABLED');
   return (
     request.headers.get('authorization')?.match(/^Bearer (\S+)$/i)?.[1] ??
     request.headers.get('x-acp-relay-auth') ??
-    url.searchParams.get('auth') ??
-    undefined
+    (options.allowQueryAuth === true ? (url.searchParams.get('auth') ?? undefined) : undefined)
   );
+}
+export function relayRequestToken(
+  request: Request,
+  url = new URL(request.url),
+  options?: { allowQueryAuth?: boolean },
+): string | undefined {
+  return extractRelayAuthToken(request, options, url);
+}
+export function relayAuthContext(
+  request: Request,
+  relay: InMemoryRelay,
+  options: RelayRequestAuthOptions = {},
+): RelayAuthContext {
+  const requireOrigin =
+    options.requireOrigin ??
+    !(options.allowUnboundRelayAuth === true || relay.allowUnboundRelayAuth);
+  return { expectedOrigin: new URL(request.url).origin, requireOrigin };
 }
 export type DurableLongPoll =
   | { mode: 'response'; response: Response }
@@ -551,7 +633,11 @@ export type DurableLongPoll =
  * Authenticate a long-poll and pop envelopes that are already queued.
  * The caller waits outside the durable-object lock when the inbox is empty.
  */
-export function beginDurableLongPoll(relay: InMemoryRelay, request: Request): DurableLongPoll {
+export function beginDurableLongPoll(
+  relay: InMemoryRelay,
+  request: Request,
+  auth: RelayRequestAuthOptions = {},
+): DurableLongPoll {
   try {
     const url = new URL(request.url);
     const recipient = url.searchParams.get('recipient') ?? '';
@@ -559,10 +645,15 @@ export function beginDurableLongPoll(relay: InMemoryRelay, request: Request): Du
     const ms = Number(url.searchParams.get('waitMs'));
     if (!url.searchParams.has('waitMs') || !Number.isFinite(ms) || ms < 0)
       throw new Error('INVALID_WAIT');
-    const token = relayRequestToken(request, url);
+    const token = extractRelayAuthToken(request, auth, url);
     // A request that is already aborted must not authenticate or pop.
     if (request.signal.aborted) return { mode: 'response', response: relayJson({ envelopes: [] }) };
-    const receive = relay.openInbox(recipient, token, 'receive');
+    const receive = relay.openInbox(
+      recipient,
+      token,
+      'receive',
+      relayAuthContext(request, relay, auth),
+    );
     if (request.signal.aborted) return { mode: 'response', response: relayJson({ envelopes: [] }) };
     const buffered: SignedEnvelope[] = [];
     let envelope: SignedEnvelope | undefined;
@@ -577,6 +668,11 @@ export function createRelayFetchHandler(
   options: RelayFetchOptions = {},
 ): (request: Request) => Promise<Response> {
   const relay = options.relay ?? new InMemoryRelay();
+  const authOptions: RelayRequestAuthOptions = {
+    allowQueryAuth: options.allowQueryAuth,
+    requireOrigin: options.requireOrigin,
+    allowUnboundRelayAuth: options.allowUnboundRelayAuth,
+  };
   const json = (value: unknown, status = 200) =>
     Response.json(value, { status, headers: relayHttpHeaders('json') });
   const empty = (status: 202 | 204) =>
@@ -654,7 +750,12 @@ export function createRelayFetchHandler(
         if (!envelopeId) throw new Error('MISSING_ENVELOPE_ID');
         const recipient = url.searchParams.get('recipient') ?? '';
         resolveDid(recipient);
-        const removed = relay.acknowledge(recipient, envelopeId, relayRequestToken(request, url));
+        const removed = relay.acknowledge(
+          recipient,
+          envelopeId,
+          extractRelayAuthToken(request, authOptions, url),
+          relayAuthContext(request, relay, authOptions),
+        );
         return removed ? empty(204) : json({ error: 'NOT_FOUND' }, 404);
       }
       if (request.method === 'GET' && ['/envelopes', '/stream'].includes(path)) {
@@ -664,11 +765,12 @@ export function createRelayFetchHandler(
           ? Number(url.searchParams.get('waitMs'))
           : undefined;
         if (ms !== undefined && (!Number.isFinite(ms) || ms < 0)) throw new Error('INVALID_WAIT');
-        const token = relayRequestToken(request, url);
+        const token = extractRelayAuthToken(request, authOptions, url);
         const receive = relay.openInbox(
           recipient,
           token,
           path === '/stream' ? 'stream' : 'receive',
+          relayAuthContext(request, relay, authOptions),
         );
         if (path === '/stream') {
           let stop = () => {};

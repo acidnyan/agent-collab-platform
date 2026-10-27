@@ -428,13 +428,19 @@ describe('Proof 3: cross-session state bleed and isolation downgrade', () => {
     relay.send(later);
     const denied = await handler(
       new Request('https://relay.example/envelopes?recipient=' + encodeURIComponent(bob.did), {
-        headers: { authorization: 'Bearer ' + createRelayAuthToken(eve) },
+        headers: {
+          authorization:
+            'Bearer ' + createRelayAuthToken(eve, { origin: 'https://relay.example' }),
+        },
       }),
     );
     expect(denied.status).toBe(401);
     const allowed = await handler(
       new Request('https://relay.example/envelopes?recipient=' + encodeURIComponent(bob.did), {
-        headers: { authorization: 'Bearer ' + createRelayAuthToken(bob) },
+        headers: {
+          authorization:
+            'Bearer ' + createRelayAuthToken(bob, { origin: 'https://relay.example' }),
+        },
       }),
     );
     expect(allowed.status).toBe(200);
