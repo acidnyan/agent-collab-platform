@@ -405,10 +405,12 @@ describe('P2-13 subprocess_restricted boundary', () => {
 
   it('issue 61: canonicalizes a symlinked scratch parent before --permission', async () => {
     expect(detectNodePermissionFlag()).not.toBeNull();
-    const base = await mkdtemp(join(tmpdir(), 'acp-issue61-'));
+    // Resolve tmpdir() first. On macOS it is /var/folders/... and /var is already
+    // a symlink, so an unresolved base makes Node deny `resource: '/var'` before
+    // it ever reaches the scratch link created below.
+    const base = await realpath(await mkdtemp(join(tmpdir(), 'acp-issue61-')));
     const physicalFolders = join(base, 'private', 'var', 'folders');
     await mkdir(physicalFolders, { recursive: true });
-    // macOS tmpdir() is /var/folders/... -> /private/var/folders/...
     // 'junction' is a directory link on Windows without extra privileges.
     await symlink(join(base, 'private', 'var'), join(base, 'var'), 'junction');
     const linkedFolders = join(base, 'var', 'folders');
@@ -439,7 +441,15 @@ describe('P2-13 subprocess_restricted boundary', () => {
       });
       expect(denied.code).not.toBe(0);
       expect(denied.stderr).toContain('ERR_ACCESS_DENIED');
-      expect(denied.stderr).toContain(join(base, 'var'));
+      // The denied resource is the inner `var` link. Windows prints that path
+      // through util.inspect, which doubles backslashes and may add a \\?\ prefix,
+      // so the raw join() string is not always a substring of stderr.
+      const deniedLink = join(basename(base), 'var');
+      const mentionsDeniedLink =
+        denied.stderr.includes(deniedLink) ||
+        denied.stderr.includes(deniedLink.replaceAll('\\', '\\\\')) ||
+        denied.stderr.includes(deniedLink.replaceAll('\\', '/'));
+      expect(mentionsDeniedLink, denied.stderr).toBe(true);
       const allowed = await runNode(
         buildRestrictedSubprocessArgv(canonical, join(canonical, 'probe.cjs')),
         { cwd: canonical, env: sanitizedEnvironment(canonical) },
