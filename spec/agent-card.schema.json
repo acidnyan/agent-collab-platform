@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://acp-spec.local/schemas/v0.1/agent-card.schema.json",
+  "title": "agent-card",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["payload", "signature"],
+  "properties": {
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "name",
+        "description",
+        "ownerDid",
+        "agentDid",
+        "relayEndpoint",
+        "skills",
+        "costModes",
+        "version",
+        "expiresAt"
+      ],
+      "properties": {
+        "type": { "const": "AgentCard" },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "ownerDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "agentDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "relayEndpoint": { "type": "string", "minLength": 1 },
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "name"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "name": { "type": "string" },
+              "description": { "type": "string" },
+              "inputSchema": {},
+              "outputSchema": {}
+            }
+          }
+        },
+        "costModes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": ["worker_byok", "bilateral_quota", "external_settlement_plugin"]
+          }
+        },
+        "version": { "type": "string", "minLength": 1 },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "agentDelegation": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "$defs": {
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signerDid", "canonicalization", "payloadDigest", "signedAt", "signature"],
+      "properties": {
+        "signerDid": {
+          "type": "string",
+          "pattern": "^did:key:z[1-9A-HJ-NP-Za-km-z]{32,128}$"
+        },
+        "canonicalization": { "const": "RFC8785-JCS" },
+        "payloadDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+        "signedAt": { "type": "string", "format": "date-time" },
+        "signature": { "type": "string", "pattern": "^ed25519:[A-Za-z0-9_-]{86}$" }
+      }
+    }
+  }
+}

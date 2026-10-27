@@ -1,12 +1,42 @@
 // SPDX-License-Identifier: Apache-2.0
-import { signPayload, verifySigned, resolveDid } from './crypto.js';
-import type { BudgetSpec, Json, KeyPair, Signed } from './types.js';
+import { signPayload, verifySignature, verifySigned, resolveDid } from './crypto.js';
+import type { BudgetSpec, Json, KeyPair, Signature, Signed } from './types.js';
 export interface AgentSkill {
   id: string;
   name: string;
   description?: string;
   inputSchema?: Json;
   outputSchema?: Json;
+}
+/** Lifetime applied when createSignedAgentCard is not given an explicit expiresAt. */
+export const DEFAULT_AGENT_CARD_EXPIRY_MS = 24 * 60 * 60 * 1000;
+/** Longest allowed expiresAt - signedAt window. Matches the invite TTL cap of 30 days. */
+export const MAX_AGENT_CARD_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * Statement signed by agentDid's key when the card owner is a different DID.
+ * Binds ownerDid, agentDid, relayEndpoint, and expiresAt. A signature for one tuple
+ * does not authorize a different owner, agent, relay, or expiry.
+ */
+export interface AgentCardDelegation {
+  type: 'AgentCardDelegation';
+  ownerDid: string;
+  agentDid: string;
+  relayEndpoint: string;
+  expiresAt: string;
+}
+export function agentCardDelegationStatement(fields: {
+  ownerDid: string;
+  agentDid: string;
+  relayEndpoint: string;
+  expiresAt: string;
+}): AgentCardDelegation {
+  return {
+    type: 'AgentCardDelegation',
+    ownerDid: fields.ownerDid,
+    agentDid: fields.agentDid,
+    relayEndpoint: fields.relayEndpoint,
+    expiresAt: fields.expiresAt,
+  };
 }
 export interface DiscoveryAgentCard {
   type: 'AgentCard';
@@ -18,7 +48,22 @@ export interface DiscoveryAgentCard {
   skills: AgentSkill[];
   costModes: BudgetSpec['costBearer'][];
   version: string;
+  /** ISO-8601 timestamp after which the card must be rejected. */
+  expiresAt: string;
+  /**
+   * Signature by agentDid over agentCardDelegationStatement.
+   * Required when agentDid differs from ownerDid, and absent when they are the same key.
+   */
+  agentDelegation?: Signature;
 }
+export type CreateAgentCardOptions = Omit<
+  DiscoveryAgentCard,
+  'type' | 'ownerDid' | 'version' | 'description' | 'costModes' | 'expiresAt' | 'agentDelegation'
+> &
+  Partial<Pick<DiscoveryAgentCard, 'version' | 'description' | 'costModes' | 'expiresAt'>> & {
+    /** Key that controls agentDid. Required when agentDid is not owner.did. */
+    agentKey?: KeyPair;
+  };
 export type SignedAgentCard = Signed<DiscoveryAgentCard>;
 function relayUrl(value: string): void {
   const u = new URL(value);
@@ -87,31 +132,95 @@ export function validateRelayEndpointUrl(
   )
     blocked();
 }
+function resolveAgentKey(options: CreateAgentCardOptions, agentKey?: KeyPair): KeyPair | undefined {
+  if (
+    agentKey &&
+    options.agentKey &&
+    (agentKey.did !== options.agentKey.did || agentKey.privateKey !== options.agentKey.privateKey)
+  )
+    throw new Error('AGENT_DELEGATION_REQUIRED');
+  return agentKey ?? options.agentKey;
+}
 export function createSignedAgentCard(
-  options: Omit<DiscoveryAgentCard, 'type' | 'ownerDid' | 'version' | 'description' | 'costModes'> &
-    Partial<Pick<DiscoveryAgentCard, 'version' | 'description' | 'costModes'>>,
+  options: CreateAgentCardOptions,
   owner: KeyPair,
+  agentKey?: KeyPair,
 ): SignedAgentCard {
+  const resolvedAgentKey = resolveAgentKey(options, agentKey);
+  const signedAt = new Date().toISOString();
+  const expiresAt =
+    options.expiresAt ?? new Date(Date.parse(signedAt) + DEFAULT_AGENT_CARD_EXPIRY_MS).toISOString();
+  if (options.agentDid !== owner.did) {
+    if (!resolvedAgentKey || resolvedAgentKey.did !== options.agentDid)
+      throw new Error('AGENT_DELEGATION_REQUIRED');
+  } else if (resolvedAgentKey && resolvedAgentKey.did !== owner.did) {
+    throw new Error('AGENT_DELEGATION_REQUIRED');
+  }
+  const delegationFields = {
+    ownerDid: owner.did,
+    agentDid: options.agentDid,
+    relayEndpoint: options.relayEndpoint,
+    expiresAt,
+  };
+  const agentDelegation =
+    options.agentDid === owner.did
+      ? undefined
+      : signPayload(agentCardDelegationStatement(delegationFields), resolvedAgentKey!, signedAt)
+          .signature;
   const card = signPayload(
     {
       type: 'AgentCard' as const,
-      version: '0.2.0',
-      description: 'ACP worker',
-      costModes: ['worker_byok'] as BudgetSpec['costBearer'][],
-      ...options,
-      ownerDid: owner.did,
+      version: options.version ?? '0.2.0',
+      description: options.description ?? 'ACP worker',
+      costModes: options.costModes ?? (['worker_byok'] as BudgetSpec['costBearer'][]),
+      name: options.name,
+      skills: options.skills,
+      ...delegationFields,
+      ...(agentDelegation ? { agentDelegation } : {}),
     },
     owner,
+    signedAt,
   );
   if (!verifySignedAgentCard(card)) throw new Error('INVALID_AGENT_CARD');
   return card;
 }
-export function verifySignedAgentCard(card: SignedAgentCard): boolean {
+function validAgentCardExpiry(expiresAt: string, signedAt: string, now: number): boolean {
+  const expires = Date.parse(expiresAt);
+  const signed = Date.parse(signedAt);
+  return (
+    typeof expiresAt === 'string' &&
+    typeof signedAt === 'string' &&
+    Number.isFinite(expires) &&
+    Number.isFinite(signed) &&
+    expires > signed &&
+    expires > now &&
+    expires - signed <= MAX_AGENT_CARD_EXPIRY_MS
+  );
+}
+export function verifySignedAgentCard(card: SignedAgentCard, now = Date.now()): boolean {
   try {
     const p = card.payload;
     relayUrl(p.relayEndpoint);
     resolveDid(p.agentDid);
     resolveDid(p.ownerDid);
+    if (!validAgentCardExpiry(p.expiresAt, card.signature.signedAt, now)) return false;
+    if (p.agentDid === p.ownerDid) {
+      if (p.agentDelegation !== undefined) return false;
+    } else if (
+      !p.agentDelegation ||
+      !verifySignature(
+        agentCardDelegationStatement({
+          ownerDid: p.ownerDid,
+          agentDid: p.agentDid,
+          relayEndpoint: p.relayEndpoint,
+          expiresAt: p.expiresAt,
+        }),
+        p.agentDelegation,
+        p.agentDid,
+      ) ||
+      !(Date.parse(p.agentDelegation.signedAt) < Date.parse(p.expiresAt))
+    )
+      return false;
     return (
       verifySigned(card, p.ownerDid) &&
       p.type === 'AgentCard' &&
@@ -148,6 +257,7 @@ export function toA2AAgentCard(card: SignedAgentCard) {
     ownerDid: p.ownerDid,
     agentDid: p.agentDid,
     relayEndpoint: p.relayEndpoint,
+    expiresAt: p.expiresAt,
     costModes: p.costModes,
     signedAgentCard: card,
   };
@@ -224,7 +334,7 @@ export function parseAndVerifyInviteToken(
     if (
       !verifySigned(signed, p.ownerDid) ||
       p.type !== 'AgentInvite' ||
-      !verifySignedAgentCard(p.agentCard) ||
+      !verifySignedAgentCard(p.agentCard, now) ||
       p.agentCard.payload.ownerDid !== p.ownerDid ||
       p.agentCard.payload.agentDid !== p.agentDid ||
       p.agentCard.payload.relayEndpoint !== p.relayUrl ||

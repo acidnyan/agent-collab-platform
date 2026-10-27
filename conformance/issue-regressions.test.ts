@@ -1498,6 +1498,7 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
     const worker = new WorkerNode({
       owner: key,
       agentDid: agent.did,
+      agentKey: agent,
       relay,
       timeoutMs: 1500,
       publishToRegistry: true,
@@ -1573,6 +1574,7 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
     const worker = new WorkerNode({
       owner: key,
       agentDid: agent.did,
+      agentKey: agent,
       relay,
       timeoutMs: 5000,
       publishToRegistry: true,
@@ -1623,6 +1625,7 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
     const worker = new WorkerNode({
       owner: key,
       agentDid: agent.did,
+      agentKey: agent,
       relay,
       timeoutMs: 5000,
       publishToRegistry: true,
@@ -1687,6 +1690,7 @@ describe('issue 33: owner DID and agent DID address the same worker', () => {
     const alias = new WorkerNode({
       owner: key,
       agentDid: agent.did,
+      agentKey: agent,
       relay,
       timeoutMs: 5000,
       publishToRegistry: true,
