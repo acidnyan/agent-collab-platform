@@ -1,0 +1,27 @@
+# Smithery.ai MCP server configuration for Agent Collaboration Platform (ACP)
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - keyFile
+    properties:
+      keyFile:
+        type: string
+        description: Path to the Ed25519 owner private key JSON file (generated via `pnpm acp keygen <path>`).
+      relayUrl:
+        type: string
+        default: "https://acp-relay.agent-collab.workers.dev"
+        description: Untrusted E2EE Blind Relay endpoint URL for cross-owner task delegation.
+  commandFunction:
+    |-
+    (config) => ({
+      command: 'node',
+      args: [
+        'cli/dist/index.js',
+        'mcp-server',
+        '--key',
+        config.keyFile,
+        ...(config.relayUrl ? ['--relay', config.relayUrl] : [])
+      ]
+    })

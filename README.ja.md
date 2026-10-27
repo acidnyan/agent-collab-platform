@@ -2,8 +2,50 @@
 
 [English (README.md)](./README.md) | **日本語**
 
-> **ステータス**: `v0.2.0 (M0–M3 参照実装)` — 所有者をまたぐエージェント協働プラットフォーム
-> **目的**: 異なる所有者の自律エージェントが、相手のランタイムや認証情報を信頼せずに、仕事の分割・委譲・実行・検証・検収を行うためのオープンソースのプロトコルと参照実装です。
+[![CI](https://github.com/acidnyan/agent-collab-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/badge/release-v1.0.0-2ea44f)](https://github.com/acidnyan/agent-collab-platform/releases)
+[![MCP Server](https://img.shields.io/badge/MCP-Server_Ready-0969da)](./SKILL.md)
+[![E2EE](https://img.shields.io/badge/E2EE-X25519_%2B_AES--256--GCM-8250df)](./SECURITY_PROOF.ja.md)
+[![Security Proofs](https://img.shields.io/badge/Security_Proofs-11%2F11_Passing-2da44e)](./SECURITY_PROOF.ja.md)
+[![Tests](https://img.shields.io/badge/Tests-375_Passing-2da44e)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0_%2F_MIT-blue.svg)](./LICENSE)
+[![X (@takapon01234)](https://img.shields.io/badge/X-%40takapon01234-000000?logo=x)](https://x.com/takapon01234)
+
+> **ステータス**: `v1.0.0 (M0–M3.1 参照実装)` — 所有者をまたぐエージェント協働プラットフォーム  
+> **目的**: 異なる所有者の自律エージェントが、相手のランタイムや認証情報を信頼せずに、仕事の分割・委譲・実行・検証・検収を行うためのオープンソースのプロトコルと参照実装です。  
+> **作成者**: [@takapon01234](https://x.com/takapon01234)
+
+<p align="center">
+  <img src="docs/assets/acp-hero-demo.svg" width="100%" alt="ACP Architecture & Live E2EE Flow" />
+</p>
+
+## 30秒クイックスタート（ワンコマンド・デモ & MCP サーバー設定）
+
+4シナリオのゼロトラスト協働・改ざん遮断デモをワンコマンドで実行できます（オフライン動作・APIキー不要）：
+
+```sh
+git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-collab-platform && pnpm install --frozen-lockfile && pnpm build && pnpm acp demo
+```
+
+**Claude Desktop**、**Cursor**、**Codex**、**Grok Bot** から MCP サーバー（`acp mcp-server`）として直接呼び出す場合の設定例：
+
+```json
+{
+  "mcpServers": {
+    "acp": {
+      "command": "node",
+      "args": [
+        "/path/to/agent-collab-platform/cli/dist/index.js",
+        "mcp-server",
+        "--key",
+        "/tmp/alice.private.json",
+        "--relay",
+        "https://acp-relay.agent-collab.workers.dev"
+      ]
+    }
+  }
+}
+```
 
 ## 1画面サマリ
 
@@ -223,3 +265,9 @@ pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
 承認対象ファイルには、承認する JSON アクションそのものを入れます。トラストアンカーは `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }` です。検証する束とは別に、期待する最新の head を入手してください。ビルド済み CLI は `node cli/dist/index.js <command>` でも起動でき、ワークスペースのバイナリ名は `acp` です。
 
 [デモの手順](examples/two-owner-demo/README.md)、[ワイヤ規約](spec/README.ja.md)、[適合性テスト](conformance/README.md)、[M1 セキュリティモデル](docs/security-model.md)、[セキュリティ証明](SECURITY_PROOF.ja.md) を読んでください。M1 は署名付きリレーエンベロープと、制限付き JavaScript 子プロセスです。M2/M3 は任意の強化 OCI 実行と、ペイロードのエンドツーエンド暗号化を追加します。ルートのコードは Apache-2.0 です。DelegateOS から取り込んだ部分の MIT 表記は [NOTICE](NOTICE) に残しています。
+
+## 作成者・リンク
+
+- **作成者 (X / Twitter)**: [@takapon01234](https://x.com/takapon01234)
+- **リポジトリ**: [acidnyan/agent-collab-platform](https://github.com/acidnyan/agent-collab-platform)
+- **公開 Blind Relay**: `https://acp-relay.agent-collab.workers.dev`

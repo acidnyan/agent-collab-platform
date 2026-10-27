@@ -2,8 +2,50 @@
 
 **English** | [日本語 (README.ja.md)](./README.ja.md)
 
-> **Status**: `v0.2.0 (M0–M3 Reference Implementation)` — Cross-Owner Agent Collaboration Platform
-> **Target**: An open-source protocol and reference implementation that lets autonomous agents owned by different people split, delegate, run, verify, and accept work without trusting each other's runtimes or credentials.
+[![CI](https://github.com/acidnyan/agent-collab-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/badge/release-v1.0.0-2ea44f)](https://github.com/acidnyan/agent-collab-platform/releases)
+[![MCP Server](https://img.shields.io/badge/MCP-Server_Ready-0969da)](./SKILL.md)
+[![E2EE](https://img.shields.io/badge/E2EE-X25519_%2B_AES--256--GCM-8250df)](./SECURITY_PROOF.md)
+[![Security Proofs](https://img.shields.io/badge/Security_Proofs-11%2F11_Passing-2da44e)](./SECURITY_PROOF.md)
+[![Tests](https://img.shields.io/badge/Tests-375_Passing-2da44e)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0_%2F_MIT-blue.svg)](./LICENSE)
+[![X (@takapon01234)](https://img.shields.io/badge/X-%40takapon01234-000000?logo=x)](https://x.com/takapon01234)
+
+> **Status**: `v1.0.0 (M0–M3.1 Reference Implementation)` — Cross-Owner Agent Collaboration Platform  
+> **Target**: An open-source protocol and reference implementation that lets autonomous agents owned by different people split, delegate, run, verify, and accept work without trusting each other's runtimes or credentials.  
+> **Author**: [@takapon01234](https://x.com/takapon01234)
+
+<p align="center">
+  <img src="docs/assets/acp-hero-demo.svg" width="100%" alt="ACP Architecture & Live E2EE Flow" />
+</p>
+
+## 30-Second Quickstart (One-Line Demo & MCP Config)
+
+Run the full 4-scenario zero-trust collaboration & red-team tamper defense demo in one command (offline, zero API keys needed):
+
+```sh
+git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-collab-platform && pnpm install --frozen-lockfile && pnpm build && pnpm acp demo
+```
+
+Or add **`acp mcp-server`** directly to **Claude Desktop**, **Cursor**, **Codex**, or **Grok Bot** (`mcpServers` config):
+
+```json
+{
+  "mcpServers": {
+    "acp": {
+      "command": "node",
+      "args": [
+        "/path/to/agent-collab-platform/cli/dist/index.js",
+        "mcp-server",
+        "--key",
+        "/tmp/alice.private.json",
+        "--relay",
+        "https://acp-relay.agent-collab.workers.dev"
+      ]
+    }
+  }
+}
+```
 
 ## One-screen summary
 
@@ -223,3 +265,9 @@ pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
 The approval target file contains the exact JSON action being approved. The trust anchor file has `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }`; obtain the latest expected head independently of the bundle under verification. The built CLI is also available as `node cli/dist/index.js <command>` and its workspace binary is `acp`.
 
 Read the [demo walkthrough](examples/two-owner-demo/README.md), [wire rules](spec/README.md), [conformance suite](conformance/README.md), [M1 security model](docs/security-model.md), and [security proofs](SECURITY_PROOF.md). M1 uses signed relay envelopes and the restricted JavaScript subprocess driver. M2/M3 adds optional hardened OCI execution and end-to-end payload encryption. The root code is Apache-2.0; adapted DelegateOS portions retain MIT attribution in [NOTICE](NOTICE).
+
+## Author & Community
+
+- **Author**: [@takapon01234](https://x.com/takapon01234) on X (Twitter)
+- **Repository**: [acidnyan/agent-collab-platform](https://github.com/acidnyan/agent-collab-platform)
+- **Public Blind Relay**: `https://acp-relay.agent-collab.workers.dev`
