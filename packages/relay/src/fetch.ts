@@ -287,7 +287,10 @@ export function beginDurableLongPoll(relay: InMemoryRelay, request: Request): Du
       request.headers.get('x-acp-relay-auth') ??
       url.searchParams.get('auth') ??
       undefined;
+    // A request that is already aborted must not authenticate or pop.
+    if (request.signal.aborted) return { mode: 'response', response: relayJson({ envelopes: [] }) };
     const receive = relay.openInbox(recipient, token, 'receive');
+    if (request.signal.aborted) return { mode: 'response', response: relayJson({ envelopes: [] }) };
     const buffered: SignedEnvelope[] = [];
     let envelope: SignedEnvelope | undefined;
     while ((envelope = receive())) buffered.push(envelope);
@@ -430,11 +433,14 @@ export function createRelayFetchHandler(
           const e = receive();
           return e ? json(e) : empty(204);
         }
+        // An already-aborted poll must not pop envelopes that are still queued.
+        if (request.signal.aborted) return json({ envelopes: [] });
         const ready: SignedEnvelope[] = [];
         let queued: SignedEnvelope | undefined;
         while ((queued = receive())) ready.push(queued);
         if (!ready.length) {
           await relay.wait(recipient, Math.min(ms!, 30000), request.signal);
+          if (request.signal.aborted) return json({ envelopes: [] });
           while ((queued = receive())) ready.push(queued);
         }
         return json({ envelopes: ready });

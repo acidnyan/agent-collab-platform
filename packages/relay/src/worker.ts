@@ -105,6 +105,9 @@ export class RelayDurableObject {
     if (!Number.isFinite(ms) || ms <= 0) return undefined;
     return ms;
   }
+  private emptyPoll(): Response {
+    return Response.json({ envelopes: [] }, { headers: relayHttpHeaders('json') });
+  }
   /**
    * Authenticate and pop inside the mutation turn, then release that turn while
    * relay.wait is pending so a POST can wake the poll.
@@ -113,7 +116,9 @@ export class RelayDurableObject {
     const opened = await this.enqueue(() => this.openLongPoll(request));
     if (opened.mode === 'response') return opened.response;
     await this.relay.wait(opened.recipient, opened.waitMs, request.signal);
-    return this.enqueue(() => this.finishLongPoll(opened.receive));
+    // send() wakes wait before the POST snapshot finishes. A disconnect in that gap must not dequeue.
+    if (request.signal.aborted) return this.emptyPoll();
+    return this.enqueue(() => this.finishLongPoll(opened.receive, request.signal));
   }
   private async openLongPoll(request: Request): Promise<DurableLongPoll> {
     const started = beginDurableLongPoll(this.relay, request);
@@ -124,7 +129,12 @@ export class RelayDurableObject {
     await this.writeSnapshot();
     return started;
   }
-  private async finishLongPoll(receive: () => SignedEnvelope | undefined): Promise<Response> {
+  private async finishLongPoll(
+    receive: () => SignedEnvelope | undefined,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    // Abort can land while this turn waits behind the POST storage.put.
+    if (signal.aborted) return this.emptyPoll();
     const envelopes: SignedEnvelope[] = [];
     try {
       let envelope: SignedEnvelope | undefined;

@@ -897,3 +897,94 @@ describe('issue 21: durable long-poll wakes on a concurrent post', () => {
     expect(nextBody).toEqual([]);
   });
 });
+
+describe('issue 23: cancelled durable long-poll leaves the envelope queued', () => {
+  it('does not dequeue an envelope saved after the poll aborts', async () => {
+    const data = new Map<string, unknown>();
+    let nextPut: (() => Promise<void>) | undefined;
+    const state = {
+      storage: {
+        get: async <T>(key: string): Promise<T | undefined> => data.get(key) as T | undefined,
+        put: async (key: string, value: unknown) => {
+          if (nextPut) {
+            const callback = nextPut;
+            nextPut = undefined;
+            await callback();
+          }
+          data.set(key, value);
+        },
+        delete: async (key: string) => data.delete(key),
+      },
+      blockConcurrencyWhile: async <T>(fn: () => Promise<T>) => fn(),
+    };
+    const object = new RelayDurableObject(state);
+    const sender = generateKeyPair();
+    const peer = generateKeyPair();
+    const cancel = new AbortController();
+    function receiveRequest(signal?: AbortSignal, wait = 200) {
+      return new Request(
+        'https://relay.local/envelopes?recipient=' +
+          encodeURIComponent(peer.did) +
+          '&waitMs=' +
+          wait,
+        {
+          headers: { authorization: 'Bearer ' + createRelayAuthToken(peer) },
+          signal,
+        },
+      );
+    }
+    async function labels(responsePromise: Promise<Response>) {
+      const response = await responsePromise;
+      const body = (await response.json()) as {
+        envelopes?: Array<{ payload: { payload: { label: string } } }>;
+        error?: string;
+      };
+      return {
+        status: response.status,
+        labels: body.envelopes?.map((envelope) => envelope.payload.payload.label),
+        error: body.error,
+      };
+    }
+    const poll = labels(object.fetch(receiveRequest(cancel.signal)));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    let entered: () => void = () => {};
+    let release: () => void = () => {};
+    const start = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    nextPut = async () => {
+      entered();
+      await gate;
+    };
+    const post = object.fetch(
+      new Request('https://relay.local/envelopes', {
+        method: 'POST',
+        body: JSON.stringify(
+          signEnvelope(
+            {
+              taskId: 'task_after_cancel',
+              recipientDid: peer.did,
+              seq: 0,
+              eventType: 'PING',
+              payload: { label: 'after_cancel' },
+            },
+            sender,
+          ),
+        ),
+      }),
+    );
+    await Promise.race([start, new Promise((resolve) => setTimeout(resolve, 30))]);
+    cancel.abort('synthetic disconnect');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    release();
+    const cancelledPoll = await poll;
+    const postStatus = (await post).status;
+    const remaining = await labels(object.fetch(receiveRequest(undefined, 0)));
+    expect(postStatus).toBe(202);
+    expect(cancelledPoll).toMatchObject({ status: 200, labels: [] });
+    expect(remaining).toMatchObject({ status: 200, labels: ['after_cancel'] });
+  });
+});
