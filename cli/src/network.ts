@@ -214,7 +214,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
       inboxPath: f.has('--inbox') ? text(f, 'inbox') : undefined,
       onInboxRecord,
-      onEvent: (event, taskId) => console.error(JSON.stringify({ event, taskId })),
+      onEvent: (event, taskId, error) => console.error(JSON.stringify({ event, taskId, ...error })),
       ...acceptance,
       allowPrivateRelay,
     });

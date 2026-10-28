@@ -542,21 +542,22 @@ export function parseAndVerifyInviteToken(
     if (
       !verifySigned(signed, p.ownerDid) ||
       p.type !== 'AgentInvite' ||
-      !verifySignedAgentCard(p.agentCard, now) ||
+      !verifySignedAgentCard(p.agentCard, Math.min(now, Date.parse(p.issuedAt))) ||
       p.agentCard.payload.ownerDid !== p.ownerDid ||
       p.agentCard.payload.agentDid !== p.agentDid ||
       p.agentCard.payload.relayEndpoint !== p.relayUrl ||
       !Number.isFinite(Date.parse(p.issuedAt)) ||
       !Number.isFinite(Date.parse(p.expiresAt)) ||
       Date.parse(p.issuedAt) > now + DEFAULT_CLOCK_SKEW_MS ||
-      Date.parse(p.expiresAt) <= now ||
       Date.parse(p.expiresAt) <= Date.parse(p.issuedAt)
     )
       throw new Error();
+    if (Date.parse(p.expiresAt) <= now || Date.parse(p.agentCard.payload.expiresAt) <= now)
+      throw new Error('INVITE_EXPIRED');
     validateRelayEndpointUrl(p.relayUrl, options);
     return p;
   } catch (error) {
-    if (error instanceof Error && error.message === 'SSRF_BLOCKED_RELAY_URL') throw error;
+    if (error instanceof Error && ['SSRF_BLOCKED_RELAY_URL', 'INVITE_EXPIRED'].includes(error.message)) throw error;
     throw new Error('INVALID_OR_EXPIRED_INVITE');
   }
 }

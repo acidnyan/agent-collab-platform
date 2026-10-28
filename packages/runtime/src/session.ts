@@ -365,7 +365,7 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   tools?: Record<string, ToolDefinition>;
   toolBackend?: ToolBackend;
   revocation?: RevocationList;
-  onEvent?: (event: string, taskId: string) => void;
+  onEvent?: (event: string, taskId: string, error?: ErrorDiagnostic) => void;
   /** Opt in to loopback and RFC1918 relays. Network invites stay blocked by default. */
   allowPrivateRelay?: boolean;
   lookup?: RelayClientSecurityOptions['lookup'];
@@ -584,6 +584,21 @@ export class WorkerNode {
     mailbox.push(envelope);
     return true;
   }
+  /** Local signed diagnostics are separate from the bilateral hash-chain ledger. */
+  private reportRejection(taskId: string, error: unknown): void {
+    const diagnostic = rejectionBody(error);
+    if (this.options.auditPath) {
+      const fd = openSync(this.options.auditPath + '.errors.jsonl',
+        constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+      try {
+        if (!fstatSync(fd).isFile()) throw new Error('INVALID_AUDIT_FILE');
+        fchmodSync(fd, 0o600);
+        appendFileSync(fd, JSON.stringify(signPayload({ event: 'REJECTED', taskId,
+          timestamp: new Date().toISOString(), ...diagnostic }, this.options.owner)) + '\n');
+      } finally { closeSync(fd); }
+    }
+    this.options.onEvent?.('REJECTED', taskId, diagnostic);
+  }
   private beginTask(
     first: SignedEnvelope,
     idleSignal: AbortSignal,
@@ -598,7 +613,8 @@ export class WorkerNode {
       // non-zero PROPOSE frames still fail a one-shot session immediately.
       if (once && (!verified || (first.payload.eventType === 'PROPOSE' && first.payload.seq !== 0)))
         throw new Error('INVALID_PROPOSAL_ENVELOPE');
-      this.options.onEvent?.('REJECTED', '');
+      if (verified && first.payload.eventType !== 'ERROR')
+        this.options.onEvent?.('REJECTED', first.payload.taskId, { code: 'INVALID_PROPOSAL_ENVELOPE' });
       return;
     }
     let rejection = this.intakeRejection(first);
@@ -617,7 +633,6 @@ export class WorkerNode {
       })
       .catch((error) => {
         if (once) throw error;
-        this.options.onEvent?.('REJECTED', first.payload.taskId);
       })
       .finally(() => {
         if (reserved) this.activeTasks -= 1;
@@ -654,7 +669,8 @@ export class WorkerNode {
         // A REVOKE queued behind the proposal is ingested inside receive and is
         // not delivered here. The next session envelope is what remains.
         if (!envelope) return;
-        if (!this.deliver(envelope)) this.options.onEvent?.('REJECTED', '');
+        if (!this.deliver(envelope) && verifyEnvelope(envelope, this.options.owner.did))
+          this.options.onEvent?.('REJECTED', envelope.payload.taskId, { code: 'INVALID_SESSION_ENVELOPE' });
       }
     } finally {
       wait.abort();
@@ -715,6 +731,7 @@ export class WorkerNode {
         : undefined;
       freshAudit(auditPath);
     } catch (e) {
+      this.reportRejection(first.payload.taskId, e);
       try {
         await relay.send(
           signEnvelope(
@@ -763,14 +780,14 @@ export class WorkerNode {
         for (const field of OPEN_POLICY_FIELDS) {
           const limit = this.agentCard.payload.openPolicy?.[field];
           if (limit !== undefined && m.budget[field] > limit)
-            throw new Error('TASK_SCOPE_REJECTED');
+            throw diagnosticError('TASK_SCOPE_REJECTED', 'budget.' + field, limit, m.budget[field], 'Use a budget within the advertised policy.');
         }
         const skills = this.agentCard.payload.skills;
         const selected = m.task.skillId ? skills.filter((skill) => skill.id === m.task.skillId) : skills;
         if ((m.task.skillId && selected.length === 0) ||
             (m.task.taskType && !selected.some((skill) => skill.taskTypes?.includes(m.task.taskType!))) ||
-            (!m.task.taskType && selected.some((skill) => skill.taskTypes?.length)))
-          throw new Error('TASK_SCOPE_REJECTED');
+            (m.task.skillId && !m.task.taskType && selected.some((skill) => skill.taskTypes?.length)))
+          throw diagnosticError('TASK_SCOPE_REJECTED', 'task.scope', skills, m.task, 'Select an advertised skill and task type, or omit both for direct delegation.');
       }
       const capabilityContext: CapabilityContext = {
         rootDid: m.requester.ownerDid,
@@ -1062,6 +1079,7 @@ export class WorkerNode {
         }
       }
       await progressTail;
+      this.reportRejection(m.taskId, progressFailure ?? e);
       if (!wireFailureSent) {
         wireFailureSent = true;
         await wire.rawSend('ERROR', rejectionBody(progressFailure ?? e)).catch(() => {});
@@ -1196,7 +1214,13 @@ export class WorkerNode {
         throw new Error('INVITE_REQUIRED');
       return;
     }
-    const invite = parseAndVerifyInviteToken(token, Date.now(), { allowPrivateRelay: true });
+    let invite: Invite;
+    try {
+      invite = parseAndVerifyInviteToken(token, Date.now(), { allowPrivateRelay: true });
+    } catch (error) {
+      if (this.options.accessMode === 'open' && error instanceof Error && error.message === 'INVITE_EXPIRED') return;
+      throw error;
+    }
     if (invite.ownerDid !== this.options.owner.did ||
         invite.agentDid !== this.agentCard.payload.agentDid ||
         invite.relayUrl !== this.agentCard.payload.relayEndpoint)
@@ -1378,13 +1402,27 @@ interface CancelPayload {
   cancelledBy: string;
   transition: Signed<Transition>;
 }
-function rejectionBody(error: unknown): { code: string; reason?: string } {
+export interface ErrorDetail {
+  field: string;
+  expected: string;
+  actual: string;
+  hint: string;
+}
+export interface ErrorDiagnostic { code: string; detail?: ErrorDetail }
+class DiagnosticError extends Error {
+  constructor(code: string, readonly detail: ErrorDetail) { super(code); }
+}
+function diagnosticError(code: string, field: string, expected: unknown, actual: unknown, hint: string): Error {
+  return new DiagnosticError(code, { field, expected: digest(expected), actual: digest(actual), hint });
+}
+function rejectionBody(error: unknown): ErrorDiagnostic & { reason?: string } {
+  if (error instanceof DiagnosticError) return { code: safeError(error), detail: error.detail };
   if (error instanceof ProposalRejectedError) return { code: error.code, reason: error.reason };
   return { code: safeError(error) };
 }
 function safeError(e: unknown): string {
   const s = String(e);
-  for (const code of ['UNENCRYPTED_ENVELOPE_REJECTED', 'INVITE_REQUIRED', 'TASK_SCOPE_REJECTED'])
+  for (const code of ['UNENCRYPTED_ENVELOPE_REJECTED', 'INVITE_REQUIRED', 'INVITE_EXPIRED', 'INVITE_WORKER_MISMATCH', 'TASK_SCOPE_REJECTED'])
     if (s === 'Error: ' + code) return code;
   if (s.includes('TOKEN_REVOKED')) return 'TOKEN_REVOKED';
   return (

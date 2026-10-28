@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest';
-import { generateKeyPair, signPayload, verifySignedAgentCard, OPEN_POLICY_FIELDS,
+import { generateKeyPair, signPayload, verifySignedAgentCard, OPEN_POLICY_FIELDS, digest,
   type OpenPolicy, type SignedAgentCard } from '../packages/core/src/index.js';
 import { InMemoryRelay } from '../packages/relay/src/index.js';
 import { WorkerNode, RequesterClient, PolicyAutoApprovalProvider, buildTaskManifest } from '../packages/runtime/src/index.js';
@@ -61,7 +61,10 @@ describe('Open policy admission and requester defaults', () => {
     const done = worker.start({ once: true }).catch((error: Error) => error);
     try {
       await expect(client.delegate({ ...task, to: owner.did, budget: { [field]: policy[field] + 1 } }))
-        .rejects.toThrow('TASK_SCOPE_REJECTED');
+        .rejects.toMatchObject({ code: 'TASK_SCOPE_REJECTED', detail: {
+          field: 'budget.' + field, expected: digest(policy[field]), actual: digest(policy[field] + 1),
+          hint: 'Use a budget within the advertised policy.',
+        } });
       expect(await done).toMatchObject({ message: 'TASK_SCOPE_REJECTED' });
       expect(budgets).toEqual([]);
     } finally { worker.stop(); }
