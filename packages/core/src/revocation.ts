@@ -20,6 +20,18 @@ export type SignedRevocationNotice = Signed<RevocationNotice>;
 export interface RevocationList {
   isRevoked(targetType: 'invite' | 'capability', targetId: string): boolean;
   assertNotRevoked(targetType: 'invite' | 'capability', targetId: string): void;
+  /**
+   * Signature-checked notices for this target.
+   * A capability notice applies only when its issuer issued that token or an
+   * ancestor in the verified chain being evaluated. Another issuer's notice
+   * for the same target id must not revoke that chain.
+   */
+  noticesFor?(targetType: 'invite' | 'capability', targetId: string): SignedRevocationNotice[];
+  /**
+   * True when `isRevoked` is set by a source that cannot list notice issuers.
+   * A listed notice from a different issuer is not unexplained.
+   */
+  unexplainedRevocation?(targetType: 'invite' | 'capability', targetId: string): boolean;
 }
 
 /** Stable invite target id: JCS SHA-256 of the verified invite payload. */
@@ -88,20 +100,36 @@ function registryKey(targetType: string, targetId: string): string {
   return targetType + '\0' + targetId;
 }
 
-/** In-memory, serializable set of verified revocation notices. */
+/**
+ * In-memory, serializable set of verified revocation notices.
+ * Capability notices are kept per issuer. A second issuer revoking the same
+ * target id must not replace the first: chain checks match the notice issuer
+ * to the verified token, and a colliding id is not a global kill switch.
+ */
 export class RevocationRegistry {
-  private readonly notices = new Map<string, SignedRevocationNotice>();
+  private readonly notices = new Map<string, SignedRevocationNotice[]>();
 
   revoke(notice: SignedRevocationNotice, expectedIssuer?: string): void {
     if (!verifyRevocationNotice(notice, expectedIssuer)) throw new Error('INVALID_REVOCATION');
-    this.notices.set(
-      registryKey(notice.payload.targetType, notice.payload.targetId),
-      structuredClone(notice),
+    const key = registryKey(notice.payload.targetType, notice.payload.targetId);
+    const list = this.notices.get(key) ?? [];
+    const duplicate = list.some(
+      (existing) =>
+        existing.payload.issuerDid === notice.payload.issuerDid &&
+        existing.payload.revocationId === notice.payload.revocationId,
     );
+    if (!duplicate) list.push(structuredClone(notice));
+    this.notices.set(key, list);
   }
 
   isRevoked(targetType: 'invite' | 'capability', targetId: string): boolean {
-    return this.notices.has(registryKey(targetType, targetId));
+    return (this.notices.get(registryKey(targetType, targetId))?.length ?? 0) > 0;
+  }
+
+  noticesFor(targetType: 'invite' | 'capability', targetId: string): SignedRevocationNotice[] {
+    return (this.notices.get(registryKey(targetType, targetId)) ?? []).map((notice) =>
+      structuredClone(notice),
+    );
   }
 
   assertNotRevoked(targetType: 'invite' | 'capability', targetId: string): void {
@@ -109,7 +137,7 @@ export class RevocationRegistry {
   }
 
   exportNotices(): SignedRevocationNotice[] {
-    return [...this.notices.values()].map((notice) => structuredClone(notice));
+    return [...this.notices.values()].flat().map((notice) => structuredClone(notice));
   }
 
   importNotices(notices: SignedRevocationNotice[]): void {

@@ -74,7 +74,7 @@ LLM の CLI アダプタ（`claude`、`codex`、`openai`）も、遠隔のピア
 
 公開の `http:` と `ws:` のリレー端点は、いまも許可されています。`conformance/security-hardening.test.ts` の `accepts public http: endpoints` がその方針を固定しています。この証明は、平文の公開 HTTP を拒否するとは主張しません。
 
-`packages/runtime/src/mcp-server.ts` の `AcpMcpServer` は、Claude Desktop や Cursor などの MCP ホストにも同じ外向きの境界を適用します。`acp_delegate_task` と `acp_delegate_multi` は招待トークンをローカルで検証します。接続する前に、`allowedWorkerDids` に無いワーカー DID を `MCP_WORKER_NOT_ALLOWED` で拒否し、`allowedRelayUrls` に無いリレー URL を `MCP_RELAY_NOT_ALLOWED` で拒否します。素のワーカー DID は一覧と一致する必要があります。招待は `agentDid` または `ownerDid` のどちらかが一覧にあれば一致します。設定済みリレー、ツール引数、招待トークン内のリレー URL は、末尾スラッシュを除いたオリジンとパスへ正規化します。設定したリレーは、`allowAnyRelay` があるか、新しい URL が許可リストに入っているとき以外は置き換わりません。`approvalWebhookUrl` は `{ taskId, summaryHash, reason, approverDid }` を POST し、ウェブフックが `{ approved: true }` を返したときだけ所有者の決定に署名します。`{ approved: false }` と 2xx 以外は、タスク入力を送る前に `APPROVAL_REJECTED` になります。ツールの説明には、入力が外部へ送信されることが書かれています。これらの検査は `conformance/p1-7-mcp-outbound-policy.test.ts` が固定します（`pnpm test`）。
+`packages/runtime/src/mcp-server.ts` の `AcpMcpServer` は、Claude Desktop や Cursor などの MCP ホストにも同じ外向きの境界を適用します。`acp_delegate_task` と `acp_delegate_multi` は招待トークンをローカルで検証します。接続する前に、`allowedWorkerDids` に無いワーカー DID を `MCP_WORKER_NOT_ALLOWED` で拒否し、`allowedRelayUrls` に無いリレー URL を `MCP_RELAY_NOT_ALLOWED` で拒否します。素のワーカー DID は一覧と一致する必要があります。招待は `agentDid` または `ownerDid` のどちらかが一覧にあれば一致します。設定済みリレー、ツール引数、招待トークン内のリレー URL は、末尾スラッシュを除いたオリジンとパスへ正規化します。設定したリレーは、`allowAnyRelay` があるか、新しい URL が許可リストに入っているとき以外は置き換わりません。`approvalWebhookUrl` は `{ taskId, summaryHash, reason, approverDid }` を POST し、ウェブフックが `{ approved: true }` を返したときだけ所有者の決定に署名します。`{ approved: false }` と 2xx 以外は、タスク入力を送る前に `APPROVAL_REJECTED` になります。ツールの説明には、入力が外部へ送信されることが書かれています。`acp_discover_workers` はディレクトリを読む前に、同じリレー許可リストと `validateRelayEndpointUrl` を使い、タスク入力は送りません。これらの検査は `conformance/p1-7-mcp-outbound-policy.test.ts` が固定します（`pnpm test`）。
 
 ### 証明 5 — エンベロープと成果物の改ざん
 
@@ -112,6 +112,8 @@ HKDF-SHA256 の salt は 12 バイトの AES-GCM nonce である。info は、�
 | 失効した招待が `PROPOSE` で提示される | `WorkerNode` は `ACCEPT` の前に、招待 URI とその JCS ダイジェストへ `RevocationRegistry.assertNotRevoked` を呼ぶ。 | `Proof 10: token revocation and live cancellation` の revoked invites |
 | 失効した能力がツールに提示される | `CapabilityGuard.authorize` は、`MCPProxy` がバックエンドを呼ぶ前に `TOKEN_REVOKED` を投げる。 | 同じ証明の revoked capabilities |
 | 発行者以外が署名した `RevocationNotice` | `verifyRevocationNotice` は Ed25519 の署名者が `issuerDid` であることを要求する。`revoke(notice, expectedIssuer)` は不一致を `INVALID_REVOCATION` で拒否する。 | 同じ証明の forged notice |
+| オフラインのワーカーが `PROPOSE` より前の `REVOKE` を取りこぼす | `deliverRevocation` は暗号化された `SignedRevocationNotice` を並べる。`WorkerNode` は `runOnce`、`start`、`pumpUntil` で、次の `PROPOSE` の前に先頭の `REVOKE` を取り込む。失効した招待または能力は `ACCEPT` の前に `TOKEN_REVOKED` になる。 | `conformance/offline-revocation-inbox.test.ts` の offline worker |
+| 第三者が他人のトークンを `REVOKE` する | 送信者は `issuerDid` でなければならない。招待の通知はワーカー所有者からのものだけを保存する。能力の通知は、その発行者がトークンを発行または委任したときだけ適用する。それ以外は無視し、保存しない。 | 同じファイルの spoofed revocation |
 | 依頼者が実行中のサンドボックスを中断する | `CANCEL` は署名、暗号化、相互署名される。ワーカーはタスクを中断し、子プロセスへ `SIGTERM` のあと `SIGKILL` を送る。封印されたログは `CANCEL` を含み `VALID` になる。 | 同じ証明の cancels a running sandbox |
 
 ## 証明 11 — 暗号化された進捗とビザンチン・クォーラム

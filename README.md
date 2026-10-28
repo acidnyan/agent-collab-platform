@@ -160,6 +160,21 @@ Copy the printed `acp-invite:...` line. This local example echoes the JSON input
 
 `acp worker` does not register its AgentCard in the public relay directory unless you pass `--publish`. Share the invite directly. `acp discover` lists only workers that opted in with `--publish`.
 
+Pass `--inbox /path/to/inbox.jsonl` to keep a local inbox for an interactive agent.
+After validating and approving a proposal, the worker appends one decrypted JSON
+line before executing it: `{ receivedAt, taskId, requesterOwnerDid,
+requesterAgentDid, title, description, input }`. The parent directory must exist.
+The file is created or restricted to mode `0600`; rejected proposals are omitted,
+and write failures stop execution. Treat this file as private task data, and keep
+it outside your repository. This also works with the default sandbox echo worker.
+
+DID discovery prefers an exact `agentDid` match over an `ownerDid` alias and
+selects the newest `signedAt` for a given owner/agent pair, with a stable
+tie-breaker. Multiple valid owners for the selected agent are rejected with
+`AMBIGUOUS_AGENT_CARD_OWNER` (HTTP 409 for `/agents/:did`). Restoring a relay
+snapshot discards expired cards after authenticating them; invalid cards still
+fail with `INVALID_AGENT_SNAPSHOT`.
+
 `--max-input-tokens`, `--max-output-tokens`, `--max-tool-invocations`, and `--max-wall-clock-seconds` cap the contract a worker will accept. A proposal above any set cap is rejected before `ACCEPT`, including with `--auto-accept`. `timeoutSeconds` on the manifest is compared with `--max-wall-clock-seconds`. `--max-concurrent-tasks` limits in-flight tasks (default 8). `--max-requests-per-minute` limits proposals from one requester DID.
 
 `--allow-requester <did>` is repeatable and also accepts a comma-separated list. `--allow-any-requester` opts in to every requester. For `--adapter claude`, `codex`, or `openai`, `--auto-accept` (and the `--auto-approve` / `--yes` aliases) refuses to start unless one of those allow flags is present, so a discovered worker cannot spend the owner API key for arbitrary callers. The sandbox example above does not need an allowlist.
@@ -214,9 +229,11 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 | `acp_delegate_multi`       | `race` or `quorum` delegation across workers                                                    |
 | `acp_verify_audit_bundle`  | Cryptographic verification report, including whether a trust anchor checked truncation          |
 | `acp_create_invite`        | Signed `acp-invite` token                                                                       |
-| `acp_revoke_token`         | Signed `RevocationNotice`                                                                       |
+| `acp_revoke_token`         | Signed `RevocationNotice` stored in this process                                                |
+| `acp_discover_workers`     | Signed agent cards registered on the relay                                                      |
+| `acp_inspect_revocations`  | Revocation notices recorded in this server process                                              |
 
-`AcpMcpServer` in `@acp/runtime` is the same server for tests and embedded hosts. The server key signs requester approvals for the tools it runs.
+`initialize` returns server `instructions` that name this workflow. `AcpMcpServer` in `@acp/runtime` is the same server for tests and embedded hosts. The server key signs requester approvals for the tools it runs. `acp_discover_workers` is a read-only directory fetch: it uses the same relay allowlist and `validateRelayEndpointUrl` before `GET /agents`, and it does not send task input. `acp_inspect_revocations` reads the in-memory registry and does not contact a worker.
 
 `acp_delegate_task` and `acp_delegate_multi` transmit task input to the target worker over the relay. Restrict that path when the host might supply the arguments:
 
@@ -236,6 +253,8 @@ pnpm acp mcp-server \
 A worker reports `PROGRESS` (`percent`, `step`, `message`, and intermediate token or tool metrics) through the same encrypted, countersigned session log. `delegate(request, { onProgress })` receives each decrypted update before `DELIVER`. Reported metrics are charged against `QuotaMeter`.
 
 `RevocationRegistry` checks Ed25519 `RevocationNotice`s (RFC 8785 JCS). The worker rejects a revoked invite before `ACCEPT`. `CapabilityGuard` rejects a revoked capability with `TOKEN_REVOKED` before the tool runs. A notice signed by anyone other than `issuerDid` is invalid.
+
+An offline worker still learns about revocation. `deliverRevocation` and `RequesterClient.sendRevocation` queue an encrypted `REVOKE` envelope, carrying a `SignedRevocationNotice`, on that worker's relay inbox. `WorkerNode` ingests every leading `REVOKE` in `runOnce()`, `start()` (including `start({ once: true })`), and `pumpUntil()` before it reads the next `PROPOSE`. An invite notice is recorded only when the sender is the worker owner. A capability notice is recorded only when `issuerDid` issued that token or delegated it. A forged or third-party `REVOKE` is ignored and is not stored. Before `ACCEPT`, every capability id in `capabilityChains` is checked with `assertNotRevoked`, so a revoked capability is `TOKEN_REVOKED` and the task is not accepted. `conformance/offline-revocation-inbox.test.ts` covers the offline queue and the spoofed notice.
 
 `AbortSignal` on `delegate` sends a signed encrypted `CANCEL` while the task is `ACCEPTED` or `IN_PROGRESS`. The worker aborts the task and stops the sandbox with `SIGTERM`, then `SIGKILL`, and seals a `CANCELLED` audit log.
 

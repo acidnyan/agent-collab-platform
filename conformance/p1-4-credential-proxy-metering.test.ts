@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { ServerResponse } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -664,6 +665,239 @@ describe('P1-4 credential proxy metering', () => {
       expect(meter.receipt(worker).payload).toMatchObject({ inputTokens: 3, outputTokens: 1 });
     } finally {
       meter.close();
+    }
+  });
+});
+
+const meteredUsage: ProxyUsageMetrics = { inputTokens: 11, outputTokens: 1, totalTokens: 12 };
+
+function openAiUsageEvent(): string {
+  return dataEvent({ usage: { prompt_tokens: 11, completion_tokens: 1 } });
+}
+
+function anthropicUsageEvent(): string {
+  return namedEvent('message_start', {
+    type: 'message_start',
+    message: { usage: { input_tokens: 11, output_tokens: 1 } },
+  });
+}
+
+function streamFrom(parts: readonly string[], fail: boolean, contentType: string): Response {
+  const encoder = new TextEncoder();
+  let index = 0;
+  return new Response(
+    new ReadableStream({
+      async pull(controller) {
+        if (index < parts.length) {
+          controller.enqueue(encoder.encode(parts[index] ?? ''));
+          index += 1;
+          return;
+        }
+        if (!fail) {
+          controller.close();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        controller.error(new Error('SYNTHETIC_STREAM_FAILURE'));
+      },
+    }),
+    { headers: { 'content-type': contentType } },
+  );
+}
+
+describe('issue 59: SSE mid-stream errors still count received usage', () => {
+  const cases: Array<{
+    label: string;
+    style: 'openai' | 'anthropic';
+    path: string;
+    contentType: string;
+    parts: string[];
+    fail: boolean;
+    needle: string;
+  }> = [
+    {
+      label: 'openai event then error',
+      style: 'openai',
+      path: '/v1/chat/completions',
+      contentType: 'text/event-stream',
+      parts: [openAiUsageEvent()],
+      fail: true,
+      needle: '"prompt_tokens":11',
+    },
+    {
+      label: 'openai event split across chunks then error',
+      style: 'openai',
+      path: '/v1/chat/completions',
+      contentType: 'text/event-stream',
+      parts: splitText(openAiUsageEvent(), 5),
+      fail: true,
+      needle: '"prompt_tokens":11',
+    },
+    {
+      label: 'openai usage line still buffered when the stream errors before newline',
+      style: 'openai',
+      path: '/v1/responses',
+      contentType: 'text/event-stream',
+      parts: ['data: {"usage":{"prompt_tokens":11,"completion_tokens":1}}'],
+      fail: true,
+      needle: '"prompt_tokens":11',
+    },
+    {
+      label: 'openai cumulative events then error are charged once',
+      style: 'openai',
+      path: '/v1/chat/completions',
+      contentType: 'text/event-stream',
+      parts: [openAiUsageEvent(), openAiUsageEvent()],
+      fail: true,
+      needle: '"prompt_tokens":11',
+    },
+    {
+      label: 'anthropic message_start then error',
+      style: 'anthropic',
+      path: '/v1/messages',
+      contentType: 'text/event-stream',
+      parts: [anthropicUsageEvent()],
+      fail: true,
+      needle: '"input_tokens":11',
+    },
+    {
+      label: 'anthropic message_start split across chunks then error',
+      style: 'anthropic',
+      path: '/v1/messages',
+      contentType: 'text/event-stream',
+      parts: splitText(anthropicUsageEvent(), 7),
+      fail: true,
+      needle: '"input_tokens":11',
+    },
+    {
+      label: 'buffered json split across chunks then error',
+      style: 'openai',
+      path: '/v1/chat/completions',
+      contentType: 'application/json',
+      parts: splitText(JSON.stringify({ usage: { prompt_tokens: 11, completion_tokens: 1 } }), 6),
+      fail: true,
+      needle: '"prompt_tokens":11',
+    },
+    {
+      label: 'openai event then clean eof',
+      style: 'openai',
+      path: '/v1/chat/completions',
+      contentType: 'text/event-stream',
+      parts: [openAiUsageEvent()],
+      fail: false,
+      needle: '"prompt_tokens":11',
+    },
+  ];
+
+  it.each(cases)('meters $label and rejects the next request', async (item) => {
+    const reports: ProxyUsageMetrics[] = [];
+    const recorded: ProxyUsageMetrics[] = [];
+    let upstreamCalls = 0;
+    await withProxy(
+      {
+        apiKey: 'synthetic-only-key',
+        baseUrl: 'https://synthetic.invalid/v1',
+        style: item.style,
+        budget: budget({
+          maxInputTokens: 10,
+          maxOutputTokens: 100,
+          maxToolInvocations: 8,
+          maxWallClockSeconds: 10,
+        }),
+        reportUsage: (metrics) => reports.push(metrics),
+        meter: {
+          controller: new AbortController(),
+          record(inputTokens: number, outputTokens: number) {
+            recorded.push({
+              inputTokens,
+              outputTokens,
+              totalTokens: inputTokens + outputTokens,
+            });
+          },
+        },
+        fetch: async () => {
+          upstreamCalls += 1;
+          if (upstreamCalls > 1) throw new Error('UPSTREAM_FETCH');
+          return streamFrom(item.parts, item.fail, item.contentType);
+        },
+      },
+      async (proxy) => {
+        const first = await post(proxy, bearer(proxy), item.path);
+        expect(first.status, item.label).toBe(200);
+        expect(first.text.startsWith(item.parts.join('')), item.label).toBe(true);
+        expect(first.text, item.label).toContain(item.needle);
+        if (item.fail) expect(first.text, item.label).toContain('PROVIDER_REQUEST_FAILED');
+        else expect(first.text, item.label).not.toContain('PROVIDER_REQUEST_FAILED');
+        expect(proxy.responsesMetered, item.label).toBe(1);
+        expect(reports, item.label).toEqual([meteredUsage]);
+        expect(recorded, item.label).toEqual([meteredUsage]);
+        const second = await post(proxy, bearer(proxy), item.path);
+        expect(second.status, item.label).toBe(429);
+        expect(second.json, item.label).toEqual({ error: 'BUDGET_EXCEEDED' });
+        expect(upstreamCalls, item.label).toBe(1);
+      },
+    );
+  });
+
+  it('accounts usage already written when the downstream write throws', async () => {
+    const reports: ProxyUsageMetrics[] = [];
+    const recorded: ProxyUsageMetrics[] = [];
+    let upstreamCalls = 0;
+    const originalWrite = ServerResponse.prototype.write;
+    ServerResponse.prototype.write = function (
+      this: ServerResponse,
+      chunk: string | Uint8Array,
+      encoding?: BufferEncoding | ((error: Error | null | undefined) => void),
+      callback?: (error: Error | null | undefined) => void,
+    ): boolean {
+      const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+      if (text.includes('DOWNSTREAM_WRITE')) throw new Error('DOWNSTREAM_WRITE_FAILED');
+      return originalWrite.call(this, chunk, encoding as never, callback as never);
+    } as typeof ServerResponse.prototype.write;
+    try {
+      await withProxy(
+        {
+          apiKey: 'synthetic-only-key',
+          baseUrl: 'https://synthetic.invalid/v1',
+          budget: budget({ maxInputTokens: 10, maxOutputTokens: 100 }),
+          reportUsage: (metrics) => reports.push(metrics),
+          meter: {
+            controller: new AbortController(),
+            record(inputTokens: number, outputTokens: number) {
+              recorded.push({
+                inputTokens,
+                outputTokens,
+                totalTokens: inputTokens + outputTokens,
+              });
+            },
+          },
+          fetch: async () => {
+            upstreamCalls += 1;
+            if (upstreamCalls > 1) throw new Error('UPSTREAM_FETCH');
+            return streamFrom(
+              [openAiUsageEvent(), 'data: {"marker":"DOWNSTREAM_WRITE"}\n\n'],
+              false,
+              'text/event-stream',
+            );
+          },
+        },
+        async (proxy) => {
+          const first = await post(proxy, bearer(proxy));
+          expect(first.status).toBe(200);
+          expect(first.text).toContain('"prompt_tokens":11');
+          expect(first.text).toContain('PROVIDER_REQUEST_FAILED');
+          expect(first.text).not.toContain('DOWNSTREAM_WRITE');
+          expect(proxy.responsesMetered).toBe(1);
+          expect(reports).toEqual([meteredUsage]);
+          expect(recorded).toEqual([meteredUsage]);
+          const second = await post(proxy, bearer(proxy));
+          expect(second.status).toBe(429);
+          expect(second.json).toEqual({ error: 'BUDGET_EXCEEDED' });
+          expect(upstreamCalls).toBe(1);
+        },
+      );
+    } finally {
+      ServerResponse.prototype.write = originalWrite;
     }
   });
 });

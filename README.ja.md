@@ -160,6 +160,21 @@ pnpm acp worker start --key /tmp/bob.private.json \
 
 `acp worker` は `--publish` を付けない限り、公開リレーのディレクトリへ AgentCard を登録しません。招待トークンを直接渡してください。`acp discover` に出るのは `--publish` したワーカーだけです。
 
+`--inbox /path/to/inbox.jsonl` を指定すると、対話エージェント向けの受信箱を保存します。
+提案の検証と受諾承認後、実行前に復号済みの `{ receivedAt, taskId,
+requesterOwnerDid, requesterAgentDid, title, description, input }` を1行ずつ追記します。
+親ディレクトリは事前に作成してください。ファイルはモード `0600` で作成し、既存ファイルも
+同じモードに制限します。拒否した提案は保存せず、書き込みに失敗したタスクは実行しません。
+受信内容は私的なタスクデータとして扱い、リポジトリ外へ保存してください。
+既定の sandbox echo ワーカーでも利用できます。
+
+DID による検索は `agentDid` の完全一致を `ownerDid` の別名一致より優先し、
+同じ所有者・エージェントの組では最新の `signedAt` を決定論的に選びます。
+対象エージェントに複数の有効な所有者がある場合は `AMBIGUOUS_AGENT_CARD_OWNER`
+（`/agents/:did` では HTTP 409）で拒否します。リレーのスナップショット復元では、
+期限切れカードも署名・構造を検証してから除外します。不正カードは引き続き
+`INVALID_AGENT_SNAPSHOT` で拒否します。
+
 `--max-input-tokens`、`--max-output-tokens`、`--max-tool-invocations`、`--max-wall-clock-seconds` は、ワーカーが受ける契約の上限です。どれかを超える提案は、`--auto-accept` でも `ACCEPT` の前に拒否されます。マニフェストの `timeoutSeconds` は `--max-wall-clock-seconds` と比較します。`--max-concurrent-tasks` は同時実行数の上限です（既定は 8）。`--max-requests-per-minute` は、依頼者 DID ごとの提案回数の上限です。
 
 `--allow-requester <did>` は繰り返せます。カンマ区切りでも指定できます。`--allow-any-requester` は、すべての依頼者を明示的に許可します。`--adapter claude`、`codex`、`openai` で `--auto-accept`（および `--auto-approve` / `--yes`）を使うときは、どちらかの許可フラグが必要です。公開ディレクトリから見つかったワーカーが、持ち主の API キーを任意の依頼者に使わせないためです。上の sandbox 例に許可リストは不要です。
@@ -214,9 +229,11 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 | `acp_delegate_multi`       | 複数ワーカーへの `race` または `quorum` 委任                           |
 | `acp_verify_audit_bundle`  | 暗号検証レポート。トラストアンカーで末尾切断を見たかも含む             |
 | `acp_create_invite`        | 署名済み `acp-invite` トークン                                         |
-| `acp_revoke_token`         | 署名済み `RevocationNotice`                                            |
+| `acp_revoke_token`         | このプロセスに保存した署名済み `RevocationNotice`                      |
+| `acp_discover_workers`     | 中継器に登録された署名済みエージェントカード                           |
+| `acp_inspect_revocations`  | このサーバープロセスに記録された失効通知                               |
 
-同じ実装が `@acp/runtime` の `AcpMcpServer` です。サーバー鍵は、ツールが行う依頼側の承認に署名します。
+`initialize` は、この手順を示したサーバー `instructions` を返します。同じ実装が `@acp/runtime` の `AcpMcpServer` です。サーバー鍵は、ツールが行う依頼側の承認に署名します。`acp_discover_workers` はディレクトリの読み取り専用です。`GET /agents` の前に、委任と同じリレー許可リストと `validateRelayEndpointUrl` を使い、タスク入力は送りません。`acp_inspect_revocations` はメモリ上のレジストリを読むだけで、ワーカーには接続しません。
 
 `acp_delegate_task` と `acp_delegate_multi` は、タスク入力を中継器経由で対象ワーカーへ送ります。ホストが引数を組み立てるときは、送信先を制限します。
 
@@ -236,6 +253,8 @@ pnpm acp mcp-server \
 ワーカーは実行中に `PROGRESS`（`percent`、`step`、`message`、途中のトークン数やツール回数）を送れます。ほかのセッション封筒と同じ暗号と相互署名の監査に入ります。`delegate(request, { onProgress })` は、`DELIVER` の前に復号した更新を受け取ります。申告された使用量は `QuotaMeter` に計上されます。
 
 `RevocationRegistry` は Ed25519 の `RevocationNotice`（RFC 8785 JCS）を検査します。ワーカーは失効した招待を `ACCEPT` の前に拒否します。`CapabilityGuard` は失効した能力を、ツール実行の前に `TOKEN_REVOKED` で拒否します。`issuerDid` 以外の署名は無効です。
+
+ワーカーがオフラインでも失効は届きます。`deliverRevocation` と `RequesterClient.sendRevocation` は、`SignedRevocationNotice` を載せた暗号化 `REVOKE` 封筒を、そのワーカーのリレー受信箱へ並べます。`WorkerNode` は `runOnce()`、`start()`（`start({ once: true })` を含む）、`pumpUntil()` で、次の `PROPOSE` を読む前に先頭の `REVOKE` を取り込みます。招待の通知は、送信者がワーカーの所有者であるときだけ記録します。能力の通知は、`issuerDid` がそのトークンを発行した、または委任したときだけ記録します。偽造や第三者の `REVOKE` は無視し、保存しません。`ACCEPT` の前に `capabilityChains` の各能力 ID を `assertNotRevoked` で検査するので、失効済みの能力は `TOKEN_REVOKED` となり、タスクは受諾されません。オフラインのキューと偽装通知は `conformance/offline-revocation-inbox.test.ts` が覆います。
 
 `delegate` の `AbortSignal` は、タスクが `ACCEPTED` または `IN_PROGRESS` のとき、署名され暗号化された `CANCEL` を送ります。ワーカーはタスクを止め、サンドボックスへ `SIGTERM` のあと `SIGKILL` を送り、`CANCELLED` の監査ログを封印します。
 

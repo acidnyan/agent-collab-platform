@@ -12,7 +12,9 @@
     "build": "pnpm -r build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "conformance": "vitest run",
     "test:security-proof": "vitest run conformance/security-proofs.test.ts",
+    "security-proof": "vitest run conformance/security-proofs.test.ts",
     "validate:schemas": "tsx scripts/validate-schemas.ts",
     "acp": "tsx cli/src/index.ts"
   },
