@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { canonicalize, digest, signPayload, verifySigned } from './crypto.js';
 import { validateSchema, createAjv, assertSynchronousSchema } from './schema.js';
-import type { RevocationList } from './revocation.js';
+import type { RevocationList, SignedRevocationNotice } from './revocation.js';
 import type { Capability, CapabilityToken, KeyPair, Schema } from './types.js';
 export function violation(detail: string): never {
   throw new Error('CAPABILITY_VIOLATION: ' + detail);
@@ -131,6 +131,31 @@ export function verifyCapabilityChain(
   if (leaf.payload.audience !== context.audience) violation('audience');
   return leaf;
 }
+/**
+ * True when `issuerDid` signed this token or an ancestor in the chain.
+ * `payload.issuer` is ignored unless that token's signature verifies for the
+ * same DID. Callers must pass a chain that has already passed
+ * `verifyCapabilityChain` for the context being evaluated: a self-signed
+ * token controls only itself, not another issuer's token that reused its id.
+ */
+export function capabilityIssuerControls(
+  chain: CapabilityToken[],
+  index: number,
+  issuerDid: string,
+): boolean {
+  if (!issuerDid) return false;
+  for (let i = 0; i <= index && i < chain.length; i++) {
+    const token = chain[i];
+    if (!token?.payload || token.payload.issuer !== issuerDid) continue;
+    if (!verifySigned(token, issuerDid)) continue;
+    return true;
+  }
+  return false;
+}
+type NoticeSource = RevocationList & {
+  noticesFor?(targetType: 'invite' | 'capability', targetId: string): SignedRevocationNotice[];
+  unexplainedRevocation?(targetType: 'invite' | 'capability', targetId: string): boolean;
+};
 export class CapabilityGuard {
   private counts = new Map<string, number>();
   private revoked = new Set<string>();
@@ -145,17 +170,21 @@ export class CapabilityGuard {
     args: Record<string, unknown>,
     resource: string,
   ): void {
+    // Task revocation does not read the chain. Check it before maxCalls so a
+    // settled task still fails closed after its counters are exhausted.
+    if (this.revoked.has(context.taskId)) violation('revoked task');
+    // Verify before trusting payload.issuer or treating a shared token id as revoked.
+    const leaf = verifyCapabilityChain(chain, context);
     if (this.registry) {
-      for (const token of chain) {
+      for (let index = 0; index < chain.length; index++) {
+        const token = chain[index]!;
         if (
-          this.registry.isRevoked('capability', token.payload.id) ||
-          this.registry.isRevoked('capability', digest(token))
+          this.capabilityTargetRevoked(chain, index, token.payload.id) ||
+          this.capabilityTargetRevoked(chain, index, digest(token))
         )
           throw new Error('TOKEN_REVOKED');
       }
     }
-    if (this.revoked.has(context.taskId)) violation('revoked task');
-    const leaf = verifyCapabilityChain(chain, context);
     if (
       !leaf.payload.allowedTools.includes(tool) ||
       !resourceWithin(resource, leaf.payload.resource) ||
@@ -170,5 +199,29 @@ export class CapabilityGuard {
       const id = digest(t);
       this.counts.set(id, (this.counts.get(id) ?? 0) + 1);
     }
+  }
+  /**
+   * A notice revokes this token only when its issuer controls the token in
+   * this verified chain. A third party who minted a different token with the
+   * same id does not.
+   */
+  private capabilityTargetRevoked(
+    chain: CapabilityToken[],
+    index: number,
+    targetId: string,
+  ): boolean {
+    const registry = this.registry;
+    if (!registry || !targetId) return false;
+    const source = registry as NoticeSource;
+    if (typeof source.noticesFor !== 'function') return registry.isRevoked('capability', targetId);
+    const notices = source.noticesFor('capability', targetId);
+    if (notices.some((notice) => capabilityIssuerControls(chain, index, notice.payload.issuerDid)))
+      return true;
+    if (typeof source.unexplainedRevocation === 'function')
+      return source.unexplainedRevocation('capability', targetId);
+    // Listed notices are authoritative. An empty list plus a bare bit is an
+    // opaque registry that cannot show the issuer.
+    if (notices.length > 0) return false;
+    return registry.isRevoked('capability', targetId);
   }
 }
