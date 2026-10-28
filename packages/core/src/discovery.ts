@@ -5,6 +5,7 @@ export interface AgentSkill {
   id: string;
   name: string;
   description?: string;
+  taskTypes?: string[];
   inputSchema?: Json;
   outputSchema?: Json;
 }
@@ -42,6 +43,7 @@ export function agentCardDelegationStatement(fields: {
 }
 export interface DiscoveryAgentCard {
   type: 'AgentCard';
+  accessMode?: 'invite-only' | 'open';
   name: string;
   description: string;
   ownerDid: string;
@@ -331,6 +333,7 @@ export function createSignedAgentCard(
       costModes: options.costModes ?? (['worker_byok'] as BudgetSpec['costBearer'][]),
       name: options.name,
       skills: options.skills,
+      ...(options.accessMode ? { accessMode: options.accessMode } : {}),
       ...delegationFields,
       ...(agentDelegation ? { agentDelegation } : {}),
     },
@@ -380,12 +383,14 @@ export function verifySignedAgentCard(card: SignedAgentCard, now = Date.now()): 
     return (
       verifySigned(card, p.ownerDid) &&
       p.type === 'AgentCard' &&
+      (p.accessMode === undefined || p.accessMode === 'invite-only' || p.accessMode === 'open') &&
       typeof p.name === 'string' &&
       !!p.name &&
       typeof p.description === 'string' &&
       typeof p.version === 'string' &&
       Array.isArray(p.skills) &&
-      p.skills.every((s) => typeof s.id === 'string' && !!s.id && typeof s.name === 'string') &&
+      p.skills.every((s) => typeof s.id === 'string' && !!s.id && typeof s.name === 'string' &&
+        (s.taskTypes === undefined || (Array.isArray(s.taskTypes) && s.taskTypes.every((t) => typeof t === 'string' && !!t)))) &&
       new Set(p.skills.map((s) => s.id)).size === p.skills.length &&
       Array.isArray(p.costModes) &&
       p.costModes.length > 0 &&
@@ -536,4 +541,18 @@ export function parseAndVerifyInviteToken(
     if (error instanceof Error && error.message === 'SSRF_BLOCKED_RELAY_URL') throw error;
     throw new Error('INVALID_OR_EXPIRED_INVITE');
   }
+}
+
+/** Resolve current signed cards before filtering, so stale advertisements cannot reopen access. */
+export function discoverAgentCards(rawCards: unknown, query: {
+  did?: string; skillId?: string; taskType?: string; accessMode?: 'invite-only' | 'open';
+} = {}, now = Date.now()): SignedAgentCard[] {
+  if (!Array.isArray(rawCards)) return [];
+  const valid = rawCards.filter((card): card is SignedAgentCard => verifySignedAgentCard(card, now));
+  const targets = query.did ? [query.did] : [...new Set(valid.map((c) => c.payload.agentDid))].sort();
+  return targets.map((did) => findDiscoveredAgentCard(valid, did, now)).filter((c): c is SignedAgentCard => {
+    if (!c || (query.accessMode && c.payload.accessMode !== query.accessMode)) return false;
+    return (!query.skillId && !query.taskType) || c.payload.skills.some((s) =>
+      (!query.skillId || s.id === query.skillId) && (!query.taskType || s.taskTypes?.includes(query.taskType)));
+  });
 }

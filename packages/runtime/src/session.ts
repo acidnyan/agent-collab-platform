@@ -23,6 +23,7 @@ import {
   verifyCapabilityChain,
   capabilityIssuerControls,
   findDiscoveredAgentCard,
+  discoverAgentCards,
   schemaNarrows,
   digest,
   openEnvelope,
@@ -341,6 +342,8 @@ function recipientInbox(
   return inbox;
 }
 export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
+  /** Explicit admission policy. Omitted preserves legacy programmatic behavior. */
+  accessMode?: 'invite-only' | 'open';
   owner: KeyPair;
   relay: RelayTransport | string;
   relayUrl?: string;
@@ -430,6 +433,8 @@ export class WorkerNode {
   /** Inbox registry composed with options.revocation when the caller passed one. */
   readonly revocation: RevocationList;
   constructor(readonly options: WorkerNodeOptions) {
+    if (options.accessMode !== undefined && !['invite-only', 'open'].includes(options.accessMode))
+      throw new Error('INVALID_ACCESS_MODE');
     this.acceptance = acceptanceFrom(options);
     validateAcceptance(this.acceptance);
     this.revocation = options.revocation
@@ -455,6 +460,7 @@ export class WorkerNode {
             ? options.relay
             : (options.relayUrl ?? 'http://in-memory.invalid'),
         skills: options.adapter.skills,
+        ...(options.accessMode ? { accessMode: options.accessMode } : {}),
       },
       options.owner,
       agentDid === options.owner.did ? undefined : options.agentKey,
@@ -1159,7 +1165,17 @@ export class WorkerNode {
   }
   private assertInviteActive(data: Proposal): void {
     const token = data.inviteToken;
-    if (typeof token !== 'string' || token.length === 0) return;
+    if (typeof token !== 'string' || token.length === 0) {
+      if (this.options.accessMode === 'invite-only' &&
+          !this.options.allowedRequesterDids?.includes(data.proposal.payload.requester.ownerDid))
+        throw new Error('INVITE_REQUIRED');
+      return;
+    }
+    const invite = parseAndVerifyInviteToken(token, Date.now(), { allowPrivateRelay: true });
+    if (invite.ownerDid !== this.options.owner.did ||
+        invite.agentDid !== this.agentCard.payload.agentDid ||
+        invite.relayUrl !== this.agentCard.payload.relayEndpoint)
+      throw new Error('INVITE_WORKER_MISMATCH');
     this.revocation.assertNotRevoked('invite', token);
     const targetId = this.inviteDigest(token);
     if (targetId) this.revocation.assertNotRevoked('invite', targetId);
@@ -1386,6 +1402,7 @@ export interface RequesterClientOptions {
 }
 export interface DelegateOptions {
   to: string;
+  discover?: { skillId?: string; taskType?: string };
   relay?: RelayTransport | string;
   title: string;
   description: string;
@@ -1581,7 +1598,12 @@ export class RequesterClient {
           : recipientInbox(relayOption, relay, owner.did);
     const rawCards = !invite && relay.discover ? await relay.discover() : [];
     if (!Array.isArray(rawCards)) throw new Error('INVALID_AGENT_CARD');
-    const card = findDiscoveredAgentCard(rawCards, options.to);
+    if (invite && options.discover) throw new Error('CONFLICTING_DISCOVERY_TARGET');
+    const card = options.discover
+      ? discoverAgentCards(rawCards, { ...options.discover, accessMode: 'open',
+          ...(options.to ? { did: options.to } : {}) })[0]
+      : findDiscoveredAgentCard(rawCards, options.to);
+    if (options.discover && !card) throw new Error('OPEN_WORKER_NOT_FOUND');
     const peer = invite?.ownerDid ?? card?.payload.ownerDid ?? options.to;
     const manifest =
       options.manifest ??
