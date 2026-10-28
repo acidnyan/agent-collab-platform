@@ -17,6 +17,7 @@ import {
   OpenAICompatibleAdapter,
   SandboxAgentAdapter,
 } from '@acp/adapters';
+import { createReceiveHook } from './receive-hook.js';
 const REPEATABLE = new Set(['--allow-requester']);
 const LLM_ADAPTERS = new Set(['claude', 'codex', 'openai']);
 function flags(args: string[]): Map<string, string | true> {
@@ -146,6 +147,9 @@ export async function networkCommand(command: string, args: string[]): Promise<v
   }
   const automatic = ['yes', 'auto-accept', 'auto-approve'].some((name) => f.has('--' + name));
   if (command === 'worker') {
+    const onInboxRecord = f.has('--on-receive')
+      ? createReceiveHook(text(f, 'on-receive')) : undefined;
+    if (onInboxRecord && !f.has('--inbox')) throw new Error('--on-receive requires --inbox');
     const adapterName = text(f, 'adapter', 'sandbox');
     const acceptance = workerAcceptance(f);
     assertLlmAutoAccept(adapterName, automatic, acceptance);
@@ -181,6 +185,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       approvalProvider: approval(key, automatic, acceptance),
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
       inboxPath: f.has('--inbox') ? text(f, 'inbox') : undefined,
+      onInboxRecord,
       onEvent: (event, taskId) => console.error(JSON.stringify({ event, taskId })),
       ...acceptance,
       allowPrivateRelay,
