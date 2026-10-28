@@ -32,6 +32,7 @@ import {
   verifyRevocationNotice,
   RevocationRegistry,
   signEnvelope,
+  DEFAULT_CLOCK_SKEW_MS,
 } from '@acp/core';
 import type {
   Json,
@@ -668,29 +669,59 @@ export class WorkerNode {
       first.payload.seq !== 0
     )
       throw new Error('INVALID_PROPOSAL_ENVELOPE');
-    // PROPOSE arrives before the session wire is constructed. Open it with the same rule.
-    const data = openEnvelope(
+    // PROPOSE arrives before the session wire is constructed. Open it with the same rule,
+    // and return an encrypted ERROR frame if pre-wire validation fails so the requester does not hang.
+    let data!: Proposal;
+    let m!: TaskManifest;
+    let auditPath: string | undefined;
+    try {
+      data = openEnvelope(
         first,
         this.options.owner,
         sessionDecryptOptions(this.options.allowUnencryptedEnvelopes),
-      ) as unknown as Proposal,
-      m = data.proposal?.payload;
-    if (!m || first.payload.senderDid !== m.requester.ownerDid || first.payload.taskId !== m.taskId)
-      throw new Error('INVALID_PROPOSAL');
-    if (
-      !verifySigned(data.proposal, m.requester.ownerDid) ||
-      m.worker?.ownerDid !== this.options.owner.did ||
-      m.worker.agentDid !== this.agentCard.payload.agentDid ||
-      Date.parse(m.deadline) <= Date.now() ||
-      Date.parse(m.createdAt) > Date.now()
-    )
-      throw new Error('INVALID_PROPOSAL');
-    const auditPath = this.options.auditPath
-      ? this.completed++ === 0 && !existsSync(this.options.auditPath)
-        ? this.options.auditPath
-        : this.options.auditPath.replace(/(?:\.jsonl)?$/, '.' + m.taskId + '.jsonl')
-      : undefined;
-    freshAudit(auditPath);
+      ) as unknown as Proposal;
+      const manifest = data?.proposal?.payload;
+      if (
+        !manifest ||
+        first.payload.senderDid !== manifest.requester.ownerDid ||
+        first.payload.taskId !== manifest.taskId
+      )
+        throw new Error('INVALID_PROPOSAL');
+      if (
+        !verifySigned(data.proposal, manifest.requester.ownerDid) ||
+        manifest.worker?.ownerDid !== this.options.owner.did ||
+        manifest.worker.agentDid !== this.agentCard.payload.agentDid ||
+        Date.parse(manifest.deadline) <= Date.now() ||
+        Date.parse(manifest.createdAt) > Date.now() + DEFAULT_CLOCK_SKEW_MS
+      )
+        throw new Error('INVALID_PROPOSAL');
+      m = manifest;
+      auditPath = this.options.auditPath
+        ? this.completed++ === 0 && !existsSync(this.options.auditPath)
+          ? this.options.auditPath
+          : this.options.auditPath.replace(/(?:\.jsonl)?$/, '.' + m.taskId + '.jsonl')
+        : undefined;
+      freshAudit(auditPath);
+    } catch (e) {
+      try {
+        await relay.send(
+          signEnvelope(
+            {
+              taskId: first.payload.taskId,
+              recipientDid: first.payload.senderDid,
+              seq: 0,
+              eventType: 'ERROR',
+              payload: asJson(rejectionBody(e)),
+            },
+            this.options.owner,
+            { encrypt: true },
+          ),
+        );
+      } catch {
+        // Ignore transport errors while reporting pre-wire rejection.
+      }
+      throw e;
+    }
     const activeSignal = sessionSignal(
       Math.min(this.options.timeoutMs ?? 120000, Date.parse(m.deadline) - Date.now()),
       idleSignal,

@@ -12,6 +12,8 @@ export interface AgentSkill {
 export const DEFAULT_AGENT_CARD_EXPIRY_MS = 24 * 60 * 60 * 1000;
 /** Longest allowed expiresAt - signedAt window. Matches the invite TTL cap of 30 days. */
 export const MAX_AGENT_CARD_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
+/** Allowed future clock skew for newly minted invites, capability tokens, and task manifests. */
+export const DEFAULT_CLOCK_SKEW_MS = 60_000;
 /**
  * Statement signed by agentDid's key when the card owner is a different DID.
  * Binds ownerDid, agentDid, relayEndpoint, and expiresAt. A signature for one tuple
@@ -523,7 +525,7 @@ export function parseAndVerifyInviteToken(
       p.agentCard.payload.relayEndpoint !== p.relayUrl ||
       !Number.isFinite(Date.parse(p.issuedAt)) ||
       !Number.isFinite(Date.parse(p.expiresAt)) ||
-      Date.parse(p.issuedAt) > now ||
+      Date.parse(p.issuedAt) > now + DEFAULT_CLOCK_SKEW_MS ||
       Date.parse(p.expiresAt) <= now ||
       Date.parse(p.expiresAt) <= Date.parse(p.issuedAt)
     )

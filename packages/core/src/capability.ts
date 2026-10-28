@@ -2,6 +2,7 @@
 // Adapted from newtro/delegateos src/core/dct.ts and chain.ts (MIT), Scott Smith.
 import { randomUUID } from 'node:crypto';
 import { canonicalize, digest, signPayload, verifySigned } from './crypto.js';
+import { DEFAULT_CLOCK_SKEW_MS } from './discovery.js';
 import { validateSchema, createAjv, assertSynchronousSchema } from './schema.js';
 import type { RevocationList, SignedRevocationNotice } from './revocation.js';
 import type { Capability, CapabilityToken, KeyPair, Schema } from './types.js';
@@ -114,7 +115,7 @@ export function verifyCapabilityChain(
     if (
       !verifySigned(t, p.issuer) ||
       p.taskId !== context.taskId ||
-      (context.now ?? Date.now()) < Date.parse(p.notBefore) ||
+      (context.now ?? Date.now()) + DEFAULT_CLOCK_SKEW_MS < Date.parse(p.notBefore) ||
       (context.now ?? Date.now()) >= Date.parse(p.expiresAt) ||
       Date.parse(p.notBefore) >= Date.parse(p.expiresAt)
     )
