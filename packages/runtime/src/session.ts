@@ -356,6 +356,8 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   auditPath?: string;
   /** Append accepted, decrypted task messages as private JSONL before execution. */
   inboxPath?: string;
+  /** Best-effort notification after a successful inbox append; never awaited. */
+  onInboxRecord?: (record: string) => void | Promise<void>;
   timeoutMs?: number;
   tools?: Record<string, ToolDefinition>;
   toolBackend?: ToolBackend;
@@ -795,6 +797,15 @@ export class WorkerNode {
       gateway = new OwnerGateway(this.options.owner, contract, policy, this.revocation);
       const accepted = gateway.accept(approval);
       if (this.options.inboxPath) {
+        const record = JSON.stringify({
+          receivedAt: new Date().toISOString(),
+          taskId: m.taskId,
+          requesterOwnerDid: m.requester.ownerDid,
+          requesterAgentDid: m.requester.agentDid,
+          title: m.task.title,
+          description: m.task.description,
+          input: data.input,
+        }) + '\n';
         const fd = openSync(
           this.options.inboxPath,
           constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND |
@@ -804,20 +815,15 @@ export class WorkerNode {
         try {
           if (!fstatSync(fd).isFile()) throw new Error('INVALID_INBOX_FILE');
           fchmodSync(fd, 0o600);
-          appendFileSync(
-            fd,
-            JSON.stringify({
-              receivedAt: new Date().toISOString(),
-              taskId: m.taskId,
-              requesterOwnerDid: m.requester.ownerDid,
-              requesterAgentDid: m.requester.agentDid,
-              title: m.task.title,
-              description: m.task.description,
-              input: data.input,
-            }) + '\n',
-          );
+          appendFileSync(fd, record);
         } finally {
           closeSync(fd);
+        }
+        // Notification errors must not fail a persisted task.
+        try {
+          void Promise.resolve(this.options.onInboxRecord?.(record)).catch(() => undefined);
+        } catch {
+          // Synchronous notification failures are also best effort.
         }
       }
       await wire.sendEvent('ACCEPT', { contract, transition: accepted, approval });

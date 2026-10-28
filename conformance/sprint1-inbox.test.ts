@@ -19,7 +19,7 @@ async function directory() {
   dirs.push(dir);
   return dir;
 }
-async function fixture(inboxPath?: string, reject = false) {
+async function fixture(inboxPath?: string, reject = false, onInboxRecord?: (record: string) => void | Promise<void>) {
   const relay = new InMemoryRelay();
   const owner = generateKeyPair(), requester = generateKeyPair();
   const calls: unknown[] = [];
@@ -32,7 +32,7 @@ async function fixture(inboxPath?: string, reject = false) {
     },
   };
   const acceptance = reject ? { allowedRequesterDids: [generateKeyPair().did] } : {};
-  const worker = new WorkerNode({ owner, relay, adapter, inboxPath, ...acceptance,
+  const worker = new WorkerNode({ owner, relay, adapter, inboxPath, onInboxRecord, ...acceptance,
     approvalProvider: new PolicyAutoApprovalProvider(owner, undefined, { acceptance }), timeoutMs: 3000 });
   const client = new RequesterClient({ owner: requester, relay,
     approvalProvider: new PolicyAutoApprovalProvider(requester), timeoutMs: 3000 });
@@ -45,6 +45,30 @@ async function fixture(inboxPath?: string, reject = false) {
 }
 
 describe('Sprint 1 accepted task inbox', () => {
+  it.each(['pending', 'throw', 'reject'] as const)('settles independently of a %s notification', async (mode) => {
+    const inbox = join(await directory(), 'notify.jsonl');
+    const notify = vi.fn((record: string) => {
+      expect(JSON.parse(record).input).toEqual({ message: 'notify' });
+      if (mode === 'throw') throw new Error('hook failed');
+      if (mode === 'reject') return Promise.reject(new Error('hook failed'));
+      return new Promise<void>(() => undefined);
+    });
+    const f = await fixture(inbox, false, notify);
+    expect((await f.run({ message: 'notify' })).map((r) => r.status)).toEqual(['fulfilled', 'fulfilled']);
+    expect(notify).toHaveBeenCalledExactlyOnceWith(await readFile(inbox, 'utf8'));
+    f.worker.stop();
+  });
+
+  it('does not notify without a persisted inbox record', async () => {
+    const notify = vi.fn();
+    for (const [path, reject] of [[undefined, false], [join(await directory(), 'missing', 'inbox'), false], [join(await directory(), 'rejected'), true]] as const) {
+      const f = await fixture(path, reject, notify);
+      await f.run({ message: 'no notification' });
+      f.worker.stop();
+    }
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it('appends decrypted complete messages exactly once per accepted task before execution', async () => {
     const inbox = join(await directory(), 'inbox.jsonl');
     const f = await fixture(inbox);
@@ -110,6 +134,13 @@ describe('Sprint 1 accepted task inbox', () => {
 
   it('wires CLI worker start --inbox to the runtime over encrypted HTTP relay', async () => {
     const dir = await directory(), inbox = join(dir, 'cli.jsonl');
+    const hook = join(dir, 'hook.cjs'), received = join(dir, 'received.json'), release = join(dir, 'release'), finished = join(dir, 'finished');
+    await writeFile(hook, `const fs = require('fs'); let data = ''; process.stdin.setEncoding('utf8');
+      process.stdin.on('data', chunk => data += chunk);
+      process.stdin.on('end', () => { fs.writeFileSync(process.argv[2], data);
+        const timer = setInterval(() => { if (fs.existsSync(process.argv[3])) {
+          clearInterval(timer); fs.writeFileSync(process.argv[4], 'done');
+        } }, 20); setTimeout(() => process.exit(), 10000).unref(); });`);
     const owner = generateKeyPair(), requester = generateKeyPair();
     const key = join(dir, 'worker.private.json');
     await writeFile(key, JSON.stringify(owner), { mode: 0o600 });
@@ -118,7 +149,8 @@ describe('Sprint 1 accepted task inbox', () => {
     vi.spyOn(console, 'log').mockImplementation((line) => { lines.push(String(line)); });
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const pending = networkCommand('worker', ['start', '--key', key, '--relay', relay.url,
-      '--allow-private-relay', '--yes', '--once', '--inbox', inbox]);
+      '--allow-private-relay', '--yes', '--once', '--inbox', inbox,
+      '--on-receive', [process.execPath, hook, received, release, finished].map((p) => '"' + p + '"').join(' ')]);
     // Attach a rejection handler immediately, including on test failure.
     const done = pending.catch((error: unknown) => error);
     try {
@@ -128,10 +160,14 @@ describe('Sprint 1 accepted task inbox', () => {
       const result = await client.delegate({ to: lines.find((line) => line.startsWith('acp-invite:'))!,
         title: 'CLI inbox', description: 'CLI regression', input: { message: 'from CLI' } });
       expect(result.state).toBe('SETTLED');
+      await vi.waitFor(async () => expect(await readFile(received, 'utf8')).toBe(await readFile(inbox, 'utf8')), { timeout: 5000 });
+      await expect(stat(finished)).rejects.toMatchObject({ code: 'ENOENT' });
       expect(await done).toBeUndefined();
       expect(JSON.parse((await readFile(inbox, 'utf8')).trim())).toMatchObject({ taskId: result.taskId,
         title: 'CLI inbox', description: 'CLI regression', input: { message: 'from CLI' } });
     } finally {
+      await writeFile(release, 'release');
+      await vi.waitFor(async () => expect(await readFile(finished, 'utf8')).toBe('done'), { timeout: 5000 });
       await relay.close();
       await done;
     }

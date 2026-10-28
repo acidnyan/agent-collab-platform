@@ -160,6 +160,17 @@ Copy the printed `acp-invite:...` line. This local example echoes the JSON input
 
 `acp worker` does not register its AgentCard in the public relay directory unless you pass `--publish`. Share the invite directly. `acp discover` lists only workers that opted in with `--publish`.
 
+Add `--on-receive 'node /path/to/notify.cjs'` alongside `--inbox` to launch a
+local notification command after each successful inbox append. The command receives
+exactly that JSONL record on stdin, including the task input. Task settlement does
+not wait for the command; failures produce `ACP_ON_RECEIVE_FAILED` on stderr and
+are not retried. Hook stdout/stderr are discarded. Hooks may run concurrently.
+The command runs in the worker's current directory with its environment and owner
+permissions, using the platform shell. Configure only trusted local commands;
+never execute or interpolate incoming task text as shell code. Hooks should finish
+promptly and manage their own timeouts. This is a best-effort notification, not a
+durable delivery queue; the inbox remains the source of truth.
+
 Pass `--inbox /path/to/inbox.jsonl` to keep a local inbox for an interactive agent.
 After validating and approving a proposal, the worker appends one decrypted JSON
 line before executing it: `{ receivedAt, taskId, requesterOwnerDid,
