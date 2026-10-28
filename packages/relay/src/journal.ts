@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { verifySignedAgentCard } from '@acp/core/edge';
 import type { SignedAgentCard, SignedEnvelope } from '@acp/core/edge';
 import { agentRegistryKey } from './fetch.js';
 import type { RelaySnapshot } from './fetch.js';
@@ -270,6 +271,7 @@ function asBytes(value: unknown): Uint8Array | undefined {
 
 async function readLegacy(
   storage: RelayKeyValueStorage,
+  now: number,
 ): Promise<{ snapshot: RelaySnapshot; generation: string; count: number } | undefined> {
   const head = await storage.get<{ generation: string; count: number }>('relay-head');
   if (!head || typeof head.generation !== 'string' || !Number.isSafeInteger(head.count) || head.count < 1)
@@ -280,8 +282,19 @@ async function readLegacy(
     if (!chunk) return undefined;
     chunks.push(chunk);
   }
+  const snapshot = JSON.parse(Buffer.concat(chunks).toString('utf8')) as RelaySnapshot;
+  if (Array.isArray(snapshot.agents)) {
+    const validAgents = snapshot.agents.filter((card) => verifySignedAgentCard(card, now));
+    const validKeys = new Set(validAgents.map((card) => registryKey(card)));
+    snapshot.agents = validAgents;
+    if (Array.isArray(snapshot.agentExpiry)) {
+      snapshot.agentExpiry = snapshot.agentExpiry.filter(
+        ([key, expiresAt]) => validKeys.has(key) && expiresAt > now,
+      );
+    }
+  }
   return {
-    snapshot: JSON.parse(Buffer.concat(chunks).toString('utf8')) as RelaySnapshot,
+    snapshot,
     generation: head.generation,
     count: head.count,
   };
@@ -349,7 +362,7 @@ async function loadMeta(
     }
     const did = registryKey(row.card);
     cursor.agents.push({ did, blob: ptr?.blob ?? '' });
-    if (row.expiresAt <= now) continue;
+    if (row.expiresAt <= now || !verifySignedAgentCard(row.card, now)) continue;
     agents.push(row.card);
     agentExpiry.push([did, row.expiresAt]);
   }
@@ -375,7 +388,7 @@ export async function loadRelayState(
 ): Promise<LoadedRelay> {
   const meta = await storage.get<RelayMeta>('meta');
   if (meta?.v === 2) return loadMeta(storage, meta, now, limits);
-  const legacy = await readLegacy(storage);
+  const legacy = await readLegacy(storage, now);
   if (!legacy) return { cursor: emptyCursor(limits.seenMod, limits.authMod) };
   return {
     cursor: emptyCursor(limits.seenMod, limits.authMod),

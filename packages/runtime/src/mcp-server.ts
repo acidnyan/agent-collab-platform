@@ -604,9 +604,10 @@ export class AcpMcpServer {
         ? new HttpRelayClient(selected, { allowPrivateRelay: this.options.allowPrivateRelay })
         : selected;
     if (!transport.discover) throw new Error('DISCOVERY_UNAVAILABLE');
-    const cards = await transport.discover();
-    if (!Array.isArray(cards) || cards.some((card) => !verifySignedAgentCard(card)))
-      throw new Error('INVALID_AGENT_CARD');
+    const rawCards = await transport.discover();
+    if (!Array.isArray(rawCards)) throw new Error('INVALID_AGENT_CARD');
+    const now = Date.now();
+    const cards = rawCards.filter((card) => verifySignedAgentCard(card, now));
     return {
       relayUrl: typeof selected === 'string' ? selected : null,
       count: cards.length,
