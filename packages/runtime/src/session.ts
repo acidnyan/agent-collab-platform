@@ -342,7 +342,7 @@ function recipientInbox(
   return inbox;
 }
 export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
-  /** Explicit admission policy. Omitted preserves legacy programmatic behavior. */
+  /** Explicit admission policy. Defaults to invite-only. */
   accessMode?: 'invite-only' | 'open';
   owner: KeyPair;
   relay: RelayTransport | string;
@@ -753,11 +753,21 @@ export class WorkerNode {
     try {
       await wire.receiveEvent('PROPOSE', first);
       this.assertInviteActive(data);
+      if (this.options.accessMode === 'open') {
+        const skills = this.agentCard.payload.skills;
+        const selected = m.task.skillId ? skills.filter((skill) => skill.id === m.task.skillId) : skills;
+        if ((m.task.skillId && selected.length === 0) ||
+            (m.task.taskType && !selected.some((skill) => skill.taskTypes?.includes(m.task.taskType!))) ||
+            (!m.task.taskType && selected.some((skill) => skill.taskTypes?.length)))
+          throw new Error('TASK_SCOPE_REJECTED');
+      }
       const capabilityContext: CapabilityContext = {
         rootDid: m.requester.ownerDid,
         audience: this.options.owner.did,
         taskId: m.taskId,
       };
+      if (!Array.isArray(data.capabilityChains)) throw new Error('CAPABILITY_VIOLATION');
+      for (const chain of data.capabilityChains) verifyCapabilityChain(chain, capabilityContext);
       this.assertCapabilitiesActive(data.capabilityChains, capabilityContext);
       this.rememberChains(m.taskId, data.capabilityChains, capabilityContext);
       trackedTaskId = m.taskId;
@@ -1166,7 +1176,7 @@ export class WorkerNode {
   private assertInviteActive(data: Proposal): void {
     const token = data.inviteToken;
     if (typeof token !== 'string' || token.length === 0) {
-      if (this.options.accessMode === 'invite-only' &&
+      if (this.options.accessMode !== 'open' &&
           !this.options.allowedRequesterDids?.includes(data.proposal.payload.requester.ownerDid))
         throw new Error('INVITE_REQUIRED');
       return;
@@ -1359,6 +1369,8 @@ function rejectionBody(error: unknown): { code: string; reason?: string } {
 }
 function safeError(e: unknown): string {
   const s = String(e);
+  for (const code of ['UNENCRYPTED_ENVELOPE_REJECTED', 'INVITE_REQUIRED', 'TASK_SCOPE_REJECTED'])
+    if (s === 'Error: ' + code) return code;
   if (s.includes('TOKEN_REVOKED')) return 'TOKEN_REVOKED';
   return (
     ['BUDGET', 'CAPABILITY', 'APPROVAL', 'HITL', 'INVALID', 'VERIFICATION', 'SCHEMA', 'ABORT'].find(
@@ -1612,6 +1624,9 @@ export class RequesterClient {
         ownerDid: owner.did,
         workerDid: peer,
         agentDid: invite?.agentDid ?? card?.payload.agentDid ?? peer,
+        skillId: options.discover?.skillId,
+        taskType: options.discover?.taskType ?? (card?.payload.skills.length === 1 &&
+          card.payload.skills[0].taskTypes?.length === 1 ? card.payload.skills[0].taskTypes[0] : undefined),
       });
     validateManifest(manifest);
     if (
@@ -2022,6 +2037,8 @@ export function buildTaskManifest(options: {
   ownerDid: string;
   workerDid: string;
   agentDid?: string;
+  skillId?: string;
+  taskType?: string;
   title: string;
   description: string;
   outputSchema?: Schema;
@@ -2038,6 +2055,8 @@ export function buildTaskManifest(options: {
     requester: { ownerDid: options.ownerDid, agentDid: options.ownerDid },
     worker: { ownerDid: options.workerDid, agentDid: options.agentDid ?? options.workerDid },
     task: {
+      ...(options.skillId ? { skillId: options.skillId } : {}),
+      ...(options.taskType ? { taskType: options.taskType } : {}),
       title: options.title,
       description: options.description,
       acceptanceCriteria: [

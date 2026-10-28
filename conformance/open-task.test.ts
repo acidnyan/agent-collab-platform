@@ -99,6 +99,7 @@ describe('Open worker capability admission', () => {
     await worker.register();
     const expiresAt = new Date(Date.now() + 60000).toISOString();
     const manifest = buildTaskManifest({ ownerDid: requester.did, workerDid: owner.did,
+      taskType: 'json',
       title: task.title, description: task.description,
       capabilities: [{ capabilityId: 'cap_read', resource: 'data://allowed', allowedTools: ['read'],
         argConstraints: {}, maxInvocations: 1, expiresAt }] });

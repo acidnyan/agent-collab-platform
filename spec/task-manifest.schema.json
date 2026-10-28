@@ -56,6 +56,8 @@
       "additionalProperties": false,
       "required": ["title", "description", "acceptanceCriteria"],
       "properties": {
+        "skillId": { "type": "string", "minLength": 1 },
+        "taskType": { "type": "string", "minLength": 1 },
         "title": {
           "type": "string",
           "minLength": 1,

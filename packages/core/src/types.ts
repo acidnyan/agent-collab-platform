@@ -108,6 +108,8 @@ export interface TaskManifest {
   requester: { ownerDid: string; agentDid: string; displayName?: string; relayEndpoint?: string };
   worker?: { ownerDid: string; agentDid: string; displayName?: string; relayEndpoint?: string };
   task: {
+    skillId?: string;
+    taskType?: string;
     title: string;
     description: string;
     acceptanceCriteria: { id: string; description: string; required: boolean }[];

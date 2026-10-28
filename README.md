@@ -369,6 +369,13 @@ acceptance still requires its existing explicit requester policy.
 
 Programmatic callers can set `WorkerNodeOptions.accessMode` and
 `RequesterClient.delegate({ to: '', discover: { skillId, taskType }, ... })`.
-For compatibility, omitting `accessMode` in the runtime API retains legacy
-admission behavior; set it explicitly for invite-only protection. Older signed
+Omitting `accessMode` in the runtime API defaults to invite-only protection.
+Direct DID callers need an open worker or an explicit requester allowlist. Older signed
 AgentCards remain valid but are not selected for open skill discovery.
+
+Open workers enforce signed manifest `task.skillId` and `task.taskType` against
+their advertised skills before acceptance. A worker advertising task types
+requires a matching type; discovery binds the selected type into the manifest.
+Capability signatures and task bindings are also verified before `ACCEPT`.
+`conformance/open-task-adversarial-security.test.ts` covers admission bypass,
+card spoofing, scope and budget escalation, cross-task replay, and envelope tampering.
