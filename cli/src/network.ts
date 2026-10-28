@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFileSync, writeFileSync } from 'node:fs';
-import type { KeyPair, Schema } from '@acp/core';
+import type { KeyPair, Schema, OpenPolicy } from '@acp/core';
 import { createSignedAgentCard, createInviteToken, discoverAgentCards } from '@acp/core';
 import { startLocalRelay, HttpRelayClient } from '@acp/relay';
 import {
@@ -159,6 +159,19 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     if (onInboxRecord && !f.has('--inbox')) throw new Error('--on-receive requires --inbox');
     const adapterName = text(f, 'adapter', 'sandbox');
     const acceptance = workerAcceptance(f);
+    const openPolicy: OpenPolicy = {};
+    const openFlags = {
+      maxInputTokens: 'open-max-input-tokens',
+      maxOutputTokens: 'open-max-output-tokens',
+      maxToolInvocations: 'open-max-tool-calls',
+      maxWallClockSeconds: 'open-max-wall-seconds',
+    } as const;
+    for (const field of Object.keys(openFlags) as (keyof OpenPolicy)[]) {
+      const limit = optionalCount(f, openFlags[field]);
+      if (limit !== undefined) openPolicy[field] = limit;
+    }
+    if (Object.keys(openPolicy).length && accessMode !== 'open')
+      throw new Error('OPEN_POLICY_REQUIRES_OPEN_MODE');
     assertLlmAutoAccept(adapterName, automatic, acceptance);
     let adapter: AgentAdapter;
     switch (adapterName) {
@@ -191,6 +204,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     }
     const worker = new WorkerNode({
       accessMode: accessMode as 'invite-only' | 'open',
+      ...(Object.keys(openPolicy).length ? { openPolicy } : {}),
       owner: key,
       relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay }),
       relayUrl: text(f, 'relay'),
@@ -205,6 +219,8 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       allowPrivateRelay,
     });
     if (acceptance.publishToRegistry) await worker.register();
+    if (accessMode === 'open' && automatic && !acceptance.allowedRequesterDids?.length)
+      console.error(`[ACP WARNING] Worker started in --open mode with ${f.has('--yes') ? '--yes' : 'automatic approval'} and no requester allowlist. Any requester can submit tasks for automatic acceptance within configured limits.`);
     console.log(worker.invite());
     const stop = () => worker.stop();
     process.once('SIGINT', stop);

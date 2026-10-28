@@ -7,7 +7,7 @@ import { generateKeyPair } from '../packages/core/src/index.js';
 import { startLocalRelay, HttpRelayClient } from '../packages/relay/src/index.js';
 import { networkCommand } from '../cli/src/network.js';
 
-it('CLI publishes open skills, filters discovery, and settles without an invite', async () => {
+it.each([false, true])('CLI advertises limits and warns only without an allowlist (%s)', async (allowlisted) => {
   const dir = await mkdtemp(join(tmpdir(), 'acp-open-cli-'));
   const server = await startLocalRelay({ port: 0, host: '127.0.0.1' });
   const lines: string[] = [];
@@ -20,13 +20,21 @@ it('CLI publishes open skills, filters discovery, and settles without an invite'
     await writeFile(join(dir, 'requester.private.json'), JSON.stringify(requester), { mode: 0o600 });
     const common = ['--relay', server.url, '--allow-private-relay'];
     pending = networkCommand('worker', ['start', '--key', join(dir, 'worker.private.json'), ...common,
-      '--open', '--publish', '--skill', 'echo', '--task-type', 'json', '--auto-accept', '--once']);
+      '--open', '--publish', '--skill', 'echo', '--task-type', 'json', '--yes', '--once',
+      '--open-max-input-tokens', '1000', '--open-max-output-tokens', '500',
+      '--open-max-tool-calls', '2', '--open-max-wall-seconds', '30',
+      ...(allowlisted ? ['--allow-requester', requester.did] : [])]);
     pending.catch(() => undefined);
     const relay = new HttpRelayClient(server.url, { allowPrivateRelay: true });
     await vi.waitFor(async () => expect((await relay.discover()).length).toBe(1));
     await networkCommand('discover', [...common, '--skill', 'echo', '--task-type', 'json', '--did', worker.did]);
     const cards = JSON.parse(lines.at(-1)!);
     expect(cards[0].payload.accessMode).toBe('open');
+    expect(cards[0].payload.openPolicy).toEqual({ maxInputTokens: 1000, maxOutputTokens: 500,
+      maxToolInvocations: 2, maxWallClockSeconds: 30 });
+    const warnings = error.mock.calls.filter(([line]) => String(line).startsWith('[ACP WARNING]'));
+    expect(warnings).toHaveLength(allowlisted ? 0 : 1);
+    if (!allowlisted) expect(warnings[0][0]).toContain('Worker started in --open mode with --yes and no requester allowlist');
     await networkCommand('delegate', ['--key', join(dir, 'requester.private.json'), ...common,
       '--discover', 'echo', '--task-type', 'json', '--title', 'Echo', '--description', 'Echo',
       '--input', '{"ok":true}', '--yes']);
@@ -39,3 +47,20 @@ it('CLI publishes open skills, filters discovery, and settles without an invite'
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+it.each(['open-max-input-tokens', 'open-max-output-tokens', 'open-max-tool-calls', 'open-max-wall-seconds'])
+  ('CLI rejects invalid %s and requires open mode', async (flag) => {
+    const dir = await mkdtemp(join(tmpdir(), 'acp-policy-cli-'));
+    try {
+      const key = join(dir, 'worker.private.json');
+      await writeFile(key, JSON.stringify(generateKeyPair()), { mode: 0o600 });
+      for (const value of ['0', '-1', '1.5', 'Infinity', '9007199254740992', 'no']) {
+        await expect(networkCommand('worker', ['start', '--key', key, '--open', '--' + flag, value]))
+          .rejects.toThrow('INVALID_' + flag.toUpperCase().replaceAll('-', '_'));
+      }
+      await expect(networkCommand('worker', ['start', '--key', key, '--open', '--' + flag]))
+        .rejects.toThrow('Missing --' + flag);
+      await expect(networkCommand('worker', ['start', '--key', key, '--' + flag, '10']))
+        .rejects.toThrow('OPEN_POLICY_REQUIRES_OPEN_MODE');
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });

@@ -41,9 +41,24 @@ export function agentCardDelegationStatement(fields: {
     expiresAt: fields.expiresAt,
   };
 }
+export type OpenPolicy = Partial<Pick<BudgetSpec,
+  'maxInputTokens' | 'maxOutputTokens' | 'maxToolInvocations' | 'maxWallClockSeconds'>>;
+export const OPEN_POLICY_FIELDS = [
+  'maxInputTokens', 'maxOutputTokens', 'maxToolInvocations', 'maxWallClockSeconds',
+] as const;
+
+function validOpenPolicy(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  return Object.entries(value).every(([key, limit]) =>
+    OPEN_POLICY_FIELDS.some((field) => field === key) &&
+    typeof limit === 'number' && Number.isSafeInteger(limit) && limit > 0);
+}
+
 export interface DiscoveryAgentCard {
   type: 'AgentCard';
   accessMode?: 'invite-only' | 'open';
+  openPolicy?: OpenPolicy;
   name: string;
   description: string;
   ownerDid: string;
@@ -325,6 +340,7 @@ export function createSignedAgentCard(
       ? undefined
       : signPayload(agentCardDelegationStatement(delegationFields), resolvedAgentKey!, signedAt)
           .signature;
+  if (!validOpenPolicy(options.openPolicy)) throw new Error('INVALID_AGENT_CARD');
   const card = signPayload(
     {
       type: 'AgentCard' as const,
@@ -334,6 +350,7 @@ export function createSignedAgentCard(
       name: options.name,
       skills: options.skills,
       ...(options.accessMode ? { accessMode: options.accessMode } : {}),
+      ...(options.openPolicy !== undefined ? { openPolicy: { ...options.openPolicy } } : {}),
       ...delegationFields,
       ...(agentDelegation ? { agentDelegation } : {}),
     },
@@ -384,6 +401,7 @@ export function verifySignedAgentCard(card: SignedAgentCard, now = Date.now()): 
       verifySigned(card, p.ownerDid) &&
       p.type === 'AgentCard' &&
       (p.accessMode === undefined || p.accessMode === 'invite-only' || p.accessMode === 'open') &&
+      validOpenPolicy(p.openPolicy) &&
       typeof p.name === 'string' &&
       !!p.name &&
       typeof p.description === 'string' &&

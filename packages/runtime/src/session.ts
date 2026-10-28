@@ -34,6 +34,7 @@ import {
   RevocationRegistry,
   signEnvelope,
   DEFAULT_CLOCK_SKEW_MS,
+  OPEN_POLICY_FIELDS,
 } from '@acp/core';
 import type {
   Json,
@@ -48,6 +49,7 @@ import type {
   CapabilityToken,
   CapabilityContext,
   BudgetSpec,
+  OpenPolicy,
   RevocationList,
   Invite,
   SignedRevocationNotice,
@@ -344,6 +346,7 @@ function recipientInbox(
 export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   /** Explicit admission policy. Defaults to invite-only. */
   accessMode?: 'invite-only' | 'open';
+  openPolicy?: OpenPolicy;
   owner: KeyPair;
   relay: RelayTransport | string;
   relayUrl?: string;
@@ -463,6 +466,7 @@ export class WorkerNode {
             : (options.relayUrl ?? 'http://in-memory.invalid'),
         skills: options.adapter.skills,
         ...(options.accessMode ? { accessMode: options.accessMode } : {}),
+        ...(options.openPolicy !== undefined ? { openPolicy: options.openPolicy } : {}),
       },
       options.owner,
       agentDid === options.owner.did ? undefined : options.agentKey,
@@ -756,6 +760,11 @@ export class WorkerNode {
       await wire.receiveEvent('PROPOSE', first);
       this.assertInviteActive(data);
       if (this.options.accessMode === 'open') {
+        for (const field of OPEN_POLICY_FIELDS) {
+          const limit = this.agentCard.payload.openPolicy?.[field];
+          if (limit !== undefined && m.budget[field] > limit)
+            throw new Error('TASK_SCOPE_REJECTED');
+        }
         const skills = this.agentCard.payload.skills;
         const selected = m.task.skillId ? skills.filter((skill) => skill.id === m.task.skillId) : skills;
         if ((m.task.skillId && selected.length === 0) ||
@@ -1634,6 +1643,14 @@ export class RequesterClient {
         taskType: options.discover?.taskType ?? (card?.payload.skills.length === 1 &&
           card.payload.skills[0].taskTypes?.length === 1 ? card.payload.skills[0].taskTypes[0] : undefined),
       });
+    // Cap only implicit defaults; explicit budgets remain subject to worker admission.
+    if (!options.manifest && card?.payload.accessMode === 'open') {
+      for (const field of OPEN_POLICY_FIELDS) {
+        const limit = card.payload.openPolicy?.[field];
+        if (limit !== undefined && options.budget?.[field] === undefined)
+          manifest.budget[field] = Math.min(manifest.budget[field], limit);
+      }
+    }
     validateManifest(manifest);
     if (
       manifest.requester.ownerDid !== owner.did ||
