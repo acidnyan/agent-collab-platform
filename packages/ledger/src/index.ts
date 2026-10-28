@@ -301,13 +301,14 @@ export function verifyAudit(
   try {
     const { entries, checkpoint } = bundle,
       c = checkpoint.actor.payload;
+    const selfDelegated = Array.isArray(c?.actors) && c.actors.length === 2 && c.actors[0] === c.actors[1];
     if (
       c.type !== 'AuditCheckpoint' ||
       c.actors.length !== 2 ||
-      c.actors[0] === c.actors[1] ||
       !c.actors.includes(checkpoint.actor.signature.signerDid) ||
       !c.actors.includes(checkpoint.receiver.signature.signerDid) ||
-      checkpoint.actor.signature.signerDid === checkpoint.receiver.signature.signerDid ||
+      (!selfDelegated &&
+        checkpoint.actor.signature.signerDid === checkpoint.receiver.signature.signerDid) ||
       !verifySigned(checkpoint.actor) ||
       !verifySigned(checkpoint.receiver) ||
       digest(checkpoint.receiver.payload) !== digest(checkpoint.actor) ||
@@ -328,7 +329,7 @@ export function verifyAudit(
         e.entryHash !== digest(b) ||
         !c.actors.includes(b.actorDid) ||
         !c.actors.includes(b.receiverDid) ||
-        b.actorDid === b.receiverDid ||
+        (!selfDelegated && b.actorDid === b.receiverDid) ||
         !verifySignature(b, e.actorSignature, b.actorDid) ||
         !verifySigned(a, b.receiverDid) ||
         a.payload.entryHash !== e.entryHash ||

@@ -177,6 +177,92 @@ function mailboxRelay(relay: RelayTransport, mailbox: TaskMailbox): RelayTranspo
     receive: (_recipientDid, _waitMs, signal) => mailbox.take(signal),
   };
 }
+const WORKER_BOUND_EVENTS: ReadonlySet<string> = new Set([
+  'PROPOSE',
+  'REVOKE',
+  'VERIFY_ACCEPT',
+  'VERIFY_REJECT',
+  'SETTLE',
+  'SETTLED',
+  'CANCEL',
+  'CHECKPOINT',
+]);
+const REQUESTER_BOUND_EVENTS: ReadonlySet<string> = new Set([
+  'ACCEPT',
+  'ATTEST',
+  'START',
+  'PROGRESS',
+  'DELIVER',
+  'HEARTBEAT',
+  'CHECKPOINT_ACK',
+]);
+const activeRequesterInboxes = new Map<string, Set<RecipientInbox>>();
+const activeWorkerListeners = new Map<string, Set<(envelope: SignedEnvelope) => boolean>>();
+function registerRequesterInbox(did: string, inbox: RecipientInbox): void {
+  const set = activeRequesterInboxes.get(did) ?? new Set();
+  set.add(inbox);
+  activeRequesterInboxes.set(did, set);
+}
+function unregisterRequesterInbox(did: string, inbox: RecipientInbox): void {
+  const set = activeRequesterInboxes.get(did);
+  if (!set) return;
+  set.delete(inbox);
+  if (set.size === 0) activeRequesterInboxes.delete(did);
+}
+function forwardToRequesterInbox(did: string, envelope: SignedEnvelope): boolean {
+  const inboxes = activeRequesterInboxes.get(did);
+  if (!inboxes) return false;
+  for (const inbox of inboxes) {
+    if (inbox.deliverFromPeerRole(envelope)) return true;
+  }
+  return false;
+}
+function registerWorkerListener(
+  did: string,
+  fn: (envelope: SignedEnvelope) => boolean,
+): () => void {
+  const set = activeWorkerListeners.get(did) ?? new Set();
+  set.add(fn);
+  activeWorkerListeners.set(did, set);
+  return () => {
+    set.delete(fn);
+    if (set.size === 0) activeWorkerListeners.delete(did);
+  };
+}
+function forwardToWorkerListener(did: string, envelope: SignedEnvelope): boolean {
+  const listeners = activeWorkerListeners.get(did);
+  if (!listeners) return false;
+  for (const fn of listeners) {
+    if (fn(envelope)) return true;
+  }
+  return false;
+}
+function findDiscoveredAgentCard(
+  rawCards: unknown,
+  targetDid: string,
+  now = Date.now(),
+): SignedAgentCard | undefined {
+  if (!Array.isArray(rawCards)) return undefined;
+  const matches = rawCards.filter(
+    (c): c is SignedAgentCard =>
+      verifySignedAgentCard(c, now) &&
+      (c.payload.agentDid === targetDid || c.payload.ownerDid === targetDid),
+  );
+  if (matches.length === 0) return undefined;
+  matches.sort((a, b) => {
+    const aSelf = a.payload.ownerDid === a.payload.agentDid ? 1 : 0;
+    const bSelf = b.payload.ownerDid === b.payload.agentDid ? 1 : 0;
+    if (aSelf !== bSelf) return bSelf - aSelf;
+    const aAgent = a.payload.agentDid === targetDid ? 1 : 0;
+    const bAgent = b.payload.agentDid === targetDid ? 1 : 0;
+    if (aAgent !== bAgent) return bAgent - aAgent;
+    const aSigned = Date.parse(a.signature.signedAt);
+    const bSigned = Date.parse(b.signature.signedAt);
+    if (aSigned !== bSigned) return bSigned - aSigned;
+    return Date.parse(b.payload.expiresAt) - Date.parse(a.payload.expiresAt);
+  });
+  return matches[0];
+}
 /**
  * One reader for a recipient DID. Concurrent delegate() calls share this inbox
  * and only see envelopes for their own taskId.
@@ -190,11 +276,21 @@ class RecipientInbox {
     private readonly relay: RelayTransport,
     private readonly did: string,
   ) {}
+  hasTask(taskId: string): boolean {
+    return this.mailboxes.has(taskId);
+  }
+  deliverFromPeerRole(envelope: SignedEnvelope): boolean {
+    const mailbox = this.mailboxes.get(envelope.payload.taskId);
+    if (!mailbox) return false;
+    mailbox.push(envelope);
+    return true;
+  }
   attach(taskId: string): TaskMailbox {
     const existing = this.mailboxes.get(taskId);
     if (existing) return existing;
     const mailbox = new TaskMailbox();
     this.mailboxes.set(taskId, mailbox);
+    registerRequesterInbox(this.did, this);
     this.wake?.();
     this.wake = undefined;
     if (!this.started) {
@@ -206,7 +302,16 @@ class RecipientInbox {
   /** Drop the task mailbox. The shared reader stops dequeuing once none remain. */
   detach(taskId: string): void {
     this.mailboxes.delete(taskId);
-    if (this.mailboxes.size === 0) this.readAbort?.abort();
+    if (this.mailboxes.size === 0) {
+      unregisterRequesterInbox(this.did, this);
+      this.readAbort?.abort();
+    }
+  }
+  private isWorkerBoundFrame(envelope: SignedEnvelope): boolean {
+    const { eventType, seq } = envelope.payload;
+    if (WORKER_BOUND_EVENTS.has(eventType)) return true;
+    if (eventType === 'AUDIT_ENTRY' && seq === 1) return true;
+    return false;
   }
   private async pump(): Promise<void> {
     for (;;) {
@@ -223,7 +328,12 @@ class RecipientInbox {
       const controller = new AbortController();
       this.readAbort = controller;
       try {
-        const envelope = await receiveRelay(this.relay, this.did, controller.signal);
+        const envelope = await receiveRelay(this.relay, this.did, controller.signal, {
+          role: 'requester',
+        });
+        if (!this.mailboxes.has(envelope.payload.taskId) || this.isWorkerBoundFrame(envelope)) {
+          if (forwardToWorkerListener(this.did, envelope)) continue;
+        }
         this.mailboxes.get(envelope.payload.taskId)?.push(envelope);
       } catch {
         // The last mailbox closed, or the transport aborted this read.
@@ -328,6 +438,8 @@ export class WorkerNode {
   private activeTasks = 0;
   private readonly proposalTimes = new Map<string, number[]>();
   private readonly mailboxes = new Map<string, TaskMailbox>();
+  private readonly forwardedQueue: SignedEnvelope[] = [];
+  private readonly forwardedWaiters: Array<() => void> = [];
   readonly controller = new AbortController();
   lastResult?: SessionResult;
   /** Notices learned from the relay inbox. Always present, even without options.revocation. */
@@ -446,10 +558,17 @@ export class WorkerNode {
       ...(options.signal ? [options.signal] : []),
     ]);
     const jobs = new Set<Promise<void>>();
+    const unregister = registerWorkerListener(this.options.owner.did, (env) => {
+      this.forwardedQueue.push(env);
+      this.forwardedWaiters.shift()?.();
+      return true;
+    });
     try {
       while (!idleSignal.aborted) {
         // revocationAwareRelay ingests a leading REVOKE before this read returns.
-        const envelope = await receiveRelay(this.relay, this.options.owner.did, idleSignal);
+        const envelope = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
+          role: 'worker',
+        });
         if (this.deliver(envelope)) continue;
         const job = this.beginTask(envelope, idleSignal, options.once === true);
         if (!job) continue;
@@ -463,6 +582,7 @@ export class WorkerNode {
     } catch (error) {
       if (!idleSignal.aborted) throw error;
     } finally {
+      unregister();
       await Promise.allSettled([...jobs]);
     }
     return this.lastResult;
@@ -530,6 +650,7 @@ export class WorkerNode {
           this.relay,
           this.options.owner.did,
           AbortSignal.any([idleSignal, wait.signal]),
+          { role: 'worker' },
         ).then(
           (envelope) => envelope,
           (error: unknown) => {
@@ -552,7 +673,9 @@ export class WorkerNode {
   async runOnce(signal?: AbortSignal): Promise<SessionResult> {
     const idleSignal = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
     // One or more leading REVOKE envelopes are consumed before the task PROPOSE.
-    const first = await receiveRelay(this.relay, this.options.owner.did, idleSignal);
+    const first = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
+      role: 'worker',
+    });
     return this.executeTask(first, idleSignal, this.relay);
   }
   private async executeTask(
@@ -896,12 +1019,42 @@ export class WorkerNode {
    * receive through this relay, so a FIFO head of one or more REVOKE messages
    * is applied before the following PROPOSE is observed.
    */
+  private isRequesterBoundFrame(envelope: SignedEnvelope): boolean {
+    const { eventType, seq, taskId } = envelope.payload;
+    if (REQUESTER_BOUND_EVENTS.has(eventType)) return true;
+    if (seq === 0 && (eventType === 'AUDIT_ACK' || eventType === 'ERROR')) return true;
+    if (eventType !== 'PROPOSE' && eventType !== 'REVOKE' && !this.mailboxes.has(taskId))
+      return true;
+    return false;
+  }
   private revocationAwareRelay(relay: RelayTransport): RelayTransport {
-    const receive: RelayTransport['receive'] = async (recipientDid, waitMs, signal) => {
+    const receive: RelayTransport['receive'] = async (recipientDid, waitMs, signal, filter) => {
       for (;;) {
-        const envelope = await relay.receive(recipientDid, waitMs, signal);
-        if (!envelope) return undefined;
+        const forwarded = this.forwardedQueue.shift();
+        if (forwarded) {
+          if (this.consumeRevocation(forwarded)) continue;
+          return forwarded;
+        }
+        const envelope = await relay.receive(
+          recipientDid,
+          waitMs,
+          signal,
+          filter ?? { role: 'worker' },
+        );
+        if (!envelope) {
+          const afterWait = this.forwardedQueue.shift();
+          if (afterWait) {
+            if (this.consumeRevocation(afterWait)) continue;
+            return afterWait;
+          }
+          return undefined;
+        }
         if (this.consumeRevocation(envelope)) continue;
+        if (
+          this.isRequesterBoundFrame(envelope) &&
+          forwardToRequesterInbox(this.options.owner.did, envelope)
+        )
+          continue;
         return envelope;
       }
     };
@@ -1391,13 +1544,10 @@ export class RequesterClient {
         typeof relayOption === 'string'
           ? recipientInbox(this, relay, owner.did, relayOption.replace(/\/$/, ''))
           : recipientInbox(relayOption, relay, owner.did);
-    const cards = !invite && relay.discover ? await relay.discover() : [];
-    if (cards.some((c) => !verifySignedAgentCard(c))) throw new Error('INVALID_AGENT_CARD');
-    const card = cards.find(
-      (c) => c.payload.agentDid === options.to || c.payload.ownerDid === options.to,
-    );
+    const rawCards = !invite && relay.discover ? await relay.discover() : [];
+    if (!Array.isArray(rawCards)) throw new Error('INVALID_AGENT_CARD');
+    const card = findDiscoveredAgentCard(rawCards, options.to);
     const peer = invite?.ownerDid ?? card?.payload.ownerDid ?? options.to;
-    if (peer === owner.did) throw new Error('DISTINCT_OWNERS_REQUIRED');
     const manifest =
       options.manifest ??
       buildTaskManifest({
@@ -1798,13 +1948,10 @@ async function canonicalizeDiscoveredWorkers(
         });
         if (!relay.discover) return;
         const cards = await relay.discover();
-        if (!Array.isArray(cards) || cards.some((card) => !verifySignedAgentCard(card))) return;
+        if (!Array.isArray(cards)) return;
+        const now = Date.now();
         for (const target of group) {
-          const card = cards.find(
-            (item) =>
-              item.payload.agentDid === target.workerDid ||
-              item.payload.ownerDid === target.workerDid,
-          );
+          const card = findDiscoveredAgentCard(cards, target.workerDid, now);
           if (card) target.workerDid = card.payload.agentDid;
         }
       } catch {
