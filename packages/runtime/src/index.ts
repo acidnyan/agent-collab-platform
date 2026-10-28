@@ -16,3 +16,4 @@ export {
   parseAndVerifyInviteToken,
 } from '@acp/core';
 export * from './session.js';
+export { PeerRejectedError } from './session-audit.js';

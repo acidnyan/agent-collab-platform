@@ -398,8 +398,23 @@ Direct DID callers need an open worker or an explicit requester allowlist. Older
 AgentCards remain valid but are not selected for open skill discovery.
 
 Open workers enforce signed manifest `task.skillId` and `task.taskType` against
-their advertised skills before acceptance. A worker advertising task types
-requires a matching type; discovery binds the selected type into the manifest.
+their advertised skills before acceptance. Selecting a skill that advertises task
+types requires a matching type; discovery binds the selected type into the manifest.
+Direct proposals may omit both fields. Open workers ignore cryptographically valid
+expired invites (`INVITE_EXPIRED`); malformed invites and live invites for a different
+worker still fail. Invite-only workers continue to require an active invite or allowlist.
+
+Signed, encrypted ERROR frames may include `detail: { field, expected, actual, hint }`.
+Scope and advertised-budget diagnostics use fixed field names and hints; `expected`
+and `actual` contain SHA-256 digests, never the compared payload values.
+Requester failures expose `PeerRejectedError.code` and optional `.detail` while
+preserving the `PEER_REJECTED` message prefix. Worker `onEvent(event, taskId, error)`
+receives the same code and detail, and CLI event lines include both. When an audit
+path is configured, local rejection records are owner-signed and appended to
+`<auditPath>.errors.jsonl`. This diagnostic sidecar is separate from the bilateral
+hash-chain ledger and is not a settled or countersigned audit bundle. Verified
+rejections retain their task IDs; trailing ERROR frames do not create empty-ID events.
+
 Capability signatures and task bindings are also verified before `ACCEPT`.
 `conformance/open-task-adversarial-security.test.ts` covers admission bypass,
 card spoofing, scope and budget escalation, cross-task replay, and envelope tampering.

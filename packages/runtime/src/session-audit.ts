@@ -15,6 +15,24 @@ import { JsonlStore, verifyAudit } from '@acp/ledger';
 import type { AuditBody, AuditBundle, AuditEntry, Checkpoint } from '@acp/ledger';
 import type { RelayReceiveFilter, RelayTransport } from '@acp/relay';
 import type { ProgressPayload } from './adapter.js';
+import type { ErrorDetail } from './session.js';
+/** The peer's signed ERROR, retaining optional diagnostics for programmatic callers. */
+export class PeerRejectedError extends Error {
+  readonly code?: string;
+  readonly detail?: ErrorDetail;
+  constructor(body: Json) {
+    super('PEER_REJECTED: ' + JSON.stringify(body));
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      if (typeof body.code === 'string') this.code = body.code;
+      const detail = body.detail;
+      if (detail && typeof detail === 'object' && !Array.isArray(detail) &&
+          typeof detail.field === 'string' && typeof detail.hint === 'string' &&
+          typeof detail.expected === 'string' && /^sha256:[a-f0-9]{64}$/.test(detail.expected) &&
+          typeof detail.actual === 'string' && /^sha256:[a-f0-9]{64}$/.test(detail.actual))
+        this.detail = { field: detail.field, expected: detail.expected, actual: detail.actual, hint: detail.hint };
+    }
+  }
+}
 export const asJson = (v: unknown): Json => JSON.parse(JSON.stringify(v)) as Json;
 const pause = (signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
@@ -254,7 +272,7 @@ export class SessionWire {
     );
     this.sealedByView.set(view, e);
     if (view.payload.eventType === 'ERROR')
-      throw new Error('PEER_REJECTED: ' + JSON.stringify(view.payload.payload));
+      throw new PeerRejectedError(view.payload.payload);
     return view;
   }
   private acceptInitial(expected: string | string[], initial: SignedEnvelope): SignedEnvelope {
