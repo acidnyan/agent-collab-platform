@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -107,7 +107,10 @@ export async function runSandbox(options: SandboxOptions): Promise<Json> {
     options.timeoutMs > 604800000
   )
     throw new Error('INVALID_TIMEOUT');
-  const directory = await mkdtemp(join(tmpdir(), 'acp-task-'));
+  // macOS tmpdir() is /var/folders/..., a symlink to /private/var/folders/...
+  // Node's permission model realpath's the entry script and then stats '/var'
+  // unless --allow-fs-read already names the physical directory.
+  const directory = await realpath(await mkdtemp(join(tmpdir(), 'acp-task-')));
   let child: ChildProcess | undefined;
   let exited = Promise.resolve();
   try {

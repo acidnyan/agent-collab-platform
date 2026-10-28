@@ -6,6 +6,7 @@ import {
   canonicalRelayPath,
   createRelayFetchHandler,
   DEFAULT_MAX_ENVELOPE_BYTES,
+  inboxRecipientFromRequest,
   InMemoryRelay,
   relayErrorResponse,
   relayHttpHeaders,
@@ -171,7 +172,11 @@ export class RelayDurableObject {
   private longPollWait(request: Request): number | undefined {
     if (request.method !== 'GET') return undefined;
     const url = new URL(request.url);
-    if (canonicalRelayPath(url.pathname) !== '/envelopes' || !url.searchParams.has('waitMs'))
+    const path = canonicalRelayPath(url.pathname);
+    if (
+      (path !== '/envelopes' && !path.startsWith('/inbox/')) ||
+      !url.searchParams.has('waitMs')
+    )
       return undefined;
     const ms = Number(url.searchParams.get('waitMs'));
     if (!Number.isFinite(ms) || ms <= 0) return undefined;
@@ -187,7 +192,7 @@ export class RelayDurableObject {
   private async handleLongPoll(request: Request): Promise<Response> {
     const opened = await this.enqueue(() => this.openLongPoll(request));
     if (opened.mode === 'response') return opened.response;
-    await this.relay.wait(opened.recipient, opened.waitMs, request.signal);
+    await this.relay.wait(opened.recipient, opened.waitMs, request.signal, opened.filter);
     // send() wakes wait before the POST snapshot finishes. A disconnect in that gap must not dequeue.
     if (request.signal.aborted) return this.emptyPoll();
     return this.enqueue(() => this.finishLongPoll(opened.receive, request.signal));
@@ -246,7 +251,8 @@ export class RelayDurableObject {
       (request.method === 'POST' && ['/agents', '/envelopes'].includes(path)) ||
       (request.method === 'DELETE' &&
         (path === '/envelopes' || path.startsWith('/envelopes/'))) ||
-      (request.method === 'GET' && path === '/envelopes')
+      (request.method === 'GET' && (path === '/envelopes' || path.startsWith('/inbox/'))) ||
+      this.persistedVersion !== this.relay.mutationVersion
     )
       await this.writeSnapshot();
     return response;
@@ -298,7 +304,8 @@ export function clientIp(request: Request): string {
 
 function rateBucket(method: string, path: string): string | undefined {
   if (method === 'POST' && path === '/envelopes') return 'post-envelope';
-  if (method === 'GET' && path === '/envelopes') return 'get-envelope';
+  if (method === 'GET' && (path === '/envelopes' || path.startsWith('/inbox/')))
+    return 'get-envelope';
   if (method === 'POST' && path === '/agents') return 'post-agent';
   return undefined;
 }
@@ -401,7 +408,11 @@ function forward(request: Request, body?: string): Request {
 
 function inboxRoutes(method: string, path: string): boolean {
   if (method === 'POST' && path === '/envelopes') return true;
-  if (method === 'GET' && (path === '/envelopes' || path === '/stream')) return true;
+  if (
+    method === 'GET' &&
+    (path === '/envelopes' || path === '/stream' || path.startsWith('/inbox/'))
+  )
+    return true;
   return method === 'DELETE' && (path === '/envelopes' || path.startsWith('/envelopes/'));
 }
 
@@ -438,7 +449,7 @@ export async function handleRelayEdge(
         throw new Error('INVALID_ENVELOPE');
       }
       recipient = recipientOf(parsed) ?? '';
-    } else recipient = url.searchParams.get('recipient') ?? '';
+    } else recipient = inboxRecipientFromRequest(path, url) ?? url.searchParams.get('recipient') ?? '';
     // Validate before idFromName so a missing or forged DID cannot mint an object.
     resolveDid(recipient);
     return env.RELAY.get(env.RELAY.idFromName('inbox:' + recipient)).fetch(forward(request, body));

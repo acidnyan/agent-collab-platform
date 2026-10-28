@@ -13,7 +13,7 @@ import {
 import type { AckReceipt, Json, KeyPair, Signed, SignedEnvelope, Transition } from '@acp/core';
 import { JsonlStore, verifyAudit } from '@acp/ledger';
 import type { AuditBody, AuditBundle, AuditEntry, Checkpoint } from '@acp/ledger';
-import type { RelayTransport } from '@acp/relay';
+import type { RelayReceiveFilter, RelayTransport } from '@acp/relay';
 import type { ProgressPayload } from './adapter.js';
 export const asJson = (v: unknown): Json => JSON.parse(JSON.stringify(v)) as Json;
 const pause = (signal?: AbortSignal) =>
@@ -29,15 +29,25 @@ const pause = (signal?: AbortSignal) =>
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
   });
+function isTransientPollError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return /^RELAY_REJECTED:\s*(429|502|503|504)\b/.test(text);
+}
 export async function receiveRelay(
   relay: RelayTransport,
   did: string,
   signal?: AbortSignal,
+  filter?: RelayReceiveFilter,
 ): Promise<SignedEnvelope> {
   while (true) {
     signal?.throwIfAborted();
-    const e = await relay.receive(did, 1000, signal);
-    if (e) return e;
+    try {
+      const e = await relay.receive(did, 1000, signal, filter);
+      if (e) return e;
+    } catch (error) {
+      if (signal?.aborted) throw new Error('SESSION_ABORTED');
+      if (!isTransientPollError(error)) throw error;
+    }
     await pause(signal);
   }
 }

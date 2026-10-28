@@ -210,7 +210,10 @@ lists signed registered cards. `validate` defaults to the task-manifest schema.
 
 An MCP host can run the stdio server below. Tools: `acp_delegate_task`,
 `acp_delegate_multi`, `acp_verify_audit_bundle`, `acp_create_invite`,
-`acp_revoke_token`.
+`acp_revoke_token`, `acp_discover_workers`, and `acp_inspect_revocations`.
+`initialize` publishes workflow instructions. `acp_discover_workers` reads the
+relay directory and still obeys the relay allowlist. `acp_inspect_revocations`
+reads this process's revocation registry.
 
 ```sh
 pnpm acp mcp-server --key ~/.acp/requester.private.json --relay https://acp-relay.agent-collab.workers.dev [--allow-private-relay] [--allow-worker <did>] [--allow-relay <url>] [--require-approval | --approval-webhook <url>]

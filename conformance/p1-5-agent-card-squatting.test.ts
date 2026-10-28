@@ -191,7 +191,7 @@ describe('P1-5 agent card squatting', () => {
     expect((await post(self)).status).toBe(201);
     expect(relay.agents.has(agentRegistryKey(attacker.did, victim.did))).toBe(true);
     expect(relay.agents.has(agentRegistryKey(victim.did, victim.did))).toBe(true);
-    expect(selectAgentCard(relay.discover(), victim.did)?.payload.name).toBe('victim');
+    expect(() => selectAgentCard(relay.discover(), victim.did)).toThrow('AMBIGUOUS_AGENT_CARD_OWNER');
   });
 
   it('rejects an expired card on verification, registration, and eviction', async () => {
@@ -289,7 +289,7 @@ describe('P1-5 agent card squatting', () => {
     expect(relay.discover()).toHaveLength(4);
     expect(relay.agents.has(agentRegistryKey(owner.did, agent.did))).toBe(true);
     expect(relay.agents.has(agentRegistryKey(other.did, agent.did))).toBe(true);
-    expect(selectAgentCard(relay.agents.values(), agent.did)).toBeUndefined();
+    expect(() => selectAgentCard(relay.agents.values(), agent.did)).toThrow('AMBIGUOUS_AGENT_CARD_OWNER');
     expect(selectAgentCard(relay.agents.values(), owner.did)?.payload.name).toBe('owner');
 
     const handler = createRelayFetchHandler({ relay });
@@ -304,7 +304,9 @@ describe('P1-5 agent card squatting', () => {
         )
       ).json(),
     ).toEqual(delegated);
-    expect((await get('/agents/' + encodeURIComponent(agent.did))).status).toBe(404);
+    const ambiguous = await get('/agents/' + encodeURIComponent(agent.did));
+    expect(ambiguous.status).toBe(409);
+    expect(await ambiguous.json()).toEqual({ error: 'AMBIGUOUS_AGENT_CARD_OWNER' });
     expect(await (await get('/agents/' + encodeURIComponent(owner.did))).json()).toEqual(self);
     expect(
       await (

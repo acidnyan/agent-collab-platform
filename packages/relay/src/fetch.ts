@@ -3,6 +3,7 @@ import {
   verifySigned,
   resolveDid,
   verifySignedAgentCard,
+  findDiscoveredAgentCard,
   toA2AAgentCard,
   verifyRelayAuthToken,
   createRelayAuthToken,
@@ -78,10 +79,215 @@ export interface InMemoryRelayOptions {
   now?: () => number;
   tamper?: (e: SignedEnvelope) => SignedEnvelope;
 }
+export type RelayInboxRole = 'worker' | 'requester';
+export interface RelayReceiveFilter {
+  taskId?: string | readonly string[];
+  role?: RelayInboxRole;
+  peek?: boolean;
+}
 interface StoredEnvelope {
   envelope: SignedEnvelope;
   bytes: number;
   expiresAt: number;
+  role: RelayInboxRole;
+}
+interface TaskRoleState {
+  crossRole: Map<string, RelayInboxRole>;
+  lastPrimaryRole?: RelayInboxRole;
+  pendingAckRoles: RelayInboxRole[];
+  workerSeq: number;
+  requesterSeq: number;
+}
+interface NormalizedReceiveFilter {
+  taskIds?: Set<string>;
+  role?: RelayInboxRole;
+  peek: boolean;
+}
+const WORKER_PRIMARY_EVENTS: ReadonlySet<string> = new Set([
+  'PROPOSE',
+  'REVOKE',
+  'VERIFY_ACCEPT',
+  'VERIFY_REJECT',
+  'SETTLE',
+  'SETTLED',
+  'CANCEL',
+  'CHECKPOINT',
+]);
+const REQUESTER_PRIMARY_EVENTS: ReadonlySet<string> = new Set([
+  'ACCEPT',
+  'ATTEST',
+  'START',
+  'PROGRESS',
+  'DELIVER',
+  'HEARTBEAT',
+  'CHECKPOINT_ACK',
+]);
+const BILATERAL_AUDIT_EVENTS: ReadonlySet<string> = new Set([
+  'PROPOSE',
+  'ACCEPT',
+  'START',
+  'PROGRESS',
+  'DELIVER',
+  'VERIFY_ACCEPT',
+  'VERIFY_REJECT',
+  'SETTLED',
+  'CANCEL',
+]);
+export function classifyEnvelopeRole(
+  envelope: SignedEnvelope,
+  state?: TaskRoleState,
+): RelayInboxRole {
+  const { eventType: type, seq, senderDid, recipientDid } = envelope.payload;
+  const cross = senderDid !== recipientDid;
+  if (WORKER_PRIMARY_EVENTS.has(type)) {
+    if (state) {
+      if (cross) {
+        state.crossRole.set(recipientDid, 'worker');
+        state.crossRole.set(senderDid, 'requester');
+      }
+      state.lastPrimaryRole = 'worker';
+      if (BILATERAL_AUDIT_EVENTS.has(type)) state.pendingAckRoles.push('requester');
+      state.workerSeq = Math.max(state.workerSeq, seq + 1);
+    }
+    return 'worker';
+  }
+  if (REQUESTER_PRIMARY_EVENTS.has(type)) {
+    if (state) {
+      if (cross) {
+        state.crossRole.set(recipientDid, 'requester');
+        state.crossRole.set(senderDid, 'worker');
+      }
+      state.lastPrimaryRole = 'requester';
+      if (BILATERAL_AUDIT_EVENTS.has(type)) state.pendingAckRoles.push('worker');
+      state.requesterSeq = Math.max(state.requesterSeq, seq + 1);
+    }
+    return 'requester';
+  }
+  if (type === 'AUDIT_ENTRY') {
+    let role: RelayInboxRole;
+    if (cross && state?.crossRole.has(recipientDid)) role = state.crossRole.get(recipientDid)!;
+    else if (state?.lastPrimaryRole) role = state.lastPrimaryRole;
+    else role = seq === 1 ? 'worker' : 'requester';
+    if (state) {
+      if (role === 'worker') state.workerSeq = Math.max(state.workerSeq, seq + 1);
+      else state.requesterSeq = Math.max(state.requesterSeq, seq + 1);
+    }
+    return role;
+  }
+  if (type === 'AUDIT_ACK') {
+    let role: RelayInboxRole;
+    if (cross && state?.crossRole.has(recipientDid)) {
+      role = state.crossRole.get(recipientDid)!;
+      if (state.pendingAckRoles[0] === role) state.pendingAckRoles.shift();
+    } else if (state && state.pendingAckRoles.length > 0) {
+      role = state.pendingAckRoles.shift()!;
+    } else {
+      role = seq === 0 ? 'requester' : 'worker';
+      if (state && cross) {
+        state.crossRole.set(recipientDid, role);
+        state.crossRole.set(senderDid, role === 'requester' ? 'worker' : 'requester');
+      }
+    }
+    if (state) {
+      if (role === 'worker') state.workerSeq = Math.max(state.workerSeq, seq + 1);
+      else state.requesterSeq = Math.max(state.requesterSeq, seq + 1);
+    }
+    return role;
+  }
+  if (type === 'ERROR') {
+    if (cross && state?.crossRole.has(recipientDid)) return state.crossRole.get(recipientDid)!;
+    if (seq === 0) {
+      if (state && cross) {
+        state.crossRole.set(recipientDid, 'requester');
+        state.crossRole.set(senderDid, 'worker');
+      }
+      return 'requester';
+    }
+    if (state) {
+      if (seq === state.requesterSeq && seq !== state.workerSeq) return 'requester';
+      if (seq === state.workerSeq && seq !== state.requesterSeq) return 'worker';
+      if (state.pendingAckRoles.length > 0) return state.pendingAckRoles.shift()!;
+      if (state.lastPrimaryRole)
+        return state.lastPrimaryRole === 'worker' ? 'requester' : 'worker';
+    }
+    return 'worker';
+  }
+  if (cross && state?.crossRole.has(recipientDid)) return state.crossRole.get(recipientDid)!;
+  return 'worker';
+}
+export function normalizeReceiveFilter(filter?: RelayReceiveFilter): NormalizedReceiveFilter {
+  if (!filter) return { peek: false };
+  if (filter.role !== undefined && filter.role !== 'worker' && filter.role !== 'requester')
+    throw new Error('INVALID_REQUEST');
+  let taskIds: Set<string> | undefined;
+  if (filter.taskId !== undefined) {
+    const raw = Array.isArray(filter.taskId) ? filter.taskId : [filter.taskId];
+    const items: string[] = [];
+    for (const entry of raw) {
+      if (typeof entry !== 'string') throw new Error('INVALID_REQUEST');
+      for (const part of entry.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) items.push(trimmed);
+      }
+    }
+    if (items.length > 0) taskIds = new Set(items);
+  }
+  return {
+    ...(taskIds ? { taskIds } : {}),
+    ...(filter.role ? { role: filter.role } : {}),
+    peek: filter.peek === true,
+  };
+}
+export function parseReceiveFilterFromUrl(url: URL): RelayReceiveFilter | undefined {
+  const roleParam = url.searchParams.get('role');
+  if (roleParam !== null && roleParam !== 'worker' && roleParam !== 'requester')
+    throw new Error('INVALID_REQUEST');
+  const peekParam = url.searchParams.get('peek');
+  if (
+    peekParam !== null &&
+    peekParam !== 'true' &&
+    peekParam !== '1' &&
+    peekParam !== 'false' &&
+    peekParam !== '0'
+  )
+    throw new Error('INVALID_REQUEST');
+  const taskIdParams = url.searchParams
+    .getAll('taskId')
+    .flatMap((v) => v.split(','))
+    .map((v) => v.trim())
+    .filter(Boolean);
+  const peek = peekParam === 'true' || peekParam === '1';
+  if (!roleParam && taskIdParams.length === 0 && !peek) return undefined;
+  return {
+    ...(roleParam ? { role: roleParam as RelayInboxRole } : {}),
+    ...(taskIdParams.length > 0 ? { taskId: taskIdParams } : {}),
+    ...(peek ? { peek: true } : {}),
+  };
+}
+export function inboxRecipientFromRequest(path: string, url: URL): string | undefined {
+  if (path === '/envelopes' || path === '/stream') return url.searchParams.get('recipient') ?? '';
+  if (path.startsWith('/inbox/')) {
+    const rest = path.slice('/inbox/'.length);
+    if (!rest || rest.includes('/')) return undefined;
+    return decodeURIComponent(rest);
+  }
+  return undefined;
+}
+function matchesStoredEnvelope(item: StoredEnvelope, filter: NormalizedReceiveFilter): boolean {
+  const { taskId, eventType, senderDid, recipientDid } = item.envelope.payload;
+  if (filter.taskIds && !filter.taskIds.has(taskId)) return false;
+  if (!filter.role) return true;
+  if (item.role === filter.role) return true;
+  // When a requester explicitly polls for its known taskId on a cross-DID task,
+  // any non-worker-primary frame for that taskId belongs to the requester even after a cold restart.
+  if (
+    filter.role === 'requester' &&
+    filter.taskIds?.has(taskId) &&
+    senderDid !== recipientDid &&
+    !WORKER_PRIMARY_EVENTS.has(eventType)
+  )
+    return true;
+  return false;
 }
 function positiveLimit(value: number | undefined, fallback: number): number {
   const limit = value ?? fallback;
@@ -121,21 +327,18 @@ export function agentRegistryKey(ownerDid: string, agentDid: string): string {
   return ownerDid + '/' + agentDid;
 }
 /**
- * GET /agents/:agentDid returns the only card for that agent, or the self-owned
- * card when several owners have registered it. An ambiguous set with no self-owned
- * card is not returned.
+ * Use the same verified, deterministic DID selection as requesters.
  */
 export function selectAgentCard(
   cards: Iterable<SignedAgentCard>,
   agentDid: string,
+  now = Date.now(),
 ): SignedAgentCard | undefined {
-  const matches: SignedAgentCard[] = [];
-  for (const card of cards) if (card.payload.agentDid === agentDid) matches.push(card);
-  if (matches.length === 1) return matches[0];
-  return matches.find((card) => card.payload.ownerDid === card.payload.agentDid);
+  return findDiscoveredAgentCard([...cards], agentDid, now);
 }
 export class InMemoryRelay {
   private queues = new Map<string, StoredEnvelope[]>();
+  private taskStates = new Map<string, TaskRoleState>();
   private seen = new Map<string, number>();
   private authSeen = new Map<string, number>();
   private agentExpiry = new Map<string, number>();
@@ -225,16 +428,34 @@ export class InMemoryRelay {
     this.remember(this.authSeen, key, this.maxAuthSeenEntries, this.authSeenTtlMs);
     return true;
   }
+  private stateForTask(taskId: string): TaskRoleState {
+    let state = this.taskStates.get(taskId);
+    if (!state) {
+      if (this.taskStates.size >= this.maxSeenEntries) {
+        const oldest = this.taskStates.keys().next().value;
+        if (oldest !== undefined) this.taskStates.delete(oldest);
+      }
+      state = { crossRole: new Map(), pendingAckRoles: [], workerSeq: 0, requesterSeq: 0 };
+      this.taskStates.set(taskId, state);
+    }
+    return state;
+  }
   /** Authenticate once for a long poll or persistent stream, then read only this inbox. */
   openInbox(
     recipientDid: string,
     token?: string,
     action: RelayAuthAction = 'receive',
     check?: RelayAuthContext,
+    filter?: RelayReceiveFilter,
   ): () => SignedEnvelope | undefined {
+    const normalized = normalizeReceiveFilter(filter);
     if (!this.authenticate(recipientDid, token, action, check))
       throw new Error('RELAY_UNAUTHORIZED');
-    return () => this.dequeue(recipientDid);
+    if (normalized.peek) {
+      const seenInPeek = new Set<string>();
+      return () => this.dequeue(recipientDid, filter, seenInPeek);
+    }
+    return () => this.dequeue(recipientDid, filter);
   }
   private ensureQueue(did: string): StoredEnvelope[] {
     let queue = this.queues.get(did);
@@ -262,6 +483,14 @@ export class InMemoryRelay {
         map.delete(key);
         changed = true;
         if (map === this.agentExpiry) this.agents.delete(key);
+      }
+    }
+    for (const [key, card] of this.agents) {
+      const expiresAt = this.agentExpiry.get(key);
+      if ((expiresAt !== undefined && expiresAt <= now) || !verifySignedAgentCard(card, now)) {
+        this.agents.delete(key);
+        this.agentExpiry.delete(key);
+        changed = true;
       }
     }
     if (changed) this.version++;
@@ -292,12 +521,14 @@ export class InMemoryRelay {
     if (this.senderCount(queue, envelope.payload.senderDid) >= this.maxEnvelopesPerSender)
       throw new Error('SENDER_QUOTA_EXCEEDED');
     this.remember(this.seen, envelope.payload.envelopeId, this.maxSeenEntries, this.seenTtlMs);
+    const role = classifyEnvelopeRole(envelope, this.stateForTask(envelope.payload.taskId));
     const wire = structuredClone(envelope);
     const stored = this.tamper ? this.tamper(wire) : wire;
     queue.push({
       envelope: stored,
       bytes: Buffer.byteLength(JSON.stringify(stored)),
       expiresAt: this.now() + this.envelopeTtlMs,
+      role,
     });
     this.queues.set(did, queue);
     for (const fn of [...(this.listeners.get(did) ?? [])]) fn();
@@ -306,8 +537,15 @@ export class InMemoryRelay {
     recipientDid: string,
     authToken?: string | number,
     _signal?: AbortSignal,
-    check?: RelayAuthContext,
+    checkOrFilter?: RelayAuthContext | RelayReceiveFilter,
+    maybeFilter?: RelayReceiveFilter,
   ): SignedEnvelope | undefined {
+    const isFilter =
+      checkOrFilter !== undefined &&
+      ('role' in checkOrFilter || 'taskId' in checkOrFilter || 'peek' in checkOrFilter);
+    const check = isFilter ? undefined : (checkOrFilter as RelayAuthContext | undefined);
+    const filter = isFilter ? (checkOrFilter as RelayReceiveFilter) : maybeFilter;
+    const normalized = normalizeReceiveFilter(filter);
     if (
       (typeof authToken === 'string' || this.requireAuth) &&
       !this.authenticate(
@@ -318,17 +556,65 @@ export class InMemoryRelay {
       )
     )
       throw new Error('RELAY_UNAUTHORIZED');
-    return this.dequeue(recipientDid);
+    return this.dequeue(recipientDid, normalized);
   }
-  private dequeue(recipientDid: string): SignedEnvelope | undefined {
+  peek(
+    recipientDid: string,
+    authTokenOrFilter?: string | Omit<RelayReceiveFilter, 'peek'>,
+    check?: RelayAuthContext,
+    filter?: Omit<RelayReceiveFilter, 'peek'>,
+  ): SignedEnvelope | undefined {
+    const authToken = typeof authTokenOrFilter === 'string' ? authTokenOrFilter : undefined;
+    const effectiveFilter =
+      typeof authTokenOrFilter === 'object' && authTokenOrFilter !== null
+        ? authTokenOrFilter
+        : filter;
+    return this.receive(recipientDid, authToken, undefined, check, {
+      ...effectiveFilter,
+      peek: true,
+    });
+  }
+  pollInbox(
+    recipientDid: string,
+    authTokenOrFilter?: string | (RelayReceiveFilter & { waitMs?: number; signal?: AbortSignal }),
+    filter?: RelayReceiveFilter,
+    check?: RelayAuthContext,
+  ): SignedEnvelope | undefined {
+    const authToken = typeof authTokenOrFilter === 'string' ? authTokenOrFilter : undefined;
+    const effectiveFilter =
+      typeof authTokenOrFilter === 'object' && authTokenOrFilter !== null
+        ? authTokenOrFilter
+        : filter;
+    return this.receive(recipientDid, authToken, undefined, check, effectiveFilter);
+  }
+  private dequeue(
+    recipientDid: string,
+    filter?: RelayReceiveFilter | NormalizedReceiveFilter,
+    seenInPeek?: Set<string>,
+  ): SignedEnvelope | undefined {
     this.evictExpired();
+    const normalized =
+      filter && 'peek' in filter && typeof filter.peek === 'boolean' && !('taskId' in filter)
+        ? (filter as NormalizedReceiveFilter)
+        : normalizeReceiveFilter(filter as RelayReceiveFilter | undefined);
     const q = this.queues.get(recipientDid);
-    const item = q?.shift();
-    if (q && !q.length && !this.listeners.get(recipientDid)?.size) this.queues.delete(recipientDid);
-    if (item) this.version++;
+    if (!q || !q.length) return undefined;
+    const index = q.findIndex(
+      (item) =>
+        matchesStoredEnvelope(item, normalized) &&
+        (!seenInPeek || !seenInPeek.has(item.envelope.payload.envelopeId)),
+    );
+    if (index < 0) return undefined;
+    const item = normalized.peek ? q[index] : q.splice(index, 1)[0];
+    if (!normalized.peek) {
+      if (!q.length && !this.listeners.get(recipientDid)?.size) this.queues.delete(recipientDid);
+      if (item) this.version++;
+    } else if (item && seenInPeek) {
+      seenInPeek.add(item.envelope.payload.envelopeId);
+    }
     if (item && !verifyRelayEnvelope(item.envelope, recipientDid))
       throw new Error('RELAY_TAMPERING_DETECTED');
-    return item?.envelope;
+    return item ? (normalized.peek ? structuredClone(item.envelope) : item.envelope) : undefined;
   }
   /** Recipient-authenticated removal of one queued envelope. False when it is not queued. */
   acknowledge(
@@ -370,7 +656,18 @@ export class InMemoryRelay {
   withRecipient(key: KeyPair) {
     return {
       send: (e: SignedEnvelope) => this.send(e),
-      receive: (did: string) => this.receive(did, createRelayAuthToken(key)),
+      receive: (
+        did: string,
+        _waitMs?: number,
+        signal?: AbortSignal,
+        filter?: RelayReceiveFilter,
+      ) => this.receive(did, createRelayAuthToken(key), signal, undefined, filter),
+      peek: (did: string, filter?: Omit<RelayReceiveFilter, 'peek'>) =>
+        this.peek(did, createRelayAuthToken(key), undefined, filter),
+      pollInbox: (
+        did: string,
+        filter?: RelayReceiveFilter & { waitMs?: number; signal?: AbortSignal },
+      ) => this.receive(did, createRelayAuthToken(key), filter?.signal, undefined, filter),
       register: (card: SignedAgentCard) => this.register(card),
       discover: () => this.discover(),
     };
@@ -388,9 +685,20 @@ export class InMemoryRelay {
       }
     };
   }
-  async wait(did: string, ms: number, signal?: AbortSignal): Promise<void> {
+  private hasMatching(did: string, filter?: RelayReceiveFilter): boolean {
+    const q = this.queues.get(did);
+    if (!q?.length) return false;
+    const normalized = normalizeReceiveFilter(filter);
+    return q.some((item) => matchesStoredEnvelope(item, normalized));
+  }
+  async wait(
+    did: string,
+    ms: number,
+    signal?: AbortSignal,
+    filter?: RelayReceiveFilter,
+  ): Promise<void> {
     this.evictExpired();
-    if (signal?.aborted || ms <= 0 || this.queues.get(did)?.length) return;
+    if (signal?.aborted || ms <= 0 || this.hasMatching(did, filter)) return;
     await new Promise<void>((resolve) => {
       let settled = false;
       const done = () => {
@@ -401,11 +709,14 @@ export class InMemoryRelay {
         signal?.removeEventListener('abort', done);
         resolve();
       };
-      const off = this.subscribe(did, done),
+      const checkWake = () => {
+        if (this.hasMatching(did, filter)) done();
+      };
+      const off = this.subscribe(did, checkWake),
         timer = setTimeout(done, ms);
       signal?.addEventListener('abort', done, { once: true });
       // Cover the gap between the length check and listener installation.
-      if (signal?.aborted || this.queues.get(did)?.length) done();
+      if (signal?.aborted || this.hasMatching(did, filter)) done();
     });
   }
   snapshot(): RelaySnapshot {
@@ -436,6 +747,8 @@ export class InMemoryRelay {
     const authExpiry = new Map(snapshot.authExpiry ?? []);
     const envelopeExpiry = new Map(snapshot.envelopeExpiry ?? []);
     const agentExpiry = new Map(snapshot.agentExpiry ?? []);
+    const now = this.now();
+    this.assertValidAgentSnapshot(snapshot, agentExpiry);
     if (
       snapshot.seen.length > this.maxSeenEntries ||
       (snapshot.authSeen?.length ?? 0) > this.maxAuthSeenEntries ||
@@ -451,11 +764,11 @@ export class InMemoryRelay {
             return true;
         }
         return queue.some((envelope) => Buffer.byteLength(JSON.stringify(envelope)) > this.maxEnvelopeBytes);
-      }) ||
-      this.invalidAgentSnapshot(snapshot, agentExpiry)
+      })
     )
       throw new Error('INVALID_RELAY_SNAPSHOT');
     this.queues = new Map();
+    this.taskStates = new Map();
     for (const [did, envelopes] of structuredClone(snapshot.queues)) {
       this.queues.set(
         did,
@@ -464,6 +777,7 @@ export class InMemoryRelay {
           bytes: Buffer.byteLength(JSON.stringify(envelope)),
           expiresAt:
             envelopeExpiry.get(envelope.payload.envelopeId) ?? this.now() + this.envelopeTtlMs,
+          role: classifyEnvelopeRole(envelope, this.stateForTask(envelope.payload.taskId)),
         })),
       );
     }
@@ -476,34 +790,41 @@ export class InMemoryRelay {
     this.agents.clear();
     this.agentExpiry.clear();
     for (const card of snapshot.agents) {
-      const copy = structuredClone(card);
-      const key = agentRegistryKey(copy.payload.ownerDid, copy.payload.agentDid);
-      this.agents.set(key, copy);
-      const cardExpiresAt = Date.parse(copy.payload.expiresAt);
-      this.agentExpiry.set(
-        key,
-        agentExpiry.get(key) ?? Math.min(this.now() + this.agentCardTtlMs, cardExpiresAt),
+      const key = agentRegistryKey(card.payload.ownerDid, card.payload.agentDid);
+      const effective = Math.min(
+        agentExpiry.get(key) ?? now + this.agentCardTtlMs,
+        Date.parse(card.payload.expiresAt),
       );
+      if (effective <= now) continue;
+      const copy = structuredClone(card);
+      this.agents.set(key, copy);
+      this.agentExpiry.set(key, effective);
     }
     this.version++;
   }
-  /** Reject snapshots that would resurrect an expired, duplicate, or unsigned card. */
-  private invalidAgentSnapshot(snapshot: RelaySnapshot, agentExpiry: Map<string, number>): boolean {
+  /** Authenticate even expired cards before allowing restore to discard them. */
+  private assertValidAgentSnapshot(snapshot: RelaySnapshot, agentExpiry: Map<string, number>): void {
+    if (!Array.isArray(snapshot.agents)) throw new Error('INVALID_AGENT_SNAPSHOT');
     const seen = new Set<string>();
     for (const card of snapshot.agents) {
+      // Verification at the last millisecond of its lifetime skips only current
+      // expiry, retaining all signature, delegation, structure and TTL checks.
+      const expiresAt = Date.parse(card?.payload?.expiresAt);
+      if (!verifySignedAgentCard(card, expiresAt - 1))
+        throw new Error('INVALID_AGENT_SNAPSHOT');
       const key = agentRegistryKey(card.payload.ownerDid, card.payload.agentDid);
       const stored = agentExpiry.get(key);
-      const effective =
-        stored ?? Math.min(this.now() + this.agentCardTtlMs, Date.parse(card.payload.expiresAt));
-      if (seen.has(key) || !verifySignedAgentCard(card, this.now()) || !(effective > this.now()))
-        return true;
+      if (seen.has(key) || (stored !== undefined && !Number.isFinite(stored)))
+        throw new Error('INVALID_AGENT_SNAPSHOT');
       seen.add(key);
     }
-    return false;
   }
   discover(): SignedAgentCard[] {
     this.evictExpired();
-    return structuredClone([...this.agents.values()]);
+    const now = this.now();
+    return structuredClone(
+      [...this.agents.values()].filter((card) => verifySignedAgentCard(card, now)),
+    );
   }
   register(card: SignedAgentCard): void {
     if (!verifySignedAgentCard(card, this.now())) throw new Error('INVALID_AGENT_CARD');
@@ -574,6 +895,8 @@ export const KNOWN_RELAY_ERROR_CODES = [
   'INVALID_DID',
   'RELAY_TAMPERING_DETECTED',
   'INVALID_AGENT_CARD',
+  'INVALID_AGENT_SNAPSHOT',
+  'AMBIGUOUS_AGENT_CARD_OWNER',
   'AGENT_CARD_EXPIRED',
   'AGENT_CARD_EXPIRY_TOO_LONG',
   'AGENT_CARD_DELEGATION_REQUIRED',
@@ -633,6 +956,8 @@ const RELAY_ERROR_STATUS: Readonly<Record<string, number>> = {
   INVALID_DID: 400,
   RELAY_TAMPERING_DETECTED: 400,
   INVALID_AGENT_CARD: 400,
+  INVALID_AGENT_SNAPSHOT: 400,
+  AMBIGUOUS_AGENT_CARD_OWNER: 409,
   AGENT_CARD_EXPIRED: 400,
   AGENT_CARD_EXPIRY_TOO_LONG: 400,
   AGENT_CARD_DELEGATION_REQUIRED: 400,
@@ -775,6 +1100,7 @@ export type DurableLongPoll =
       mode: 'wait';
       recipient: string;
       waitMs: number;
+      filter?: RelayReceiveFilter;
       receive: () => SignedEnvelope | undefined;
     };
 /**
@@ -788,11 +1114,13 @@ export function beginDurableLongPoll(
 ): DurableLongPoll {
   try {
     const url = new URL(request.url);
-    const recipient = url.searchParams.get('recipient') ?? '';
+    const path = canonicalRelayPath(url.pathname);
+    const recipient = inboxRecipientFromRequest(path, url) ?? '';
     resolveDid(recipient);
     const ms = Number(url.searchParams.get('waitMs'));
     if (!url.searchParams.has('waitMs') || !Number.isFinite(ms) || ms < 0)
       throw new Error('INVALID_WAIT');
+    const filter = parseReceiveFilterFromUrl(url);
     const token = extractRelayAuthToken(request, auth, url);
     // A request that is already aborted must not authenticate or pop.
     if (request.signal.aborted) return { mode: 'response', response: relayJson({ envelopes: [] }) };
@@ -801,13 +1129,14 @@ export function beginDurableLongPoll(
       token,
       'receive',
       relayAuthContext(request, relay, auth),
+      filter,
     );
     if (request.signal.aborted) return { mode: 'response', response: relayJson({ envelopes: [] }) };
     const buffered: SignedEnvelope[] = [];
     let envelope: SignedEnvelope | undefined;
     while ((envelope = receive())) buffered.push(envelope);
     if (buffered.length) return { mode: 'response', response: relayJson({ envelopes: buffered }) };
-    return { mode: 'wait', recipient, waitMs: Math.min(ms, 30000), receive };
+    return { mode: 'wait', recipient, waitMs: Math.min(ms, 30000), filter, receive };
   } catch (error) {
     return { mode: 'response', response: relayErrorResponse(error, relay) };
   }
@@ -906,19 +1235,23 @@ export function createRelayFetchHandler(
         );
         return removed ? empty(204) : json({ error: 'NOT_FOUND' }, 404);
       }
-      if (request.method === 'GET' && ['/envelopes', '/stream'].includes(path)) {
-        const recipient = url.searchParams.get('recipient') ?? '';
+      const inboxRecipient =
+        request.method === 'GET' ? inboxRecipientFromRequest(path, url) : undefined;
+      if (request.method === 'GET' && inboxRecipient !== undefined) {
+        const recipient = inboxRecipient;
         resolveDid(recipient);
         const ms = url.searchParams.has('waitMs')
           ? Number(url.searchParams.get('waitMs'))
           : undefined;
         if (ms !== undefined && (!Number.isFinite(ms) || ms < 0)) throw new Error('INVALID_WAIT');
+        const filter = parseReceiveFilterFromUrl(url);
         const token = extractRelayAuthToken(request, authOptions, url);
         const receive = relay.openInbox(
           recipient,
           token,
           path === '/stream' ? 'stream' : 'receive',
           relayAuthContext(request, relay, authOptions),
+          filter,
         );
         if (path === '/stream') {
           let stop = () => {};
@@ -990,7 +1323,7 @@ export function createRelayFetchHandler(
         let queued: SignedEnvelope | undefined;
         while ((queued = receive())) ready.push(queued);
         if (!ready.length) {
-          await relay.wait(recipient, Math.min(ms!, 30000), request.signal);
+          await relay.wait(recipient, Math.min(ms!, 30000), request.signal, filter);
           if (request.signal.aborted) return json({ envelopes: [] });
           while ((queued = receive())) ready.push(queued);
         }

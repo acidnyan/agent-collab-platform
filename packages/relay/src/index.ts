@@ -9,14 +9,16 @@ import {
 } from '@acp/core';
 import type { SignedEnvelope, KeyPair, RelayAuthAction } from '@acp/core';
 import {
+  classifyEnvelopeRole,
   DEFAULT_MAX_ENVELOPE_BYTES,
   InMemoryRelay,
   createRelayFetchHandler,
   mapRelayError,
+  normalizeReceiveFilter,
   relayHttpHeaders,
   sanitizeRelayErrorCode,
 } from './fetch.js';
-import type { RelayAuthContext } from './fetch.js';
+import type { RelayAuthContext, RelayInboxRole, RelayReceiveFilter } from './fetch.js';
 import { createPinnedRelayFetch, resolveAndValidateRelayEndpoint } from './ssrf.js';
 import type { RelayClientSecurityOptions } from './ssrf.js';
 export * from './fetch.js';
@@ -30,6 +32,7 @@ export type {
 export {
   createSignedAgentCard,
   verifySignedAgentCard,
+  findDiscoveredAgentCard,
   toA2AAgentCard,
   createInviteToken,
   parseAndVerifyInviteToken,
@@ -152,6 +155,9 @@ export async function startLocalRelay(
           recipientDid?: string;
           authToken?: string;
           auth?: string;
+          role?: RelayInboxRole;
+          taskId?: string | string[];
+          peek?: boolean;
         };
         if (request.method === 'send' && request.envelope) {
           relay.send(request.envelope);
@@ -162,6 +168,7 @@ export async function startLocalRelay(
             request.authToken ?? request.auth,
             'receive',
             wsAuth(),
+            { role: request.role, taskId: request.taskId, peek: request.peek },
           );
           socket.send(JSON.stringify({ envelope: receive() ?? null }));
         } else if (request.method === 'subscribe' && request.recipientDid) {
@@ -171,6 +178,7 @@ export async function startLocalRelay(
               request.authToken ?? request.auth,
               'subscribe',
               wsAuth(),
+              { role: request.role, taskId: request.taskId },
             );
           disposeSubscription();
           const current: {
@@ -276,6 +284,15 @@ export interface RelayTransport {
     recipientDid: string,
     waitMs?: number,
     signal?: AbortSignal,
+    filter?: RelayReceiveFilter,
+  ): SignedEnvelope | undefined | Promise<SignedEnvelope | undefined>;
+  peek?(
+    recipientDid: string,
+    filter?: Omit<RelayReceiveFilter, 'peek'>,
+  ): SignedEnvelope | undefined | Promise<SignedEnvelope | undefined>;
+  pollInbox?(
+    recipientDid: string,
+    filter?: RelayReceiveFilter & { waitMs?: number; signal?: AbortSignal },
   ): SignedEnvelope | undefined | Promise<SignedEnvelope | undefined>;
   register?(card: import('@acp/core').SignedAgentCard): void | Promise<void>;
   discover?():
@@ -367,36 +384,60 @@ export class HttpRelayClient extends RelayCredentials implements RelayTransport 
     const r = await this.fetcher(this.url + '/agents');
     if (!r.ok) throw new Error('DISCOVERY_FAILED');
     const cards = (await r.json()) as import('@acp/core').SignedAgentCard[];
+    if (!Array.isArray(cards)) throw new Error('INVALID_AGENT_CARD');
     const { verifySignedAgentCard } = await import('@acp/core');
-    if (!Array.isArray(cards) || cards.some((c) => !verifySignedAgentCard(c)))
-      throw new Error('INVALID_AGENT_CARD');
-    return cards;
+    const now = Date.now();
+    return cards.filter((c) => verifySignedAgentCard(c, now));
   }
   async receive(
     recipientDid: string,
     waitMs?: number,
     signal?: AbortSignal,
+    filter?: RelayReceiveFilter,
   ): Promise<SignedEnvelope | undefined> {
-    const queue = this.buffered.get(recipientDid) ?? [];
-    if (queue.length) return queue.shift();
-    const r = await this.fetcher(
-      this.url +
-        '/envelopes?recipient=' +
-        encodeURIComponent(recipientDid) +
-        (waitMs === undefined ? '' : '&waitMs=' + waitMs),
-      {
-        signal,
-        headers: { authorization: 'Bearer ' + (await this.authToken(recipientDid, 'receive')) },
-      },
-    );
+    const normalized = normalizeReceiveFilter(filter);
+    const bufferKey =
+      recipientDid +
+      '\0' +
+      (normalized.role ?? '') +
+      '\0' +
+      (normalized.taskIds ? [...normalized.taskIds].sort().join(',') : '');
+    if (!normalized.peek) {
+      const queue = this.buffered.get(bufferKey) ?? [];
+      if (queue.length) return queue.shift();
+    }
+    const params = new URLSearchParams({ recipient: recipientDid });
+    if (waitMs !== undefined) params.set('waitMs', String(waitMs));
+    if (normalized.role) params.set('role', normalized.role);
+    if (normalized.taskIds) {
+      for (const id of normalized.taskIds) params.append('taskId', id);
+    }
+    if (normalized.peek) params.set('peek', 'true');
+    const r = await this.fetcher(this.url + '/envelopes?' + params.toString(), {
+      signal,
+      headers: { authorization: 'Bearer ' + (await this.authToken(recipientDid, 'receive')) },
+    });
     if (r.status === 204) return;
-    if (!r.ok) throw new Error('RELAY_REJECTED');
+    if (!r.ok) throw new Error('RELAY_REJECTED: ' + r.status);
     const body = (await r.json()) as SignedEnvelope | { envelopes: SignedEnvelope[] };
     const values = 'envelopes' in body ? body.envelopes : [body];
     if (!Array.isArray(values) || values.some((e) => !verifyEnvelope(e, recipientDid)))
       throw new Error('RELAY_TAMPERING_DETECTED');
-    this.buffered.set(recipientDid, values);
+    if (normalized.peek) return values[0];
+    this.buffered.set(bufferKey, values);
     return values.shift();
+  }
+  async peek(
+    recipientDid: string,
+    filter?: Omit<RelayReceiveFilter, 'peek'>,
+  ): Promise<SignedEnvelope | undefined> {
+    return this.receive(recipientDid, undefined, undefined, { ...filter, peek: true });
+  }
+  async pollInbox(
+    recipientDid: string,
+    filter?: RelayReceiveFilter & { waitMs?: number; signal?: AbortSignal },
+  ): Promise<SignedEnvelope | undefined> {
+    return this.receive(recipientDid, filter?.waitMs, filter?.signal, filter);
   }
 }
 /** Persistent SSE transport with a bounded per-recipient inbox. */
@@ -590,11 +631,19 @@ export class WebSocketRelayClient extends RelayCredentials {
   async send(envelope: SignedEnvelope): Promise<void> {
     await this.request({ method: 'send', envelope });
   }
-  async receive(recipientDid: string): Promise<SignedEnvelope | undefined> {
+  async receive(
+    recipientDid: string,
+    _waitMs?: number,
+    _signal?: AbortSignal,
+    filter?: RelayReceiveFilter,
+  ): Promise<SignedEnvelope | undefined> {
     const r = await this.request({
       method: 'receive',
       recipientDid,
       authToken: await this.authToken(recipientDid, 'receive'),
+      ...(filter?.role ? { role: filter.role } : {}),
+      ...(filter?.taskId ? { taskId: filter.taskId } : {}),
+      ...(filter?.peek ? { peek: true } : {}),
     });
     if (r.envelope && !verifyEnvelope(r.envelope, recipientDid))
       throw new Error('RELAY_TAMPERING_DETECTED');

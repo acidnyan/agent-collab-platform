@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { mkdtemp, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import {
+  existsSync, openSync, closeSync, fstatSync, fchmodSync, appendFileSync, constants,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -19,12 +21,17 @@ import {
   validateManifest,
   validateOutput,
   verifyCapabilityChain,
-  verifySignedAgentCard,
+  capabilityIssuerControls,
+  findDiscoveredAgentCard,
   schemaNarrows,
   digest,
   openEnvelope,
   inviteRevocationId,
   resolveDid,
+  createRevocationNotice,
+  verifyRevocationNotice,
+  RevocationRegistry,
+  signEnvelope,
 } from '@acp/core';
 import type {
   Json,
@@ -37,9 +44,11 @@ import type {
   TaskContract,
   Transition,
   CapabilityToken,
+  CapabilityContext,
   BudgetSpec,
   RevocationList,
   Invite,
+  SignedRevocationNotice,
 } from '@acp/core';
 import { verifyAudit, type AuditBundle } from '@acp/ledger';
 import type { SandboxBoundaryMetadata } from '@acp/sandbox';
@@ -107,9 +116,7 @@ function validateAcceptance(acceptance: WorkerAcceptancePolicy): void {
       rate.windowMs < 1)
   )
     throw new Error('INVALID_REQUESTER_RATE_LIMIT');
-  if (
-    acceptance.allowedRequesterDids?.some((did) => typeof did !== 'string' || did.trim() === '')
-  )
+  if (acceptance.allowedRequesterDids?.some((did) => typeof did !== 'string' || did.trim() === ''))
     throw new Error('INVALID_REQUESTER_DID');
 }
 function transport(
@@ -172,6 +179,66 @@ function mailboxRelay(relay: RelayTransport, mailbox: TaskMailbox): RelayTranspo
     receive: (_recipientDid, _waitMs, signal) => mailbox.take(signal),
   };
 }
+const WORKER_BOUND_EVENTS: ReadonlySet<string> = new Set([
+  'PROPOSE',
+  'REVOKE',
+  'VERIFY_ACCEPT',
+  'VERIFY_REJECT',
+  'SETTLE',
+  'SETTLED',
+  'CANCEL',
+  'CHECKPOINT',
+]);
+const REQUESTER_BOUND_EVENTS: ReadonlySet<string> = new Set([
+  'ACCEPT',
+  'ATTEST',
+  'START',
+  'PROGRESS',
+  'DELIVER',
+  'HEARTBEAT',
+  'CHECKPOINT_ACK',
+]);
+const activeRequesterInboxes = new Map<string, Set<RecipientInbox>>();
+const activeWorkerListeners = new Map<string, Set<(envelope: SignedEnvelope) => boolean>>();
+function registerRequesterInbox(did: string, inbox: RecipientInbox): void {
+  const set = activeRequesterInboxes.get(did) ?? new Set();
+  set.add(inbox);
+  activeRequesterInboxes.set(did, set);
+}
+function unregisterRequesterInbox(did: string, inbox: RecipientInbox): void {
+  const set = activeRequesterInboxes.get(did);
+  if (!set) return;
+  set.delete(inbox);
+  if (set.size === 0) activeRequesterInboxes.delete(did);
+}
+function forwardToRequesterInbox(did: string, envelope: SignedEnvelope): boolean {
+  const inboxes = activeRequesterInboxes.get(did);
+  if (!inboxes) return false;
+  for (const inbox of inboxes) {
+    if (inbox.deliverFromPeerRole(envelope)) return true;
+  }
+  return false;
+}
+function registerWorkerListener(
+  did: string,
+  fn: (envelope: SignedEnvelope) => boolean,
+): () => void {
+  const set = activeWorkerListeners.get(did) ?? new Set();
+  set.add(fn);
+  activeWorkerListeners.set(did, set);
+  return () => {
+    set.delete(fn);
+    if (set.size === 0) activeWorkerListeners.delete(did);
+  };
+}
+function forwardToWorkerListener(did: string, envelope: SignedEnvelope): boolean {
+  const listeners = activeWorkerListeners.get(did);
+  if (!listeners) return false;
+  for (const fn of listeners) {
+    if (fn(envelope)) return true;
+  }
+  return false;
+}
 /**
  * One reader for a recipient DID. Concurrent delegate() calls share this inbox
  * and only see envelopes for their own taskId.
@@ -185,11 +252,21 @@ class RecipientInbox {
     private readonly relay: RelayTransport,
     private readonly did: string,
   ) {}
+  hasTask(taskId: string): boolean {
+    return this.mailboxes.has(taskId);
+  }
+  deliverFromPeerRole(envelope: SignedEnvelope): boolean {
+    const mailbox = this.mailboxes.get(envelope.payload.taskId);
+    if (!mailbox) return false;
+    mailbox.push(envelope);
+    return true;
+  }
   attach(taskId: string): TaskMailbox {
     const existing = this.mailboxes.get(taskId);
     if (existing) return existing;
     const mailbox = new TaskMailbox();
     this.mailboxes.set(taskId, mailbox);
+    registerRequesterInbox(this.did, this);
     this.wake?.();
     this.wake = undefined;
     if (!this.started) {
@@ -201,7 +278,16 @@ class RecipientInbox {
   /** Drop the task mailbox. The shared reader stops dequeuing once none remain. */
   detach(taskId: string): void {
     this.mailboxes.delete(taskId);
-    if (this.mailboxes.size === 0) this.readAbort?.abort();
+    if (this.mailboxes.size === 0) {
+      unregisterRequesterInbox(this.did, this);
+      this.readAbort?.abort();
+    }
+  }
+  private isWorkerBoundFrame(envelope: SignedEnvelope): boolean {
+    const { eventType, seq } = envelope.payload;
+    if (WORKER_BOUND_EVENTS.has(eventType)) return true;
+    if (eventType === 'AUDIT_ENTRY' && seq === 1) return true;
+    return false;
   }
   private async pump(): Promise<void> {
     for (;;) {
@@ -218,7 +304,12 @@ class RecipientInbox {
       const controller = new AbortController();
       this.readAbort = controller;
       try {
-        const envelope = await receiveRelay(this.relay, this.did, controller.signal);
+        const envelope = await receiveRelay(this.relay, this.did, controller.signal, {
+          role: 'requester',
+        });
+        if (!this.mailboxes.has(envelope.payload.taskId) || this.isWorkerBoundFrame(envelope)) {
+          if (forwardToWorkerListener(this.did, envelope)) continue;
+        }
         this.mailboxes.get(envelope.payload.taskId)?.push(envelope);
       } catch {
         // The last mailbox closed, or the transport aborted this read.
@@ -259,6 +350,8 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   agentKey?: KeyPair;
   approvalProvider?: ApprovalProvider;
   auditPath?: string;
+  /** Append accepted, decrypted task messages as private JSONL before execution. */
+  inboxPath?: string;
   timeoutMs?: number;
   tools?: Record<string, ToolDefinition>;
   toolBackend?: ToolBackend;
@@ -279,6 +372,41 @@ interface Proposal {
   capabilityChains: CapabilityToken[][];
   inviteToken?: string;
 }
+/** Checks every backing list. Inbox notices and an owner-supplied registry both apply. */
+class CompositeRevocation implements RevocationList {
+  constructor(private readonly layers: readonly RevocationList[]) {}
+  isRevoked(targetType: 'invite' | 'capability', targetId: string): boolean {
+    return this.layers.some((layer) => layer.isRevoked(targetType, targetId));
+  }
+  assertNotRevoked(targetType: 'invite' | 'capability', targetId: string): void {
+    for (const layer of this.layers) layer.assertNotRevoked(targetType, targetId);
+  }
+  noticesFor(targetType: 'invite' | 'capability', targetId: string): SignedRevocationNotice[] {
+    const notices: SignedRevocationNotice[] = [];
+    for (const layer of this.layers) {
+      if (typeof layer.noticesFor !== 'function') continue;
+      notices.push(...layer.noticesFor(targetType, targetId));
+    }
+    return notices;
+  }
+  /** A layer that cannot show issuers and still reports the id revoked. */
+  unexplainedRevocation(targetType: 'invite' | 'capability', targetId: string): boolean {
+    return this.layers.some(
+      (layer) => typeof layer.noticesFor !== 'function' && layer.isRevoked(targetType, targetId),
+    );
+  }
+}
+interface VerifiedCapabilityChain {
+  chain: CapabilityToken[];
+  context: CapabilityContext;
+}
+function asRevocationRegistry(list: RevocationList | undefined): RevocationRegistry | undefined {
+  if (!list) return undefined;
+  const candidate = list as RevocationRegistry;
+  if (typeof candidate.revoke !== 'function' || typeof candidate.isRevoked !== 'function')
+    return undefined;
+  return candidate;
+}
 export class WorkerNode {
   readonly relay: RelayTransport;
   readonly agentCard: SignedAgentCard;
@@ -288,15 +416,32 @@ export class WorkerNode {
   private activeTasks = 0;
   private readonly proposalTimes = new Map<string, number[]>();
   private readonly mailboxes = new Map<string, TaskMailbox>();
+  private readonly forwardedQueue: SignedEnvelope[] = [];
+  private readonly forwardedWaiters: Array<() => void> = [];
   readonly controller = new AbortController();
   lastResult?: SessionResult;
+  /** Notices learned from the relay inbox. Always present, even without options.revocation. */
+  private readonly inboxRevocations = new RevocationRegistry();
+  /** Capability notices whose issuer is not yet matched to a verified chain. */
+  private readonly pendingCapabilities = new Map<string, SignedRevocationNotice[]>();
+  /** Chains that passed verifyCapabilityChain, so a later REVOKE can hit callTool. */
+  private readonly liveChains = new Map<string, VerifiedCapabilityChain[]>();
+  /** Inbox registry composed with options.revocation when the caller passed one. */
+  readonly revocation: RevocationList;
   constructor(readonly options: WorkerNodeOptions) {
     this.acceptance = acceptanceFrom(options);
     validateAcceptance(this.acceptance);
-    this.relay = transport(options.relay, options.owner, {
-      allowPrivateRelay: options.allowPrivateRelay,
-      lookup: options.lookup,
-    });
+    this.revocation = options.revocation
+      ? new CompositeRevocation([this.inboxRevocations, options.revocation])
+      : this.inboxRevocations;
+    // Every start, runOnce, and pumpUntil read goes through this wrapper, so a
+    // leading REVOKE is ingested before the next PROPOSE is returned.
+    this.relay = this.revocationAwareRelay(
+      transport(options.relay, options.owner, {
+        allowPrivateRelay: options.allowPrivateRelay,
+        lookup: options.lookup,
+      }),
+    );
     this.approvalProvider =
       options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner);
     const agentDid = options.agentDid ?? options.agentKey?.did ?? options.owner.did;
@@ -391,9 +536,17 @@ export class WorkerNode {
       ...(options.signal ? [options.signal] : []),
     ]);
     const jobs = new Set<Promise<void>>();
+    const unregister = registerWorkerListener(this.options.owner.did, (env) => {
+      this.forwardedQueue.push(env);
+      this.forwardedWaiters.shift()?.();
+      return true;
+    });
     try {
       while (!idleSignal.aborted) {
-        const envelope = await receiveRelay(this.relay, this.options.owner.did, idleSignal);
+        // revocationAwareRelay ingests a leading REVOKE before this read returns.
+        const envelope = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
+          role: 'worker',
+        });
         if (this.deliver(envelope)) continue;
         const job = this.beginTask(envelope, idleSignal, options.once === true);
         if (!job) continue;
@@ -407,6 +560,7 @@ export class WorkerNode {
     } catch (error) {
       if (!idleSignal.aborted) throw error;
     } finally {
+      unregister();
       await Promise.allSettled([...jobs]);
     }
     return this.lastResult;
@@ -423,17 +577,13 @@ export class WorkerNode {
     once: boolean,
   ): Promise<void> | undefined {
     const verified = verifyEnvelope(first, this.options.owner.did);
-    const proposal =
-      verified && first.payload.eventType === 'PROPOSE' && first.payload.seq === 0;
+    const proposal = verified && first.payload.eventType === 'PROPOSE' && first.payload.seq === 0;
     if (!proposal) {
       // A rejected proposal is answered with ERROR, and the requester echoes ERROR.
       // That trailing frame must not be treated as the next task, including after
       // a --once worker restarts and reads the relay queue again. Unsigned or
       // non-zero PROPOSE frames still fail a one-shot session immediately.
-      if (
-        once &&
-        (!verified || (first.payload.eventType === 'PROPOSE' && first.payload.seq !== 0))
-      )
+      if (once && (!verified || (first.payload.eventType === 'PROPOSE' && first.payload.seq !== 0)))
         throw new Error('INVALID_PROPOSAL_ENVELOPE');
       this.options.onEvent?.('REJECTED', '');
       return;
@@ -448,12 +598,7 @@ export class WorkerNode {
     }
     const mailbox = new TaskMailbox();
     this.mailboxes.set(first.payload.taskId, mailbox);
-    const job = this.executeTask(
-      first,
-      idleSignal,
-      mailboxRelay(this.relay, mailbox),
-      rejection,
-    )
+    const job = this.executeTask(first, idleSignal, mailboxRelay(this.relay, mailbox), rejection)
       .then((result) => {
         this.lastResult = result;
       })
@@ -483,6 +628,7 @@ export class WorkerNode {
           this.relay,
           this.options.owner.did,
           AbortSignal.any([idleSignal, wait.signal]),
+          { role: 'worker' },
         ).then(
           (envelope) => envelope,
           (error: unknown) => {
@@ -492,6 +638,8 @@ export class WorkerNode {
         );
         const envelope = await Promise.race([finished, incoming]);
         if (failure !== undefined) break;
+        // A REVOKE queued behind the proposal is ingested inside receive and is
+        // not delivered here. The next session envelope is what remains.
         if (!envelope) return;
         if (!this.deliver(envelope)) this.options.onEvent?.('REJECTED', '');
       }
@@ -502,7 +650,10 @@ export class WorkerNode {
   }
   async runOnce(signal?: AbortSignal): Promise<SessionResult> {
     const idleSignal = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
-    const first = await receiveRelay(this.relay, this.options.owner.did, idleSignal);
+    // One or more leading REVOKE envelopes are consumed before the task PROPOSE.
+    const first = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
+      role: 'worker',
+    });
     return this.executeTask(first, idleSignal, this.relay);
   }
   private async executeTask(
@@ -519,10 +670,10 @@ export class WorkerNode {
       throw new Error('INVALID_PROPOSAL_ENVELOPE');
     // PROPOSE arrives before the session wire is constructed. Open it with the same rule.
     const data = openEnvelope(
-      first,
-      this.options.owner,
-      sessionDecryptOptions(this.options.allowUnencryptedEnvelopes),
-    ) as unknown as Proposal,
+        first,
+        this.options.owner,
+        sessionDecryptOptions(this.options.allowUnencryptedEnvelopes),
+      ) as unknown as Proposal,
       m = data.proposal?.payload;
     if (!m || first.payload.senderDid !== m.requester.ownerDid || first.payload.taskId !== m.taskId)
       throw new Error('INVALID_PROPOSAL');
@@ -535,7 +686,7 @@ export class WorkerNode {
     )
       throw new Error('INVALID_PROPOSAL');
     const auditPath = this.options.auditPath
-      ? this.completed++ === 0
+      ? this.completed++ === 0 && !existsSync(this.options.auditPath)
         ? this.options.auditPath
         : this.options.auditPath.replace(/(?:\.jsonl)?$/, '.' + m.taskId + '.jsonl')
       : undefined;
@@ -557,6 +708,7 @@ export class WorkerNode {
     const cancelController = new AbortController();
     wire.earlyCancel = () => cancelController.abort('CANCELLED');
     let gateway: OwnerGateway | undefined, workspace: string | undefined;
+    let trackedTaskId: string | undefined;
     // Progress metrics are applied synchronously. The tail only serializes wire frames.
     let progressTail: Promise<void> = Promise.resolve();
     let progressFailure: unknown;
@@ -564,6 +716,14 @@ export class WorkerNode {
     try {
       await wire.receiveEvent('PROPOSE', first);
       this.assertInviteActive(data);
+      const capabilityContext: CapabilityContext = {
+        rootDid: m.requester.ownerDid,
+        audience: this.options.owner.did,
+        taskId: m.taskId,
+      };
+      this.assertCapabilitiesActive(data.capabilityChains, capabilityContext);
+      this.rememberChains(m.taskId, data.capabilityChains, capabilityContext);
+      trackedTaskId = m.taskId;
       const decision = evaluateContractAcceptance(
         this.acceptance,
         { manifest: m, from: first.payload.senderDid },
@@ -585,8 +745,34 @@ export class WorkerNode {
         },
         signal: activeSignal,
       });
-      gateway = new OwnerGateway(this.options.owner, contract, policy, this.options.revocation);
+      gateway = new OwnerGateway(this.options.owner, contract, policy, this.revocation);
       const accepted = gateway.accept(approval);
+      if (this.options.inboxPath) {
+        const fd = openSync(
+          this.options.inboxPath,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND |
+            constants.O_NOFOLLOW | constants.O_NONBLOCK,
+          0o600,
+        );
+        try {
+          if (!fstatSync(fd).isFile()) throw new Error('INVALID_INBOX_FILE');
+          fchmodSync(fd, 0o600);
+          appendFileSync(
+            fd,
+            JSON.stringify({
+              receivedAt: new Date().toISOString(),
+              taskId: m.taskId,
+              requesterOwnerDid: m.requester.ownerDid,
+              requesterAgentDid: m.requester.agentDid,
+              title: m.task.title,
+              description: m.task.description,
+              input: data.input,
+            }) + '\n',
+          );
+        } finally {
+          closeSync(fd);
+        }
+      }
       await wire.sendEvent('ACCEPT', { contract, transition: accepted, approval });
       this.options.onEvent?.('ACCEPT', m.taskId);
       await wire.sendEvent('START', gateway.transition('START'));
@@ -827,19 +1013,292 @@ export class WorkerNode {
         throw progressFailure;
       throw e;
     } finally {
+      if (trackedTaskId) this.liveChains.delete(trackedTaskId);
       gateway?.close();
       if (workspace) await rm(workspace, { recursive: true, force: true });
     }
   }
-  private assertInviteActive(data: Proposal): void {
-    const registry = this.options.revocation;
-    const token = data.inviteToken;
-    if (!registry || typeof token !== 'string' || token.length === 0) return;
-    registry.assertNotRevoked('invite', token);
-    registry.assertNotRevoked(
-      'invite',
-      inviteRevocationId(token, { allowPrivateRelay: this.options.allowPrivateRelay }),
+  /**
+   * Hide REVOKE envelopes from task reads. start, runOnce, and pumpUntil all
+   * receive through this relay, so a FIFO head of one or more REVOKE messages
+   * is applied before the following PROPOSE is observed.
+   */
+  private isRequesterBoundFrame(envelope: SignedEnvelope): boolean {
+    const { eventType, seq, taskId } = envelope.payload;
+    if (REQUESTER_BOUND_EVENTS.has(eventType)) return true;
+    if (seq === 0 && (eventType === 'AUDIT_ACK' || eventType === 'ERROR')) return true;
+    if (eventType !== 'PROPOSE' && eventType !== 'REVOKE' && !this.mailboxes.has(taskId))
+      return true;
+    return false;
+  }
+  private revocationAwareRelay(relay: RelayTransport): RelayTransport {
+    const receive: RelayTransport['receive'] = async (recipientDid, waitMs, signal, filter) => {
+      for (;;) {
+        const forwarded = this.forwardedQueue.shift();
+        if (forwarded) {
+          if (this.consumeRevocation(forwarded)) continue;
+          return forwarded;
+        }
+        const envelope = await relay.receive(
+          recipientDid,
+          waitMs,
+          signal,
+          filter ?? { role: 'worker' },
+        );
+        if (!envelope) {
+          const afterWait = this.forwardedQueue.shift();
+          if (afterWait) {
+            if (this.consumeRevocation(afterWait)) continue;
+            return afterWait;
+          }
+          return undefined;
+        }
+        if (this.consumeRevocation(envelope)) continue;
+        if (
+          this.isRequesterBoundFrame(envelope) &&
+          forwardToRequesterInbox(this.options.owner.did, envelope)
+        )
+          continue;
+        return envelope;
+      }
+    };
+    return {
+      send: (envelope) => relay.send(envelope),
+      receive,
+      ...(relay.register ? { register: (card) => relay.register!(card) } : {}),
+      ...(relay.discover ? { discover: () => relay.discover!() } : {}),
+      ...(relay.setRecipientKey
+        ? { setRecipientKey: (key: KeyPair) => relay.setRecipientKey!(key) }
+        : {}),
+      ...(relay.withRecipient
+        ? {
+            withRecipient: (key: KeyPair) => this.revocationAwareRelay(relay.withRecipient!(key)),
+          }
+        : {}),
+    };
+  }
+  /** True when the envelope was a REVOKE and must not be treated as a proposal. */
+  private consumeRevocation(envelope: SignedEnvelope): boolean {
+    if (envelope.payload?.eventType !== 'REVOKE') return false;
+    try {
+      this.ingestRevocation(envelope);
+    } catch {
+      // Forged, undecryptable, or unauthorized notices are ignored. They must
+      // not abort start or runOnce and must not be written into the registry.
+    }
+    return true;
+  }
+  private ingestRevocation(envelope: SignedEnvelope): void {
+    if (!verifyEnvelope(envelope, this.options.owner.did)) return;
+    const notice = openEnvelope<SignedRevocationNotice>(
+      envelope,
+      this.options.owner,
+      sessionDecryptOptions(this.options.allowUnencryptedEnvelopes),
     );
+    if (!verifyRevocationNotice(notice, envelope.payload.senderDid)) return;
+    if (notice.payload.issuerDid !== envelope.payload.senderDid) return;
+    if (notice.payload.targetType === 'invite') {
+      // Invites are minted by the worker owner. Another DID cannot revoke them.
+      if (notice.payload.issuerDid !== this.options.owner.did) return;
+      this.recordNotice(notice);
+      return;
+    }
+    if (notice.payload.targetType !== 'capability') return;
+    // Only a chain that still verifies can promote a notice into the registry.
+    const live = this.verifiedLiveEntries();
+    if (this.capabilityNoticeAuthorized(notice, live)) {
+      this.recordNotice(notice);
+      return;
+    }
+    const pending = this.pendingCapabilities.get(notice.payload.targetId) ?? [];
+    pending.push(structuredClone(notice));
+    this.pendingCapabilities.set(notice.payload.targetId, pending);
+  }
+  private recordNotice(notice: SignedRevocationNotice): void {
+    // Append even when another issuer already revoked this id. Replacing that
+    // notice would let a colliding token erase a real issuer's revocation.
+    this.inboxRevocations.revoke(notice);
+    const external = asRevocationRegistry(this.options.revocation);
+    if (!external || external === this.inboxRevocations) return;
+    try {
+      external.revoke(notice);
+    } catch {
+      // The caller registry can refuse a notice. The inbox copy still applies.
+    }
+  }
+  private assertInviteActive(data: Proposal): void {
+    const token = data.inviteToken;
+    if (typeof token !== 'string' || token.length === 0) return;
+    this.revocation.assertNotRevoked('invite', token);
+    const targetId = this.inviteDigest(token);
+    if (targetId) this.revocation.assertNotRevoked('invite', targetId);
+  }
+  /**
+   * Digest of an invite the worker already holds. Parsing does not dial the relay.
+   * A loopback invite is hashed even when this worker did not opt into dialing it,
+   * so a digest revocation still matches. An unparseable token is not a revocation.
+   */
+  private inviteDigest(token: string): string | undefined {
+    try {
+      return inviteRevocationId(token, { allowPrivateRelay: this.options.allowPrivateRelay });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'SSRF_BLOCKED_RELAY_URL') return undefined;
+      try {
+        return inviteRevocationId(token, { allowPrivateRelay: true });
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  /**
+   * Before ACCEPT, every verified capability chain is checked against revocation
+   * notices. A notice is stored and applied only when its issuer signed that
+   * token or an ancestor in a chain that has passed verifyCapabilityChain.
+   * An unverified chain, including one whose payload.issuer was rewritten,
+   * cannot promote a pending notice into the registry.
+   */
+  private assertCapabilitiesActive(chains: unknown, context: CapabilityContext): void {
+    const verified = this.verifiedEntries(chains, context);
+    this.promotePending(verified);
+    for (const entry of verified) {
+      if (this.verifiedChainRevoked(entry.chain)) throw new Error('TOKEN_REVOKED');
+    }
+  }
+  private verifiedEntries(chains: unknown, context: CapabilityContext): VerifiedCapabilityChain[] {
+    if (!Array.isArray(chains)) return [];
+    const entries: VerifiedCapabilityChain[] = [];
+    for (const chain of chains) {
+      if (!Array.isArray(chain)) continue;
+      try {
+        verifyCapabilityChain(chain, context);
+      } catch {
+        // Signature, linkage, or root failures must not authorize a revocation.
+        continue;
+      }
+      entries.push({ chain, context: { ...context } });
+    }
+    return entries;
+  }
+  private promotePending(entries: VerifiedCapabilityChain[]): void {
+    for (const [targetId, notices] of [...this.pendingCapabilities.entries()]) {
+      const keep: SignedRevocationNotice[] = [];
+      for (const notice of notices) {
+        if (this.capabilityNoticeAuthorized(notice, entries)) this.recordNotice(notice);
+        else keep.push(notice);
+      }
+      if (keep.length === 0) this.pendingCapabilities.delete(targetId);
+      else this.pendingCapabilities.set(targetId, keep);
+    }
+  }
+  private verifiedChainRevoked(chain: CapabilityToken[]): boolean {
+    for (let index = 0; index < chain.length; index++) {
+      const token = chain[index];
+      if (!token?.payload) continue;
+      const targetIds = [token.payload.id];
+      try {
+        targetIds.push(digest(token));
+      } catch {
+        // An unhashable token is not a revocation target.
+      }
+      for (const targetId of targetIds) {
+        if (typeof targetId !== 'string' || targetId.length === 0) continue;
+        if (this.capabilityTargetRevoked(chain, index, targetId)) return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * Pending and stored notices apply only when their issuer controls this
+   * verified token. A bare target-id hit from another issuer does not.
+   */
+  private capabilityTargetRevoked(
+    chain: CapabilityToken[],
+    index: number,
+    targetId: string,
+  ): boolean {
+    const pending = this.pendingCapabilities.get(targetId) ?? [];
+    if (pending.some((notice) => capabilityIssuerControls(chain, index, notice.payload.issuerDid)))
+      return true;
+    const listed = [
+      ...this.listedNotices(this.inboxRevocations, targetId),
+      ...this.listedNotices(this.options.revocation, targetId),
+    ];
+    if (listed.some((notice) => capabilityIssuerControls(chain, index, notice.payload.issuerDid)))
+      return true;
+    const external = this.options.revocation;
+    if (
+      external &&
+      typeof external.noticesFor !== 'function' &&
+      external.isRevoked('capability', targetId)
+    )
+      return true;
+    return false;
+  }
+  private listedNotices(
+    list: RevocationList | undefined,
+    targetId: string,
+  ): SignedRevocationNotice[] {
+    if (!list || typeof list.noticesFor !== 'function') return [];
+    return list.noticesFor('capability', targetId);
+  }
+  private rememberChains(taskId: string, chains: unknown, context: CapabilityContext): void {
+    const stored: VerifiedCapabilityChain[] = [];
+    if (Array.isArray(chains)) {
+      for (const chain of chains) {
+        if (!Array.isArray(chain)) continue;
+        try {
+          verifyCapabilityChain(chain, context);
+        } catch {
+          continue;
+        }
+        stored.push({
+          chain: chain.map((token) => structuredClone(token)),
+          context: { ...context },
+        });
+      }
+    }
+    this.liveChains.set(taskId, stored);
+  }
+  private verifiedLiveEntries(): VerifiedCapabilityChain[] {
+    const entries: VerifiedCapabilityChain[] = [];
+    for (const group of this.liveChains.values()) {
+      for (const entry of group) {
+        try {
+          verifyCapabilityChain(entry.chain, entry.context);
+          entries.push(entry);
+        } catch {
+          // A chain that no longer verifies cannot authorize a revocation.
+        }
+      }
+    }
+    return entries;
+  }
+  private capabilityNoticeAuthorized(
+    notice: SignedRevocationNotice,
+    entries: VerifiedCapabilityChain[],
+  ): boolean {
+    if (notice.payload.targetType !== 'capability') return false;
+    for (const entry of entries) {
+      try {
+        verifyCapabilityChain(entry.chain, entry.context);
+      } catch {
+        continue;
+      }
+      for (let index = 0; index < entry.chain.length; index++) {
+        if (!this.sameCapabilityTarget(entry.chain[index], notice.payload.targetId)) continue;
+        if (capabilityIssuerControls(entry.chain, index, notice.payload.issuerDid)) return true;
+      }
+    }
+    return false;
+  }
+  private sameCapabilityTarget(token: CapabilityToken | undefined, targetId: string): boolean {
+    if (!token?.payload || typeof token.payload !== 'object') return false;
+    if (token.payload.id === targetId) return true;
+    try {
+      return digest(token) === targetId;
+    } catch {
+      return false;
+    }
   }
 }
 interface CancelPayload {
@@ -906,6 +1365,11 @@ export interface DelegateOptions {
   auditPath?: string;
   signal?: AbortSignal;
   capabilities?: TaskManifest['permissions']['grantedCapabilities'];
+  /**
+   * Chains to send on PROPOSE. When omitted, chains are minted from
+   * grantedCapabilities. Supply them to revoke a known token id before send.
+   */
+  capabilityChains?: CapabilityToken[][];
   minimumIsolationLevel?: string;
   onProgress?: (
     progress: ProgressPayload,
@@ -950,11 +1414,112 @@ export interface DelegateMultiOptions {
   onProgress?: DelegateOptions['onProgress'];
   auditPath?: string;
 }
+export interface DeliverRevocationOptions {
+  relay: RelayTransport | string;
+  from: KeyPair;
+  recipientDid: string;
+  notice: SignedRevocationNotice;
+  /** Routing id carried in the envelope header. Defaults to the revocation id. */
+  taskId?: string;
+  seq?: number;
+  /** Encrypt the notice to recipientDid. Default true. */
+  encrypt?: boolean;
+  allowPrivateRelay?: boolean;
+  lookup?: RelayClientSecurityOptions['lookup'];
+}
+/**
+ * Queue a signed REVOKE envelope on a worker inbox.
+ * The payload is a SignedRevocationNotice. Encryption is on unless encrypt is false,
+ * so an offline worker reads the notice in FIFO order before a later PROPOSE.
+ */
+export async function deliverRevocation(
+  options: DeliverRevocationOptions,
+): Promise<SignedEnvelope> {
+  const notice = options.notice;
+  if (
+    !verifyRevocationNotice(notice, options.from.did) ||
+    notice.payload.issuerDid !== options.from.did
+  )
+    throw new Error('INVALID_REVOCATION');
+  resolveDid(options.recipientDid);
+  const relayOption = options.relay;
+  if (!relayOption) throw new Error('RELAY_REQUIRED');
+  if (typeof relayOption === 'string')
+    validateRelayEndpointUrl(relayOption, { allowPrivateRelay: options.allowPrivateRelay });
+  else if ('url' in relayOption && typeof relayOption.url === 'string')
+    validateRelayEndpointUrl(relayOption.url, {
+      allowPrivateRelay: options.allowPrivateRelay,
+    });
+  const relay = transport(relayOption, options.from, {
+    allowPrivateRelay: options.allowPrivateRelay,
+    lookup: options.lookup,
+  });
+  const taskId =
+    options.taskId && options.taskId.length > 0
+      ? options.taskId
+      : 'revoke_' + notice.payload.revocationId;
+  const envelope = signEnvelope(
+    {
+      taskId,
+      recipientDid: options.recipientDid,
+      seq: options.seq ?? 0,
+      eventType: 'REVOKE',
+      payload: asJson(notice),
+    },
+    options.from,
+    { encrypt: options.encrypt !== false },
+  );
+  await relay.send(envelope);
+  return envelope;
+}
 export class RequesterClient {
   readonly approvalProvider: ApprovalProvider;
   constructor(readonly options: RequesterClientOptions) {
     this.approvalProvider =
       options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner);
+  }
+  /**
+   * Send an encrypted REVOKE for an invite or capability to a worker inbox.
+   * `to` is a worker DID or an acp-invite token. The notice is signed by this client.
+   */
+  async sendRevocation(options: {
+    to: string;
+    relay?: RelayTransport | string;
+    targetType?: 'invite' | 'capability';
+    targetId?: string;
+    reason?: string;
+    notice?: SignedRevocationNotice;
+    taskId?: string;
+    encrypt?: boolean;
+  }): Promise<SignedEnvelope> {
+    const invite = options.to.startsWith('acp')
+      ? parseAndVerifyInviteToken(options.to, Date.now(), {
+          allowPrivateRelay: this.options.allowPrivateRelay,
+        })
+      : undefined;
+    const relayOption = options.relay ?? this.options.relay ?? invite?.relayUrl;
+    if (!relayOption) throw new Error('RELAY_REQUIRED');
+    const recipientDid = invite?.ownerDid ?? options.to;
+    const notice =
+      options.notice ??
+      createRevocationNotice(
+        {
+          targetType: options.targetType as 'invite' | 'capability',
+          targetId: options.targetId ?? '',
+          reason: options.reason ?? '',
+        },
+        this.options.owner,
+      );
+    return deliverRevocation({
+      relay: relayOption,
+      from: this.options.owner,
+      recipientDid,
+      notice,
+      taskId: options.taskId,
+      encrypt: options.encrypt,
+      allowPrivateRelay: this.options.allowPrivateRelay,
+      lookup: this.options.lookup,
+    });
   }
   async delegate(
     options: DelegateOptions,
@@ -983,13 +1548,10 @@ export class RequesterClient {
         typeof relayOption === 'string'
           ? recipientInbox(this, relay, owner.did, relayOption.replace(/\/$/, ''))
           : recipientInbox(relayOption, relay, owner.did);
-    const cards = !invite && relay.discover ? await relay.discover() : [];
-    if (cards.some((c) => !verifySignedAgentCard(c))) throw new Error('INVALID_AGENT_CARD');
-    const card = cards.find(
-      (c) => c.payload.agentDid === options.to || c.payload.ownerDid === options.to,
-    );
+    const rawCards = !invite && relay.discover ? await relay.discover() : [];
+    if (!Array.isArray(rawCards)) throw new Error('INVALID_AGENT_CARD');
+    const card = findDiscoveredAgentCard(rawCards, options.to);
     const peer = invite?.ownerDid ?? card?.payload.ownerDid ?? options.to;
-    if (peer === owner.did) throw new Error('DISTINCT_OWNERS_REQUIRED');
     const manifest =
       options.manifest ??
       buildTaskManifest({
@@ -1070,30 +1632,32 @@ export class RequesterClient {
     options.signal?.addEventListener('abort', onUserAbort);
     if (options.signal?.aborted) onUserAbort();
     try {
-      const capabilityChains = manifest.permissions.grantedCapabilities.map((g) => {
-        const root = createCapability(
-          {
-            audience: owner.did,
-            taskId: manifest.taskId,
-            resource: g.resource,
-            allowedTools: g.allowedTools,
-            argConstraints: Object.fromEntries(
-              g.allowedTools.map((t) => [t, g.argConstraints ?? { type: 'object' }]),
-            ),
-            maxCalls: g.maxInvocations,
-            notBefore: manifest.createdAt,
-            expiresAt: g.expiresAt,
-            maxDepth: 1,
-          },
-          owner,
-        );
-        const leaf = createCapability(
-          { ...root.payload, audience: peer, maxDepth: 0 },
-          owner,
-          root,
-        );
-        return [root, leaf];
-      });
+      const capabilityChains =
+        options.capabilityChains ??
+        manifest.permissions.grantedCapabilities.map((g) => {
+          const root = createCapability(
+            {
+              audience: owner.did,
+              taskId: manifest.taskId,
+              resource: g.resource,
+              allowedTools: g.allowedTools,
+              argConstraints: Object.fromEntries(
+                g.allowedTools.map((t) => [t, g.argConstraints ?? { type: 'object' }]),
+              ),
+              maxCalls: g.maxInvocations,
+              notBefore: manifest.createdAt,
+              expiresAt: g.expiresAt,
+              maxDepth: 1,
+            },
+            owner,
+          );
+          const leaf = createCapability(
+            { ...root.payload, audience: peer, maxDepth: 0 },
+            owner,
+            root,
+          );
+          return [root, leaf];
+        });
       await wire.sendEvent('PROPOSE', {
         proposal: signPayload(manifest, owner),
         input: options.input,
@@ -1388,16 +1952,14 @@ async function canonicalizeDiscoveredWorkers(
         });
         if (!relay.discover) return;
         const cards = await relay.discover();
-        if (!Array.isArray(cards) || cards.some((card) => !verifySignedAgentCard(card))) return;
+        if (!Array.isArray(cards)) return;
+        const now = Date.now();
         for (const target of group) {
-          const card = cards.find(
-            (item) =>
-              item.payload.agentDid === target.workerDid ||
-              item.payload.ownerDid === target.workerDid,
-          );
+          const card = findDiscoveredAgentCard(cards, target.workerDid, now);
           if (card) target.workerDid = card.payload.agentDid;
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof Error && error.message === 'AMBIGUOUS_AGENT_CARD_OWNER') throw error;
         // Discovery only collapses aliases. Settlement still checks the signed manifest.
       }
     }),
