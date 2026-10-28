@@ -349,3 +349,44 @@ Read the [demo walkthrough](examples/two-owner-demo/README.md), [wire rules](spe
 - **Author**: [@takapon01234](https://x.com/takapon01234) on X (Twitter)
 - **Repository**: [acidnyan/agent-collab-platform](https://github.com/acidnyan/agent-collab-platform)
 - **Public Blind Relay**: `https://acp-relay.agent-collab.workers.dev`
+
+### Invite-less open task collaboration
+
+Workers started through the CLI default to `--access-mode invite-only`. They
+require a valid worker invite or a requester owner DID listed with
+`--allow-requester`. An invite remains a bearer invitation; an explicit
+allowlist still restricts its use. `--allow-any-requester` does not bypass the
+invite requirement in this mode.
+
+To advertise availability for invite-less tasks:
+
+```sh
+acp worker start --key worker.private.json --relay https://acp-relay.agent-collab.workers.dev --adapter sandbox --access-mode open --publish --skill json-task --task-type json
+acp discover --relay https://acp-relay.agent-collab.workers.dev --skill json-task
+acp delegate --key requester.private.json --relay https://acp-relay.agent-collab.workers.dev --discover json-task --title Echo --description Echo --input '{"hello":"world"}'
+```
+
+`--open` aliases `--access-mode open`. Publishing still requires `--publish`.
+Discovery also supports `--task-type <type>` and `--did <did>`; delegation
+supports `--task-type <type>` or the existing `--to <did>`. Skill selection
+uses only current, verified cards explicitly advertising `open`, with stable
+agent-DID ordering. A DID plus a discovery filter restricts selection to that
+identity. Skills and task types describe advertised abilities, not permissions.
+
+Open admission does not automatically approve contracts or grant tools. Existing
+approval gates, requester allowlists, quotas, encrypted transport, task-bound
+capabilities, expiry, and revocation checks continue to apply. CLI LLM automatic
+acceptance still requires its existing explicit requester policy.
+
+Programmatic callers can set `WorkerNodeOptions.accessMode` and
+`RequesterClient.delegate({ to: '', discover: { skillId, taskType }, ... })`.
+Omitting `accessMode` in the runtime API defaults to invite-only protection.
+Direct DID callers need an open worker or an explicit requester allowlist. Older signed
+AgentCards remain valid but are not selected for open skill discovery.
+
+Open workers enforce signed manifest `task.skillId` and `task.taskType` against
+their advertised skills before acceptance. A worker advertising task types
+requires a matching type; discovery binds the selected type into the manifest.
+Capability signatures and task bindings are also verified before `ACCEPT`.
+`conformance/open-task-adversarial-security.test.ts` covers admission bypass,
+card spoofing, scope and budget escalation, cross-task replay, and envelope tampering.

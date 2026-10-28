@@ -23,6 +23,7 @@ import {
   verifyCapabilityChain,
   capabilityIssuerControls,
   findDiscoveredAgentCard,
+  discoverAgentCards,
   schemaNarrows,
   digest,
   openEnvelope,
@@ -341,6 +342,8 @@ function recipientInbox(
   return inbox;
 }
 export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
+  /** Explicit admission policy. Defaults to invite-only. */
+  accessMode?: 'invite-only' | 'open';
   owner: KeyPair;
   relay: RelayTransport | string;
   relayUrl?: string;
@@ -432,6 +435,8 @@ export class WorkerNode {
   /** Inbox registry composed with options.revocation when the caller passed one. */
   readonly revocation: RevocationList;
   constructor(readonly options: WorkerNodeOptions) {
+    if (options.accessMode !== undefined && !['invite-only', 'open'].includes(options.accessMode))
+      throw new Error('INVALID_ACCESS_MODE');
     this.acceptance = acceptanceFrom(options);
     validateAcceptance(this.acceptance);
     this.revocation = options.revocation
@@ -457,6 +462,7 @@ export class WorkerNode {
             ? options.relay
             : (options.relayUrl ?? 'http://in-memory.invalid'),
         skills: options.adapter.skills,
+        ...(options.accessMode ? { accessMode: options.accessMode } : {}),
       },
       options.owner,
       agentDid === options.owner.did ? undefined : options.agentKey,
@@ -749,11 +755,21 @@ export class WorkerNode {
     try {
       await wire.receiveEvent('PROPOSE', first);
       this.assertInviteActive(data);
+      if (this.options.accessMode === 'open') {
+        const skills = this.agentCard.payload.skills;
+        const selected = m.task.skillId ? skills.filter((skill) => skill.id === m.task.skillId) : skills;
+        if ((m.task.skillId && selected.length === 0) ||
+            (m.task.taskType && !selected.some((skill) => skill.taskTypes?.includes(m.task.taskType!))) ||
+            (!m.task.taskType && selected.some((skill) => skill.taskTypes?.length)))
+          throw new Error('TASK_SCOPE_REJECTED');
+      }
       const capabilityContext: CapabilityContext = {
         rootDid: m.requester.ownerDid,
         audience: this.options.owner.did,
         taskId: m.taskId,
       };
+      if (!Array.isArray(data.capabilityChains)) throw new Error('CAPABILITY_VIOLATION');
+      for (const chain of data.capabilityChains) verifyCapabilityChain(chain, capabilityContext);
       this.assertCapabilitiesActive(data.capabilityChains, capabilityContext);
       this.rememberChains(m.taskId, data.capabilityChains, capabilityContext);
       trackedTaskId = m.taskId;
@@ -1165,7 +1181,17 @@ export class WorkerNode {
   }
   private assertInviteActive(data: Proposal): void {
     const token = data.inviteToken;
-    if (typeof token !== 'string' || token.length === 0) return;
+    if (typeof token !== 'string' || token.length === 0) {
+      if (this.options.accessMode !== 'open' &&
+          !this.options.allowedRequesterDids?.includes(data.proposal.payload.requester.ownerDid))
+        throw new Error('INVITE_REQUIRED');
+      return;
+    }
+    const invite = parseAndVerifyInviteToken(token, Date.now(), { allowPrivateRelay: true });
+    if (invite.ownerDid !== this.options.owner.did ||
+        invite.agentDid !== this.agentCard.payload.agentDid ||
+        invite.relayUrl !== this.agentCard.payload.relayEndpoint)
+      throw new Error('INVITE_WORKER_MISMATCH');
     this.revocation.assertNotRevoked('invite', token);
     const targetId = this.inviteDigest(token);
     if (targetId) this.revocation.assertNotRevoked('invite', targetId);
@@ -1349,6 +1375,8 @@ function rejectionBody(error: unknown): { code: string; reason?: string } {
 }
 function safeError(e: unknown): string {
   const s = String(e);
+  for (const code of ['UNENCRYPTED_ENVELOPE_REJECTED', 'INVITE_REQUIRED', 'TASK_SCOPE_REJECTED'])
+    if (s === 'Error: ' + code) return code;
   if (s.includes('TOKEN_REVOKED')) return 'TOKEN_REVOKED';
   return (
     ['BUDGET', 'CAPABILITY', 'APPROVAL', 'HITL', 'INVALID', 'VERIFICATION', 'SCHEMA', 'ABORT'].find(
@@ -1392,6 +1420,7 @@ export interface RequesterClientOptions {
 }
 export interface DelegateOptions {
   to: string;
+  discover?: { skillId?: string; taskType?: string };
   relay?: RelayTransport | string;
   title: string;
   description: string;
@@ -1587,7 +1616,12 @@ export class RequesterClient {
           : recipientInbox(relayOption, relay, owner.did);
     const rawCards = !invite && relay.discover ? await relay.discover() : [];
     if (!Array.isArray(rawCards)) throw new Error('INVALID_AGENT_CARD');
-    const card = findDiscoveredAgentCard(rawCards, options.to);
+    if (invite && options.discover) throw new Error('CONFLICTING_DISCOVERY_TARGET');
+    const card = options.discover
+      ? discoverAgentCards(rawCards, { ...options.discover, accessMode: 'open',
+          ...(options.to ? { did: options.to } : {}) })[0]
+      : findDiscoveredAgentCard(rawCards, options.to);
+    if (options.discover && !card) throw new Error('OPEN_WORKER_NOT_FOUND');
     const peer = invite?.ownerDid ?? card?.payload.ownerDid ?? options.to;
     const manifest =
       options.manifest ??
@@ -1596,6 +1630,9 @@ export class RequesterClient {
         ownerDid: owner.did,
         workerDid: peer,
         agentDid: invite?.agentDid ?? card?.payload.agentDid ?? peer,
+        skillId: options.discover?.skillId,
+        taskType: options.discover?.taskType ?? (card?.payload.skills.length === 1 &&
+          card.payload.skills[0].taskTypes?.length === 1 ? card.payload.skills[0].taskTypes[0] : undefined),
       });
     validateManifest(manifest);
     if (
@@ -2006,6 +2043,8 @@ export function buildTaskManifest(options: {
   ownerDid: string;
   workerDid: string;
   agentDid?: string;
+  skillId?: string;
+  taskType?: string;
   title: string;
   description: string;
   outputSchema?: Schema;
@@ -2022,6 +2061,8 @@ export function buildTaskManifest(options: {
     requester: { ownerDid: options.ownerDid, agentDid: options.ownerDid },
     worker: { ownerDid: options.workerDid, agentDid: options.agentDid ?? options.workerDid },
     task: {
+      ...(options.skillId ? { skillId: options.skillId } : {}),
+      ...(options.taskType ? { taskType: options.taskType } : {}),
       title: options.title,
       description: options.description,
       acceptanceCriteria: [

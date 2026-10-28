@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFileSync, writeFileSync } from 'node:fs';
 import type { KeyPair, Schema } from '@acp/core';
-import { createSignedAgentCard, createInviteToken } from '@acp/core';
+import { createSignedAgentCard, createInviteToken, discoverAgentCards } from '@acp/core';
 import { startLocalRelay, HttpRelayClient } from '@acp/relay';
 import {
   WorkerNode,
@@ -123,7 +123,11 @@ export async function networkCommand(command: string, args: string[]): Promise<v
   }
   if (command === 'discover') {
     const client = new HttpRelayClient(text(f, 'relay'), { allowPrivateRelay });
-    console.log(JSON.stringify(await client.discover(), null, 2));
+    console.log(JSON.stringify(discoverAgentCards(await client.discover(), {
+      ...(f.has('--skill') ? { skillId: text(f, 'skill') } : {}),
+      ...(f.has('--task-type') ? { taskType: text(f, 'task-type') } : {}),
+      ...(f.has('--did') ? { did: text(f, 'did') } : {}),
+    }), null, 2));
     return;
   }
   const key = JSON.parse(readFileSync(text(f, 'key'), 'utf8')) as KeyPair;
@@ -147,6 +151,9 @@ export async function networkCommand(command: string, args: string[]): Promise<v
   }
   const automatic = ['yes', 'auto-accept', 'auto-approve'].some((name) => f.has('--' + name));
   if (command === 'worker') {
+    const accessMode = text(f, 'access-mode', f.has('--open') ? 'open' : 'invite-only');
+    if (!['invite-only', 'open'].includes(accessMode) || (f.has('--open') && accessMode !== 'open'))
+      throw new Error('INVALID_ACCESS_MODE');
     const onInboxRecord = f.has('--on-receive')
       ? createReceiveHook(text(f, 'on-receive')) : undefined;
     if (onInboxRecord && !f.has('--inbox')) throw new Error('--on-receive requires --inbox');
@@ -176,7 +183,14 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       default:
         throw new Error('UNKNOWN_ADAPTER');
     }
+    if (f.has('--skill') || f.has('--task-type')) {
+      const skillId = text(f, 'skill', adapter.skills[0]?.id ?? 'json-task');
+      adapter.skills = [{ id: skillId, name: skillId,
+        ...(f.has('--task-type') ? { taskTypes: [text(f, 'task-type')] } : {}),
+      }];
+    }
     const worker = new WorkerNode({
+      accessMode: accessMode as 'invite-only' | 'open',
       owner: key,
       relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay }),
       relayUrl: text(f, 'relay'),
@@ -221,7 +235,11 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       allowPrivateRelay,
     });
     const result = await client.delegate({
-      to: text(f, 'to'),
+      to: text(f, 'to', f.has('--discover') || f.has('--task-type') ? '' : undefined),
+      ...(f.has('--discover') || f.has('--task-type') ? { discover: {
+        ...(f.has('--discover') ? { skillId: text(f, 'discover') } : {}),
+        ...(f.has('--task-type') ? { taskType: text(f, 'task-type') } : {}),
+      } } : {}),
       title: text(f, 'title'),
       description: text(f, 'description'),
       input: JSON.parse(text(f, 'input')),
