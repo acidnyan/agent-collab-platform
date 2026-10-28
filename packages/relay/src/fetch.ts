@@ -3,6 +3,7 @@ import {
   verifySigned,
   resolveDid,
   verifySignedAgentCard,
+  findDiscoveredAgentCard,
   toA2AAgentCard,
   verifyRelayAuthToken,
   createRelayAuthToken,
@@ -326,18 +327,14 @@ export function agentRegistryKey(ownerDid: string, agentDid: string): string {
   return ownerDid + '/' + agentDid;
 }
 /**
- * GET /agents/:agentDid returns the only card for that agent, or the self-owned
- * card when several owners have registered it. An ambiguous set with no self-owned
- * card is not returned.
+ * Use the same verified, deterministic DID selection as requesters.
  */
 export function selectAgentCard(
   cards: Iterable<SignedAgentCard>,
   agentDid: string,
+  now = Date.now(),
 ): SignedAgentCard | undefined {
-  const matches: SignedAgentCard[] = [];
-  for (const card of cards) if (card.payload.agentDid === agentDid) matches.push(card);
-  if (matches.length === 1) return matches[0];
-  return matches.find((card) => card.payload.ownerDid === card.payload.agentDid);
+  return findDiscoveredAgentCard([...cards], agentDid, now);
 }
 export class InMemoryRelay {
   private queues = new Map<string, StoredEnvelope[]>();
@@ -750,6 +747,8 @@ export class InMemoryRelay {
     const authExpiry = new Map(snapshot.authExpiry ?? []);
     const envelopeExpiry = new Map(snapshot.envelopeExpiry ?? []);
     const agentExpiry = new Map(snapshot.agentExpiry ?? []);
+    const now = this.now();
+    this.assertValidAgentSnapshot(snapshot, agentExpiry);
     if (
       snapshot.seen.length > this.maxSeenEntries ||
       (snapshot.authSeen?.length ?? 0) > this.maxAuthSeenEntries ||
@@ -765,8 +764,7 @@ export class InMemoryRelay {
             return true;
         }
         return queue.some((envelope) => Buffer.byteLength(JSON.stringify(envelope)) > this.maxEnvelopeBytes);
-      }) ||
-      this.invalidAgentSnapshot(snapshot, agentExpiry)
+      })
     )
       throw new Error('INVALID_RELAY_SNAPSHOT');
     this.queues = new Map();
@@ -792,30 +790,34 @@ export class InMemoryRelay {
     this.agents.clear();
     this.agentExpiry.clear();
     for (const card of snapshot.agents) {
-      const copy = structuredClone(card);
-      const key = agentRegistryKey(copy.payload.ownerDid, copy.payload.agentDid);
-      this.agents.set(key, copy);
-      const cardExpiresAt = Date.parse(copy.payload.expiresAt);
-      this.agentExpiry.set(
-        key,
-        agentExpiry.get(key) ?? Math.min(this.now() + this.agentCardTtlMs, cardExpiresAt),
+      const key = agentRegistryKey(card.payload.ownerDid, card.payload.agentDid);
+      const effective = Math.min(
+        agentExpiry.get(key) ?? now + this.agentCardTtlMs,
+        Date.parse(card.payload.expiresAt),
       );
+      if (effective <= now) continue;
+      const copy = structuredClone(card);
+      this.agents.set(key, copy);
+      this.agentExpiry.set(key, effective);
     }
     this.version++;
   }
-  /** Reject snapshots that would resurrect an expired, duplicate, or unsigned card. */
-  private invalidAgentSnapshot(snapshot: RelaySnapshot, agentExpiry: Map<string, number>): boolean {
+  /** Authenticate even expired cards before allowing restore to discard them. */
+  private assertValidAgentSnapshot(snapshot: RelaySnapshot, agentExpiry: Map<string, number>): void {
+    if (!Array.isArray(snapshot.agents)) throw new Error('INVALID_AGENT_SNAPSHOT');
     const seen = new Set<string>();
     for (const card of snapshot.agents) {
+      // Verification at the last millisecond of its lifetime skips only current
+      // expiry, retaining all signature, delegation, structure and TTL checks.
+      const expiresAt = Date.parse(card?.payload?.expiresAt);
+      if (!verifySignedAgentCard(card, expiresAt - 1))
+        throw new Error('INVALID_AGENT_SNAPSHOT');
       const key = agentRegistryKey(card.payload.ownerDid, card.payload.agentDid);
       const stored = agentExpiry.get(key);
-      const effective =
-        stored ?? Math.min(this.now() + this.agentCardTtlMs, Date.parse(card.payload.expiresAt));
-      if (seen.has(key) || !verifySignedAgentCard(card, this.now()) || !(effective > this.now()))
-        return true;
+      if (seen.has(key) || (stored !== undefined && !Number.isFinite(stored)))
+        throw new Error('INVALID_AGENT_SNAPSHOT');
       seen.add(key);
     }
-    return false;
   }
   discover(): SignedAgentCard[] {
     this.evictExpired();
@@ -893,6 +895,8 @@ export const KNOWN_RELAY_ERROR_CODES = [
   'INVALID_DID',
   'RELAY_TAMPERING_DETECTED',
   'INVALID_AGENT_CARD',
+  'INVALID_AGENT_SNAPSHOT',
+  'AMBIGUOUS_AGENT_CARD_OWNER',
   'AGENT_CARD_EXPIRED',
   'AGENT_CARD_EXPIRY_TOO_LONG',
   'AGENT_CARD_DELEGATION_REQUIRED',
@@ -952,6 +956,8 @@ const RELAY_ERROR_STATUS: Readonly<Record<string, number>> = {
   INVALID_DID: 400,
   RELAY_TAMPERING_DETECTED: 400,
   INVALID_AGENT_CARD: 400,
+  INVALID_AGENT_SNAPSHOT: 400,
+  AMBIGUOUS_AGENT_CARD_OWNER: 409,
   AGENT_CARD_EXPIRED: 400,
   AGENT_CARD_EXPIRY_TOO_LONG: 400,
   AGENT_CARD_DELEGATION_REQUIRED: 400,

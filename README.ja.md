@@ -160,6 +160,21 @@ pnpm acp worker start --key /tmp/bob.private.json \
 
 `acp worker` は `--publish` を付けない限り、公開リレーのディレクトリへ AgentCard を登録しません。招待トークンを直接渡してください。`acp discover` に出るのは `--publish` したワーカーだけです。
 
+`--inbox /path/to/inbox.jsonl` を指定すると、対話エージェント向けの受信箱を保存します。
+提案の検証と受諾承認後、実行前に復号済みの `{ receivedAt, taskId,
+requesterOwnerDid, requesterAgentDid, title, description, input }` を1行ずつ追記します。
+親ディレクトリは事前に作成してください。ファイルはモード `0600` で作成し、既存ファイルも
+同じモードに制限します。拒否した提案は保存せず、書き込みに失敗したタスクは実行しません。
+受信内容は私的なタスクデータとして扱い、リポジトリ外へ保存してください。
+既定の sandbox echo ワーカーでも利用できます。
+
+DID による検索は `agentDid` の完全一致を `ownerDid` の別名一致より優先し、
+同じ所有者・エージェントの組では最新の `signedAt` を決定論的に選びます。
+対象エージェントに複数の有効な所有者がある場合は `AMBIGUOUS_AGENT_CARD_OWNER`
+（`/agents/:did` では HTTP 409）で拒否します。リレーのスナップショット復元では、
+期限切れカードも署名・構造を検証してから除外します。不正カードは引き続き
+`INVALID_AGENT_SNAPSHOT` で拒否します。
+
 `--max-input-tokens`、`--max-output-tokens`、`--max-tool-invocations`、`--max-wall-clock-seconds` は、ワーカーが受ける契約の上限です。どれかを超える提案は、`--auto-accept` でも `ACCEPT` の前に拒否されます。マニフェストの `timeoutSeconds` は `--max-wall-clock-seconds` と比較します。`--max-concurrent-tasks` は同時実行数の上限です（既定は 8）。`--max-requests-per-minute` は、依頼者 DID ごとの提案回数の上限です。
 
 `--allow-requester <did>` は繰り返せます。カンマ区切りでも指定できます。`--allow-any-requester` は、すべての依頼者を明示的に許可します。`--adapter claude`、`codex`、`openai` で `--auto-accept`（および `--auto-approve` / `--yes`）を使うときは、どちらかの許可フラグが必要です。公開ディレクトリから見つかったワーカーが、持ち主の API キーを任意の依頼者に使わせないためです。上の sandbox 例に許可リストは不要です。

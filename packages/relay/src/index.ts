@@ -32,6 +32,7 @@ export type {
 export {
   createSignedAgentCard,
   verifySignedAgentCard,
+  findDiscoveredAgentCard,
   toA2AAgentCard,
   createInviteToken,
   parseAndVerifyInviteToken,

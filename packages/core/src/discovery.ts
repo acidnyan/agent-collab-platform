@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { signPayload, verifySignature, verifySigned, resolveDid } from './crypto.js';
+import { signPayload, verifySignature, verifySigned, resolveDid, canonicalize } from './crypto.js';
 import type { BudgetSpec, Json, KeyPair, Signature, Signed } from './types.js';
 export interface AgentSkill {
   id: string;
@@ -394,6 +394,35 @@ export function verifySignedAgentCard(card: SignedAgentCard, now = Date.now()): 
   } catch {
     return false;
   }
+}
+/** Select a verified card independently of directory order. Exact agent DIDs win. */
+export function findDiscoveredAgentCard(
+  rawCards: unknown,
+  targetDid: string,
+  now = Date.now(),
+): SignedAgentCard | undefined {
+  if (!Array.isArray(rawCards)) return undefined;
+  const valid = rawCards.filter((card): card is SignedAgentCard => verifySignedAgentCard(card, now));
+  const exact = valid.filter((card) => card.payload.agentDid === targetDid);
+  const matches = exact.length ? exact : valid.filter((card) => card.payload.ownerDid === targetDid);
+  const candidateAgents = new Set(matches.map((card) => card.payload.agentDid));
+  const owners = new Map<string, string>();
+  for (const card of valid) {
+    const { agentDid, ownerDid } = card.payload;
+    if (!candidateAgents.has(agentDid)) continue;
+    if (owners.has(agentDid) && owners.get(agentDid) !== ownerDid)
+      throw new Error('AMBIGUOUS_AGENT_CARD_OWNER');
+    owners.set(agentDid, ownerDid);
+  }
+  matches.sort((a, b) => {
+    const signed = Date.parse(b.signature.signedAt) - Date.parse(a.signature.signedAt);
+    if (signed) return signed;
+    // Equal timestamps also need a stable tie-breaker, including different agents
+    // reached through the same owner alias. Avoid locale-dependent ordering.
+    const left = canonicalize(a), right = canonicalize(b);
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  return matches[0];
 }
 export function toA2AAgentCard(card: SignedAgentCard) {
   if (!verifySignedAgentCard(card)) throw new Error('INVALID_AGENT_CARD');

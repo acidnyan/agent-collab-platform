@@ -160,6 +160,21 @@ Copy the printed `acp-invite:...` line. This local example echoes the JSON input
 
 `acp worker` does not register its AgentCard in the public relay directory unless you pass `--publish`. Share the invite directly. `acp discover` lists only workers that opted in with `--publish`.
 
+Pass `--inbox /path/to/inbox.jsonl` to keep a local inbox for an interactive agent.
+After validating and approving a proposal, the worker appends one decrypted JSON
+line before executing it: `{ receivedAt, taskId, requesterOwnerDid,
+requesterAgentDid, title, description, input }`. The parent directory must exist.
+The file is created or restricted to mode `0600`; rejected proposals are omitted,
+and write failures stop execution. Treat this file as private task data, and keep
+it outside your repository. This also works with the default sandbox echo worker.
+
+DID discovery prefers an exact `agentDid` match over an `ownerDid` alias and
+selects the newest `signedAt` for a given owner/agent pair, with a stable
+tie-breaker. Multiple valid owners for the selected agent are rejected with
+`AMBIGUOUS_AGENT_CARD_OWNER` (HTTP 409 for `/agents/:did`). Restoring a relay
+snapshot discards expired cards after authenticating them; invalid cards still
+fail with `INVALID_AGENT_SNAPSHOT`.
+
 `--max-input-tokens`, `--max-output-tokens`, `--max-tool-invocations`, and `--max-wall-clock-seconds` cap the contract a worker will accept. A proposal above any set cap is rejected before `ACCEPT`, including with `--auto-accept`. `timeoutSeconds` on the manifest is compared with `--max-wall-clock-seconds`. `--max-concurrent-tasks` limits in-flight tasks (default 8). `--max-requests-per-minute` limits proposals from one requester DID.
 
 `--allow-requester <did>` is repeatable and also accepts a comma-separated list. `--allow-any-requester` opts in to every requester. For `--adapter claude`, `codex`, or `openai`, `--auto-accept` (and the `--auto-approve` / `--yes` aliases) refuses to start unless one of those allow flags is present, so a discovered worker cannot spend the owner API key for arbitrary callers. The sandbox example above does not need an allowlist.
