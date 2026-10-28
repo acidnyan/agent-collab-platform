@@ -367,6 +367,19 @@ acp delegate --key requester.private.json --relay https://acp-relay.agent-collab
 ```
 
 `--open` aliases `--access-mode open`. Publishing still requires `--publish`.
+Open workers can advertise signed budget ceilings with `--open-max-input-tokens`,
+`--open-max-output-tokens`, `--open-max-tool-calls`, and `--open-max-wall-seconds`.
+Each accepts a positive safe integer and requires open mode. The corresponding
+optional `WorkerNodeOptions.openPolicy` / `AgentCard.openPolicy` fields are
+`maxInputTokens`, `maxOutputTokens`, `maxToolInvocations`, and `maxWallClockSeconds`.
+Workers reject proposals exceeding these ceilings before contract acceptance;
+stricter existing acceptance limits still apply. When discovering an open card,
+requesters cap only unspecified default budget fields, never increase defaults,
+and preserve explicit budgets and custom manifests for worker validation.
+Omitted policy fields impose no additional ceiling. Starting an open worker with
+`--yes` (or another automatic approval flag) and no requester allowlist prints
+an `[ACP WARNING]` line to stderr.
+
 Discovery also supports `--task-type <type>` and `--did <did>`; delegation
 supports `--task-type <type>` or the existing `--to <did>`. Skill selection
 uses only current, verified cards explicitly advertising `open`, with stable
