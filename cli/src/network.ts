@@ -180,6 +180,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       name: text(f, 'name', adapter.name),
       approvalProvider: approval(key, automatic, acceptance),
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
+      inboxPath: f.has('--inbox') ? text(f, 'inbox') : undefined,
       onEvent: (event, taskId) => console.error(JSON.stringify({ event, taskId })),
       ...acceptance,
       allowPrivateRelay,

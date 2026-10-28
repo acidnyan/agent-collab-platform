@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { mkdtemp, rm } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import {
+  existsSync, openSync, closeSync, fstatSync, fchmodSync, appendFileSync, constants,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -20,7 +22,7 @@ import {
   validateOutput,
   verifyCapabilityChain,
   capabilityIssuerControls,
-  verifySignedAgentCard,
+  findDiscoveredAgentCard,
   schemaNarrows,
   digest,
   openEnvelope,
@@ -237,32 +239,6 @@ function forwardToWorkerListener(did: string, envelope: SignedEnvelope): boolean
   }
   return false;
 }
-function findDiscoveredAgentCard(
-  rawCards: unknown,
-  targetDid: string,
-  now = Date.now(),
-): SignedAgentCard | undefined {
-  if (!Array.isArray(rawCards)) return undefined;
-  const matches = rawCards.filter(
-    (c): c is SignedAgentCard =>
-      verifySignedAgentCard(c, now) &&
-      (c.payload.agentDid === targetDid || c.payload.ownerDid === targetDid),
-  );
-  if (matches.length === 0) return undefined;
-  matches.sort((a, b) => {
-    const aSelf = a.payload.ownerDid === a.payload.agentDid ? 1 : 0;
-    const bSelf = b.payload.ownerDid === b.payload.agentDid ? 1 : 0;
-    if (aSelf !== bSelf) return bSelf - aSelf;
-    const aAgent = a.payload.agentDid === targetDid ? 1 : 0;
-    const bAgent = b.payload.agentDid === targetDid ? 1 : 0;
-    if (aAgent !== bAgent) return bAgent - aAgent;
-    const aSigned = Date.parse(a.signature.signedAt);
-    const bSigned = Date.parse(b.signature.signedAt);
-    if (aSigned !== bSigned) return bSigned - aSigned;
-    return Date.parse(b.payload.expiresAt) - Date.parse(a.payload.expiresAt);
-  });
-  return matches[0];
-}
 /**
  * One reader for a recipient DID. Concurrent delegate() calls share this inbox
  * and only see envelopes for their own taskId.
@@ -374,6 +350,8 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   agentKey?: KeyPair;
   approvalProvider?: ApprovalProvider;
   auditPath?: string;
+  /** Append accepted, decrypted task messages as private JSONL before execution. */
+  inboxPath?: string;
   timeoutMs?: number;
   tools?: Record<string, ToolDefinition>;
   toolBackend?: ToolBackend;
@@ -708,7 +686,7 @@ export class WorkerNode {
     )
       throw new Error('INVALID_PROPOSAL');
     const auditPath = this.options.auditPath
-      ? this.completed++ === 0
+      ? this.completed++ === 0 && !existsSync(this.options.auditPath)
         ? this.options.auditPath
         : this.options.auditPath.replace(/(?:\.jsonl)?$/, '.' + m.taskId + '.jsonl')
       : undefined;
@@ -769,6 +747,32 @@ export class WorkerNode {
       });
       gateway = new OwnerGateway(this.options.owner, contract, policy, this.revocation);
       const accepted = gateway.accept(approval);
+      if (this.options.inboxPath) {
+        const fd = openSync(
+          this.options.inboxPath,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND |
+            constants.O_NOFOLLOW | constants.O_NONBLOCK,
+          0o600,
+        );
+        try {
+          if (!fstatSync(fd).isFile()) throw new Error('INVALID_INBOX_FILE');
+          fchmodSync(fd, 0o600);
+          appendFileSync(
+            fd,
+            JSON.stringify({
+              receivedAt: new Date().toISOString(),
+              taskId: m.taskId,
+              requesterOwnerDid: m.requester.ownerDid,
+              requesterAgentDid: m.requester.agentDid,
+              title: m.task.title,
+              description: m.task.description,
+              input: data.input,
+            }) + '\n',
+          );
+        } finally {
+          closeSync(fd);
+        }
+      }
       await wire.sendEvent('ACCEPT', { contract, transition: accepted, approval });
       this.options.onEvent?.('ACCEPT', m.taskId);
       await wire.sendEvent('START', gateway.transition('START'));
@@ -1954,7 +1958,8 @@ async function canonicalizeDiscoveredWorkers(
           const card = findDiscoveredAgentCard(cards, target.workerDid, now);
           if (card) target.workerDid = card.payload.agentDid;
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof Error && error.message === 'AMBIGUOUS_AGENT_CARD_OWNER') throw error;
         // Discovery only collapses aliases. Settlement still checks the signed manifest.
       }
     }),
