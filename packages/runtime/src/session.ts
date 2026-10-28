@@ -19,6 +19,7 @@ import {
   validateManifest,
   validateOutput,
   verifyCapabilityChain,
+  capabilityIssuerControls,
   verifySignedAgentCard,
   schemaNarrows,
   digest,
@@ -41,6 +42,7 @@ import type {
   TaskContract,
   Transition,
   CapabilityToken,
+  CapabilityContext,
   BudgetSpec,
   RevocationList,
   Invite,
@@ -112,9 +114,7 @@ function validateAcceptance(acceptance: WorkerAcceptancePolicy): void {
       rate.windowMs < 1)
   )
     throw new Error('INVALID_REQUESTER_RATE_LIMIT');
-  if (
-    acceptance.allowedRequesterDids?.some((did) => typeof did !== 'string' || did.trim() === '')
-  )
+  if (acceptance.allowedRequesterDids?.some((did) => typeof did !== 'string' || did.trim() === ''))
     throw new Error('INVALID_REQUESTER_DID');
 }
 function transport(
@@ -293,6 +293,24 @@ class CompositeRevocation implements RevocationList {
   assertNotRevoked(targetType: 'invite' | 'capability', targetId: string): void {
     for (const layer of this.layers) layer.assertNotRevoked(targetType, targetId);
   }
+  noticesFor(targetType: 'invite' | 'capability', targetId: string): SignedRevocationNotice[] {
+    const notices: SignedRevocationNotice[] = [];
+    for (const layer of this.layers) {
+      if (typeof layer.noticesFor !== 'function') continue;
+      notices.push(...layer.noticesFor(targetType, targetId));
+    }
+    return notices;
+  }
+  /** A layer that cannot show issuers and still reports the id revoked. */
+  unexplainedRevocation(targetType: 'invite' | 'capability', targetId: string): boolean {
+    return this.layers.some(
+      (layer) => typeof layer.noticesFor !== 'function' && layer.isRevoked(targetType, targetId),
+    );
+  }
+}
+interface VerifiedCapabilityChain {
+  chain: CapabilityToken[];
+  context: CapabilityContext;
 }
 function asRevocationRegistry(list: RevocationList | undefined): RevocationRegistry | undefined {
   if (!list) return undefined;
@@ -314,10 +332,10 @@ export class WorkerNode {
   lastResult?: SessionResult;
   /** Notices learned from the relay inbox. Always present, even without options.revocation. */
   private readonly inboxRevocations = new RevocationRegistry();
-  /** Capability notices whose issuer is not yet matched to a presented token. */
+  /** Capability notices whose issuer is not yet matched to a verified chain. */
   private readonly pendingCapabilities = new Map<string, SignedRevocationNotice[]>();
-  /** Chains of tasks that have passed pre-acceptance, so a later REVOKE can hit callTool. */
-  private readonly liveChains = new Map<string, CapabilityToken[][]>();
+  /** Chains that passed verifyCapabilityChain, so a later REVOKE can hit callTool. */
+  private readonly liveChains = new Map<string, VerifiedCapabilityChain[]>();
   /** Inbox registry composed with options.revocation when the caller passed one. */
   readonly revocation: RevocationList;
   constructor(readonly options: WorkerNodeOptions) {
@@ -461,17 +479,13 @@ export class WorkerNode {
     once: boolean,
   ): Promise<void> | undefined {
     const verified = verifyEnvelope(first, this.options.owner.did);
-    const proposal =
-      verified && first.payload.eventType === 'PROPOSE' && first.payload.seq === 0;
+    const proposal = verified && first.payload.eventType === 'PROPOSE' && first.payload.seq === 0;
     if (!proposal) {
       // A rejected proposal is answered with ERROR, and the requester echoes ERROR.
       // That trailing frame must not be treated as the next task, including after
       // a --once worker restarts and reads the relay queue again. Unsigned or
       // non-zero PROPOSE frames still fail a one-shot session immediately.
-      if (
-        once &&
-        (!verified || (first.payload.eventType === 'PROPOSE' && first.payload.seq !== 0))
-      )
+      if (once && (!verified || (first.payload.eventType === 'PROPOSE' && first.payload.seq !== 0)))
         throw new Error('INVALID_PROPOSAL_ENVELOPE');
       this.options.onEvent?.('REJECTED', '');
       return;
@@ -486,12 +500,7 @@ export class WorkerNode {
     }
     const mailbox = new TaskMailbox();
     this.mailboxes.set(first.payload.taskId, mailbox);
-    const job = this.executeTask(
-      first,
-      idleSignal,
-      mailboxRelay(this.relay, mailbox),
-      rejection,
-    )
+    const job = this.executeTask(first, idleSignal, mailboxRelay(this.relay, mailbox), rejection)
       .then((result) => {
         this.lastResult = result;
       })
@@ -560,10 +569,10 @@ export class WorkerNode {
       throw new Error('INVALID_PROPOSAL_ENVELOPE');
     // PROPOSE arrives before the session wire is constructed. Open it with the same rule.
     const data = openEnvelope(
-      first,
-      this.options.owner,
-      sessionDecryptOptions(this.options.allowUnencryptedEnvelopes),
-    ) as unknown as Proposal,
+        first,
+        this.options.owner,
+        sessionDecryptOptions(this.options.allowUnencryptedEnvelopes),
+      ) as unknown as Proposal,
       m = data.proposal?.payload;
     if (!m || first.payload.senderDid !== m.requester.ownerDid || first.payload.taskId !== m.taskId)
       throw new Error('INVALID_PROPOSAL');
@@ -606,8 +615,13 @@ export class WorkerNode {
     try {
       await wire.receiveEvent('PROPOSE', first);
       this.assertInviteActive(data);
-      this.assertCapabilitiesActive(data.capabilityChains);
-      this.rememberChains(m.taskId, data.capabilityChains);
+      const capabilityContext: CapabilityContext = {
+        rootDid: m.requester.ownerDid,
+        audience: this.options.owner.did,
+        taskId: m.taskId,
+      };
+      this.assertCapabilitiesActive(data.capabilityChains, capabilityContext);
+      this.rememberChains(m.taskId, data.capabilityChains, capabilityContext);
       trackedTaskId = m.taskId;
       const decision = evaluateContractAcceptance(
         this.acceptance,
@@ -933,7 +947,8 @@ export class WorkerNode {
       return;
     }
     if (notice.payload.targetType !== 'capability') return;
-    const live = [...this.liveChains.values()];
+    // Only a chain that still verifies can promote a notice into the registry.
+    const live = this.verifiedLiveEntries();
     if (this.capabilityNoticeAuthorized(notice, live)) {
       this.recordNotice(notice);
       return;
@@ -943,13 +958,13 @@ export class WorkerNode {
     this.pendingCapabilities.set(notice.payload.targetId, pending);
   }
   private recordNotice(notice: SignedRevocationNotice): void {
-    if (!this.inboxRevocations.isRevoked(notice.payload.targetType, notice.payload.targetId))
-      this.inboxRevocations.revoke(notice);
+    // Append even when another issuer already revoked this id. Replacing that
+    // notice would let a colliding token erase a real issuer's revocation.
+    this.inboxRevocations.revoke(notice);
     const external = asRevocationRegistry(this.options.revocation);
     if (!external || external === this.inboxRevocations) return;
     try {
-      if (!external.isRevoked(notice.payload.targetType, notice.payload.targetId))
-        external.revoke(notice);
+      external.revoke(notice);
     } catch {
       // The caller registry can refuse a notice. The inbox copy still applies.
     }
@@ -979,59 +994,142 @@ export class WorkerNode {
     }
   }
   /**
-   * Before ACCEPT, every capability id is checked against the registry.
-   * A notice applies only when its issuer issued that token or an ancestor
-   * in the same chain (the delegator).
+   * Before ACCEPT, every verified capability chain is checked against revocation
+   * notices. A notice is stored and applied only when its issuer signed that
+   * token or an ancestor in a chain that has passed verifyCapabilityChain.
+   * An unverified chain, including one whose payload.issuer was rewritten,
+   * cannot promote a pending notice into the registry.
    */
-  private assertCapabilitiesActive(chains: unknown): void {
-    if (!Array.isArray(chains)) return;
-    const typed = chains.filter((chain): chain is CapabilityToken[] => Array.isArray(chain));
+  private assertCapabilitiesActive(chains: unknown, context: CapabilityContext): void {
+    const verified = this.verifiedEntries(chains, context);
+    this.promotePending(verified);
+    for (const entry of verified) {
+      if (this.verifiedChainRevoked(entry.chain)) throw new Error('TOKEN_REVOKED');
+    }
+  }
+  private verifiedEntries(chains: unknown, context: CapabilityContext): VerifiedCapabilityChain[] {
+    if (!Array.isArray(chains)) return [];
+    const entries: VerifiedCapabilityChain[] = [];
+    for (const chain of chains) {
+      if (!Array.isArray(chain)) continue;
+      try {
+        verifyCapabilityChain(chain, context);
+      } catch {
+        // Signature, linkage, or root failures must not authorize a revocation.
+        continue;
+      }
+      entries.push({ chain, context: { ...context } });
+    }
+    return entries;
+  }
+  private promotePending(entries: VerifiedCapabilityChain[]): void {
     for (const [targetId, notices] of [...this.pendingCapabilities.entries()]) {
       const keep: SignedRevocationNotice[] = [];
       for (const notice of notices) {
-        if (this.capabilityNoticeAuthorized(notice, [typed])) this.recordNotice(notice);
+        if (this.capabilityNoticeAuthorized(notice, entries)) this.recordNotice(notice);
         else keep.push(notice);
       }
       if (keep.length === 0) this.pendingCapabilities.delete(targetId);
       else this.pendingCapabilities.set(targetId, keep);
     }
-    for (const chain of typed) {
-      for (const token of chain) {
-        const tokenId = token?.payload?.id;
-        const issuerDid = token?.payload?.issuer;
-        if (typeof tokenId !== 'string' || tokenId.length === 0) continue;
-        if (typeof issuerDid !== 'string' || issuerDid.length === 0) continue;
-        this.revocation.assertNotRevoked('capability', tokenId);
+  }
+  private verifiedChainRevoked(chain: CapabilityToken[]): boolean {
+    for (let index = 0; index < chain.length; index++) {
+      const token = chain[index];
+      if (!token?.payload) continue;
+      const targetIds = [token.payload.id];
+      try {
+        targetIds.push(digest(token));
+      } catch {
+        // An unhashable token is not a revocation target.
+      }
+      for (const targetId of targetIds) {
+        if (typeof targetId !== 'string' || targetId.length === 0) continue;
+        if (this.capabilityTargetRevoked(chain, index, targetId)) return true;
+      }
+    }
+    return false;
+  }
+  /**
+   * Pending and stored notices apply only when their issuer controls this
+   * verified token. A bare target-id hit from another issuer does not.
+   */
+  private capabilityTargetRevoked(
+    chain: CapabilityToken[],
+    index: number,
+    targetId: string,
+  ): boolean {
+    const pending = this.pendingCapabilities.get(targetId) ?? [];
+    if (pending.some((notice) => capabilityIssuerControls(chain, index, notice.payload.issuerDid)))
+      return true;
+    const listed = [
+      ...this.listedNotices(this.inboxRevocations, targetId),
+      ...this.listedNotices(this.options.revocation, targetId),
+    ];
+    if (listed.some((notice) => capabilityIssuerControls(chain, index, notice.payload.issuerDid)))
+      return true;
+    const external = this.options.revocation;
+    if (
+      external &&
+      typeof external.noticesFor !== 'function' &&
+      external.isRevoked('capability', targetId)
+    )
+      return true;
+    return false;
+  }
+  private listedNotices(
+    list: RevocationList | undefined,
+    targetId: string,
+  ): SignedRevocationNotice[] {
+    if (!list || typeof list.noticesFor !== 'function') return [];
+    return list.noticesFor('capability', targetId);
+  }
+  private rememberChains(taskId: string, chains: unknown, context: CapabilityContext): void {
+    const stored: VerifiedCapabilityChain[] = [];
+    if (Array.isArray(chains)) {
+      for (const chain of chains) {
+        if (!Array.isArray(chain)) continue;
         try {
-          this.revocation.assertNotRevoked('capability', digest(token));
-        } catch (error) {
-          if (error instanceof Error && error.message === 'TOKEN_REVOKED') throw error;
+          verifyCapabilityChain(chain, context);
+        } catch {
+          continue;
+        }
+        stored.push({
+          chain: chain.map((token) => structuredClone(token)),
+          context: { ...context },
+        });
+      }
+    }
+    this.liveChains.set(taskId, stored);
+  }
+  private verifiedLiveEntries(): VerifiedCapabilityChain[] {
+    const entries: VerifiedCapabilityChain[] = [];
+    for (const group of this.liveChains.values()) {
+      for (const entry of group) {
+        try {
+          verifyCapabilityChain(entry.chain, entry.context);
+          entries.push(entry);
+        } catch {
+          // A chain that no longer verifies cannot authorize a revocation.
         }
       }
     }
-  }
-  private rememberChains(taskId: string, chains: unknown): void {
-    if (!Array.isArray(chains)) {
-      this.liveChains.set(taskId, []);
-      return;
-    }
-    this.liveChains.set(
-      taskId,
-      chains.filter((chain): chain is CapabilityToken[] => Array.isArray(chain)),
-    );
+    return entries;
   }
   private capabilityNoticeAuthorized(
     notice: SignedRevocationNotice,
-    groups: CapabilityToken[][][],
+    entries: VerifiedCapabilityChain[],
   ): boolean {
-    for (const chains of groups) {
-      for (const chain of chains) {
-        if (!Array.isArray(chain)) continue;
-        for (let index = 0; index < chain.length; index++) {
-          const token = chain[index];
-          if (!this.sameCapabilityTarget(token, notice.payload.targetId)) continue;
-          if (this.issuerControlsToken(chain, index, notice.payload.issuerDid)) return true;
-        }
+    if (notice.payload.targetType !== 'capability') return false;
+    for (const entry of entries) {
+      try {
+        verifyCapabilityChain(entry.chain, entry.context);
+      } catch {
+        continue;
+      }
+      for (let index = 0; index < entry.chain.length; index++) {
+        if (!this.sameCapabilityTarget(entry.chain[index], notice.payload.targetId)) continue;
+        if (capabilityIssuerControls(entry.chain, index, notice.payload.issuerDid)) return true;
       }
     }
     return false;
@@ -1044,12 +1142,6 @@ export class WorkerNode {
     } catch {
       return false;
     }
-  }
-  private issuerControlsToken(chain: CapabilityToken[], index: number, issuerDid: string): boolean {
-    for (let i = 0; i <= index && i < chain.length; i++) {
-      if (chain[i]?.payload?.issuer === issuerDid) return true;
-    }
-    return false;
   }
 }
 interface CancelPayload {
