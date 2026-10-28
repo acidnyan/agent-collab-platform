@@ -686,7 +686,7 @@ export class WorkerNode {
     )
       throw new Error('INVALID_PROPOSAL');
     const auditPath = this.options.auditPath
-      ? this.completed++ === 0
+      ? this.completed++ === 0 && !existsSync(this.options.auditPath)
         ? this.options.auditPath
         : this.options.auditPath.replace(/(?:\.jsonl)?$/, '.' + m.taskId + '.jsonl')
       : undefined;
