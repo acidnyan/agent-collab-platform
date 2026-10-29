@@ -18,6 +18,7 @@ import {
   SandboxAgentAdapter,
 } from '@acp/adapters';
 import { createReceiveHook } from './receive-hook.js';
+import { contactsPath, loadContacts, contactsApproval, addContact } from './contacts.js';
 const REPEATABLE = new Set(['--allow-requester', '--open-allow-task-type']);
 const LLM_ADAPTERS = new Set(['claude', 'codex', 'openai']);
 function flags(args: string[]): Map<string, string | true> {
@@ -167,6 +168,12 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     if (onInboxRecord && !f.has('--inbox')) throw new Error('--on-receive requires --inbox');
     const adapterName = text(f, 'adapter', 'sandbox');
     const acceptance = workerAcceptance(f);
+    const contactFile = f.has('--contacts') ? text(f, 'contacts') : contactsPath();
+    const explicitAcceptance = { ...acceptance };
+    acceptance.allowedRequesterDids = [...new Set([
+      ...(acceptance.allowedRequesterDids ?? []),
+      ...loadContacts(contactFile, key.did).filter(c => c.allow && !c.revoked).map(c => c.ownerDid),
+    ])];
     const rateLimit = openRateLimit(f);
     const allowedTaskTypes = f.has('--open-allow-task-type')
       ? [...new Set(text(f, 'open-allow-task-type').split(',').map((value) => value.trim()))]
@@ -233,7 +240,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       relayUrl: text(f, 'relay'),
       adapter,
       name: text(f, 'name', adapter.name),
-      approvalProvider: approval(key, automatic, acceptance),
+      approvalProvider: contactsApproval(contactFile, key, automatic, explicitAcceptance, approval(key, false)),
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
       inboxPath: f.has('--inbox') ? text(f, 'inbox') : undefined,
       onInboxRecord,
@@ -257,6 +264,10 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     return;
   }
   if (command === 'delegate') {
+    if (f.has('--save-contact')) addContact(
+      f.has('--contacts') ? text(f, 'contacts') : contactsPath(), key, text(f, 'to'),
+      text(f, 'save-contact'), allowPrivateRelay,
+    );
     let outputSchema: Schema = {};
     if (f.has('--output-schema')) {
       const value = text(f, 'output-schema');
