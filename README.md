@@ -367,6 +367,17 @@ acp delegate --key requester.private.json --relay https://acp-relay.agent-collab
 ```
 
 `--open` aliases `--access-mode open`. Publishing still requires `--publish`.
+`--open-allow-task-type <types>` accepts comma-separated or repeated task types,
+trims whitespace, removes duplicates, and advertises the list on every worker
+skill. Empty entries are invalid. An explicit `--task-type` must belong to this
+list. Non-matching proposal task types receive `TASK_SCOPE_REJECTED` with
+structured `detail`; direct delegation omitting both skill and task type retains
+its existing compatibility behavior.
+`--open-rate-limit-per-did <count/window>` accepts a positive safe integer alone
+(per minute), or `/m`, `/min`, or `/60s`, for example `10/min`. Other windows and
+invalid counts fail with `INVALID_OPEN_RATE_LIMIT_PER_DID`. It configures
+`maxTasksPerRequesterPerMinute`; when `--max-requests-per-minute` is also set,
+the stricter limit wins. Both new options require open mode.
 Open workers can advertise signed budget ceilings with `--open-max-input-tokens`,
 `--open-max-output-tokens`, `--open-max-tool-calls`, and `--open-max-wall-seconds`.
 Each accepts a positive safe integer and requires open mode. The corresponding

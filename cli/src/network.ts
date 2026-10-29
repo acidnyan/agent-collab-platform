@@ -18,7 +18,7 @@ import {
   SandboxAgentAdapter,
 } from '@acp/adapters';
 import { createReceiveHook } from './receive-hook.js';
-const REPEATABLE = new Set(['--allow-requester']);
+const REPEATABLE = new Set(['--allow-requester', '--open-allow-task-type']);
 const LLM_ADAPTERS = new Set(['claude', 'codex', 'openai']);
 function flags(args: string[]): Map<string, string | true> {
   const out = new Map<string, string | true>();
@@ -26,10 +26,10 @@ function flags(args: string[]): Map<string, string | true> {
     const arg = args[i];
     if (!arg.startsWith('--')) throw new Error('Unexpected argument: ' + arg);
     const next = args[i + 1];
-    const value = next && !next.startsWith('--') ? args[++i] : true;
+    const value = next !== undefined && !next.startsWith('--') ? args[++i] : true;
     if (REPEATABLE.has(arg)) {
       if (typeof value !== 'string' || value.trim() === '')
-        throw new Error('Missing --allow-requester');
+        throw new Error('Missing ' + arg);
       const previous = out.get(arg);
       out.set(arg, (typeof previous === 'string' && previous ? previous + ',' : '') + value);
       continue;
@@ -86,6 +86,14 @@ function workerAcceptance(parsed: Map<string, string | true>): WorkerAcceptanceP
     maxTasksPerRequesterPerMinute: optionalCount(parsed, 'max-requests-per-minute'),
     publishToRegistry: parsed.has('--publish'),
   };
+}
+function openRateLimit(parsed: Map<string, string | true>): number | undefined {
+  const raw = parsed.get('--open-rate-limit-per-did');
+  if (raw === undefined) return undefined;
+  const match = typeof raw === 'string' ? /^([1-9]\d*)(?:\/(?:m|min|60s))?$/.exec(raw) : null;
+  if (!match || !Number.isSafeInteger(Number(match[1])))
+    throw new Error('INVALID_OPEN_RATE_LIMIT_PER_DID');
+  return Number(match[1]);
 }
 function assertLlmAutoAccept(
   adapter: string,
@@ -159,6 +167,19 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     if (onInboxRecord && !f.has('--inbox')) throw new Error('--on-receive requires --inbox');
     const adapterName = text(f, 'adapter', 'sandbox');
     const acceptance = workerAcceptance(f);
+    const rateLimit = openRateLimit(f);
+    const allowedTaskTypes = f.has('--open-allow-task-type')
+      ? [...new Set(text(f, 'open-allow-task-type').split(',').map((value) => value.trim()))]
+      : undefined;
+    if (allowedTaskTypes?.some((value) => !value))
+      throw new Error('INVALID_OPEN_ALLOW_TASK_TYPE');
+    if ((allowedTaskTypes || rateLimit !== undefined) && accessMode !== 'open')
+      throw new Error('OPEN_POLICY_REQUIRES_OPEN_MODE');
+    if (allowedTaskTypes && f.has('--task-type') && !allowedTaskTypes.includes(text(f, 'task-type')))
+      throw new Error('CONFLICTING_OPEN_TASK_TYPE');
+    if (rateLimit !== undefined)
+      acceptance.maxTasksPerRequesterPerMinute = Math.min(
+        acceptance.maxTasksPerRequesterPerMinute ?? rateLimit, rateLimit);
     const openPolicy: OpenPolicy = {};
     const openFlags = {
       maxInputTokens: 'open-max-input-tokens',
@@ -202,6 +223,8 @@ export async function networkCommand(command: string, args: string[]): Promise<v
         ...(f.has('--task-type') ? { taskTypes: [text(f, 'task-type')] } : {}),
       }];
     }
+    if (allowedTaskTypes)
+      adapter.skills = adapter.skills.map((skill) => ({ ...skill, taskTypes: allowedTaskTypes }));
     const worker = new WorkerNode({
       accessMode: accessMode as 'invite-only' | 'open',
       ...(Object.keys(openPolicy).length ? { openPolicy } : {}),
