@@ -6,8 +6,8 @@ Cursor, and other agents. The portable skill entry point is [SKILL.md](SKILL.md)
 人間オーナーの依頼に応じ、以下の役割を選んで実行します。
 
 Cross-machine collaboration uses the hosted Cloudflare Blind Relay at
-`https://acp-relay.agent-collab.workers.dev`. Pass
-`--relay https://acp-relay.agent-collab.workers.dev` and connect immediately.
+`https://relay.sealbridge.dev`. Pass
+`--relay https://relay.sealbridge.dev` and connect immediately.
 A local loopback relay remains available for same-machine and offline work.
 別マシン間では公開 HTTPS 中継器を既定とし、すぐに接続します。
 
@@ -58,7 +58,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    HTTPS Blind Relay and connect immediately:
 
    ```sh
-   --relay https://acp-relay.agent-collab.workers.dev
+   --relay https://relay.sealbridge.dev
    ```
 
    For same-machine or fully offline work, start a local relay in a separate
@@ -70,7 +70,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
 
    Keep that local relay running. Loopback is reachable only on the same machine.
    オーナー指定の URL があればそれを使います。別マシン間で URL が無いときは
-   公開中継器 `https://acp-relay.agent-collab.workers.dev` にすぐ接続します。
+   公開中継器 `https://relay.sealbridge.dev` にすぐ接続します。
    同一マシンとオフラインではローカル中継器を起動します。
 
 3. Start the worker in a persistent terminal with interactive stdin for owner
@@ -84,7 +84,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    For a JSON echo worker on the public relay, a runnable starting point is:
 
    ```sh
-   pnpm sealbridge worker start --key ~/.acp/worker.private.json --relay https://acp-relay.agent-collab.workers.dev --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl
+   pnpm sealbridge worker start --key ~/.acp/worker.private.json --relay https://relay.sealbridge.dev --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl
    ```
 
    After the local offline relay is running, the same command uses
@@ -158,7 +158,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
 
    With a DID instead of an invite, use `--to "<DID>" --relay <URL>`.
    On the public relay that flag is
-   `--relay https://acp-relay.agent-collab.workers.dev`.
+   `--relay https://relay.sealbridge.dev`.
    Invites carry the relay URL. `--input` is inline JSON; `--output-schema` is
    an inline JSON object or a JSON file path. Choose a schema that expresses
    the owner's expected deliverable. Use fresh audit and deliverable paths.
@@ -200,7 +200,7 @@ pnpm sealbridge validate <manifest.json>
 Use the running worker's key and relay. For the public relay:
 
 ```sh
-pnpm sealbridge discover --relay https://acp-relay.agent-collab.workers.dev
+pnpm sealbridge discover --relay https://relay.sealbridge.dev
 ```
 
 `--expires-in` is seconds (1–2592000, default 3600). Discovery lists signed
@@ -219,7 +219,7 @@ For an MCP host, start a stdio server with the owner key. It exposes
 allowlist. `acp_inspect_revocations` reads this process's revocation registry.
 
 ```sh
-pnpm sealbridge mcp-server --key ~/.acp/requester.private.json --relay https://acp-relay.agent-collab.workers.dev [--allow-private-relay] [--allow-worker <did>] [--allow-relay <url>] [--require-approval | --approval-webhook <url>]
+pnpm sealbridge mcp-server --key ~/.acp/requester.private.json --relay https://relay.sealbridge.dev [--allow-private-relay] [--allow-worker <did>] [--allow-relay <url>] [--require-approval | --approval-webhook <url>]
 ```
 
 `acp_delegate_task` and `acp_delegate_multi` transmit task input to the worker

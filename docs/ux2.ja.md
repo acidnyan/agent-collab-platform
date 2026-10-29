@@ -9,16 +9,16 @@ Sealbridge UX-2 は、ローカル招待 QR・リンク、署名付き
 ## 招待共有
 
 ```text
-sealbridge invite share --file invite.txt --host https://your-host.example/invite --png invite.png --svg invite.svg
+sealbridge invite share --file invite.txt --host https://sealbridge.app/i --png invite.png --svg invite.svg
 sealbridge invite open --file received-link.txt
 sealbridge invite open --file received-link.txt --save-contact "友人" --key recipient.private.json
 ```
 
 トークンは URL フラグメントに格納します。外部 QR サービスや HTTP 通信は使いません。
-公開 Web アプリは同梱しません。ホスト URL は運用者が指定し、ブラウザーから開く
-サービスを用意する場合は検証処理を実装してください。フラグメントをログに残したり、
-読み取れる第三者スクリプトを読み込まないでください。CLI では読み取ったリンクを
-ファイルに保存して `invite open` を実行します。
+`sites/` に sealbridge.app 向け静的受信ページを同梱します（公開は別作業）。
+ブラウザー内で既存の検証コードを使い、署名・期限・識別子の結合を確認します。
+フラグメントの送信やログ、第三者スクリプトは使用しません。
+CLI では完全なリンクをファイルに保存して `invite open --file` を実行します。
 
 署名、所有者・エージェント DID の結合、中継 URL、招待とカードの有効期限を再検証し、
 接続相手を表示します。連絡先保存は許可リスト登録や仕事の自動承認を伴いません。
@@ -95,8 +95,8 @@ claim は投稿 ID と署名済みカードを説明に含む通常の暗号化 
 [英語版の JSON 設定例](./ux2.md) を保存し、以下を実行します。
 
 ```text
-sealbridge worker public --settings public-settings.json --key worker.private.json --relay https://acp-relay.agent-collab.workers.dev --preview
-sealbridge worker public --settings public-settings.json --key worker.private.json --relay https://acp-relay.agent-collab.workers.dev --adapter sandbox
+sealbridge worker public --settings public-settings.json --key worker.private.json --relay https://relay.sealbridge.dev --preview
+sealbridge worker public --settings public-settings.json --key worker.private.json --relay https://relay.sealbridge.dev --adapter sandbox
 ```
 
 プレビューは通信・登録しません。公開設定は既存の `--open --publish`、種別は

@@ -2,7 +2,7 @@
 
 **English** | [日本語 (README.ja.md)](./README.ja.md)
 
-**Formerly ACP / agent-collab-platform.** Renamed to Sealbridge to avoid confusion with Zed’s Agent Client Protocol and IBM / BeeAI’s Agent Communication Protocol. Use `pnpm sealbridge` (or the `sealbridge` bin); `acp` remains a deprecated alias and prints one notice to stderr. Protocol identifiers, `acp-invite:` tokens, MCP tool names, existing data paths, repository and relay URLs remain unchanged.
+**Formerly ACP / agent-collab-platform.** Renamed to Sealbridge to avoid confusion with Zed’s Agent Client Protocol and IBM / BeeAI’s Agent Communication Protocol. Use `pnpm sealbridge` (or the `sealbridge` bin); `acp` remains a deprecated alias and prints one notice to stderr. Protocol identifiers, `acp-invite:` tokens, MCP tool names, existing data paths, the legacy repository URL and relay URL remain compatible.
 
 [Relay deadlines, retries, leases and acknowledgements](./docs/relay-reliability.md)
 
@@ -49,7 +49,7 @@ Or add **`sealbridge mcp-server`** directly to **Claude Desktop**, **Cursor**, *
         "--key",
         "/tmp/alice.private.json",
         "--relay",
-        "https://acp-relay.agent-collab.workers.dev"
+        "https://relay.sealbridge.dev"
       ]
     }
   }
@@ -105,7 +105,7 @@ Read AGENTS.md and SKILL.md before acting.
 Requires Node.js 22 and pnpm 10. From the repository root run:
 pnpm install --frozen-lockfile && pnpm build
 For cross-machine work, connect immediately with:
---relay https://acp-relay.agent-collab.workers.dev
+--relay https://relay.sealbridge.dev
 Use `pnpm sealbridge relay start --port 8787 --host 127.0.0.1` only for same-machine or offline work.
 Never print, log, or commit *.private.json, API keys, or .env.
 Ask me before using --auto-accept or --auto-approve.
@@ -124,10 +124,10 @@ pnpm build
 
 **Public relay (cross-machine default)**
 
-Cross-machine collaboration uses the hosted Cloudflare Blind Relay at `https://acp-relay.agent-collab.workers.dev`. Both owners connect immediately with `--relay https://acp-relay.agent-collab.workers.dev`. No Wrangler account, deploy, or inbound port is required; each owner connects outbound.
+Cross-machine collaboration uses the hosted Cloudflare Blind Relay at `https://relay.sealbridge.dev`. Both owners connect immediately with `--relay https://relay.sealbridge.dev`. No Wrangler account, deploy, or inbound port is required; each owner connects outbound.
 
 ```sh
---relay https://acp-relay.agent-collab.workers.dev
+--relay https://relay.sealbridge.dev
 ```
 
 The public relay is untrusted transport. Session payloads are encrypted to the recipient `did:key`, so the relay stores ciphertext while routing metadata stays visible. `decryptEnvelopePayload`, `WorkerNode`, `RequesterClient`, and `VerificationEngine` require encrypted envelopes (`requireEncrypted: true`) by default. A cleartext session envelope is rejected with `UNENCRYPTED_ENVELOPE_REJECTED`. `{ requireEncrypted: false }` and `allowUnencryptedEnvelopes: true` open cleartext only when a caller sets them explicitly, for a legacy in-memory fixture. To run your own relay, copy `packages/relay/wrangler.toml.example` to `packages/relay/wrangler.toml` and deploy it with your Wrangler account. The worker shards each recipient inbox onto its own Durable Object (`inbox:<recipientDid>`) and keeps agent cards on a separate `registry` object.
@@ -153,7 +153,7 @@ Same-machine and offline sessions use a loopback relay:
 pnpm sealbridge relay start --port 8787 --host 127.0.0.1
 ```
 
-Then pass `--relay http://127.0.0.1:8787` in the terminals below. Loopback is reachable only on this machine. For cross-machine runs, replace that URL with `https://acp-relay.agent-collab.workers.dev`.
+Then pass `--relay http://127.0.0.1:8787` in the terminals below. Loopback is reachable only on this machine. For cross-machine runs, replace that URL with `https://relay.sealbridge.dev`.
 
 **Terminal 2 — Bob, the worker**
 
@@ -237,7 +237,7 @@ Session payloads use ephemeral X25519, HKDF-SHA256, and AES-256-GCM, with the he
 ## MCP, live progress, revocation, and quorum
 
 ```sh
-pnpm sealbridge mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agent-collab.workers.dev
+pnpm sealbridge mcp-server --key /tmp/alice.private.json --relay https://relay.sealbridge.dev
 ```
 
 `sealbridge mcp-server` is a dependency-free JSON-RPC 2.0 MCP server on stdio. It accepts newline-delimited JSON and `Content-Length` frames. Hosts such as Claude Code, Cursor, Codex, and Grok Bot can call:
@@ -259,8 +259,8 @@ pnpm sealbridge mcp-server --key /tmp/alice.private.json --relay https://acp-rel
 ```sh
 pnpm sealbridge mcp-server \
   --key /tmp/alice.private.json \
-  --relay https://acp-relay.agent-collab.workers.dev \
-  --allow-relay https://acp-relay.agent-collab.workers.dev \
+  --relay https://relay.sealbridge.dev \
+  --allow-relay https://relay.sealbridge.dev \
   --allow-worker did:key:z... \
   --approval-webhook https://approvals.example/acp
 ```
@@ -356,7 +356,7 @@ Read the [demo walkthrough](examples/two-owner-demo/README.md), [wire rules](spe
 
 - **Author**: [@takapon01234](https://x.com/takapon01234) on X (Twitter)
 - **Repository**: [acidnyan/agent-collab-platform](https://github.com/acidnyan/agent-collab-platform)
-- **Public Blind Relay**: `https://acp-relay.agent-collab.workers.dev`
+- **Public Blind Relay**: `https://relay.sealbridge.dev`
 
 ### Invite-less open task collaboration
 
@@ -369,9 +369,9 @@ invite requirement in this mode.
 To advertise availability for invite-less tasks:
 
 ```sh
-sealbridge worker start --key worker.private.json --relay https://acp-relay.agent-collab.workers.dev --adapter sandbox --access-mode open --publish --skill json-task --task-type json
-sealbridge discover --relay https://acp-relay.agent-collab.workers.dev --skill json-task
-sealbridge delegate --key requester.private.json --relay https://acp-relay.agent-collab.workers.dev --discover json-task --title Echo --description Echo --input '{"hello":"world"}'
+sealbridge worker start --key worker.private.json --relay https://relay.sealbridge.dev --adapter sandbox --access-mode open --publish --skill json-task --task-type json
+sealbridge discover --relay https://relay.sealbridge.dev --skill json-task
+sealbridge delegate --key requester.private.json --relay https://relay.sealbridge.dev --discover json-task --title Echo --description Echo --input '{"hello":"world"}'
 ```
 
 `--open` aliases `--access-mode open`. Publishing still requires `--publish`.
@@ -437,3 +437,9 @@ rejections retain their task IDs; trailing ERROR frames do not create empty-ID e
 Capability signatures and task bindings are also verified before `ACCEPT`.
 `conformance/open-task-adversarial-security.test.ts` covers admission bypass,
 card spoofing, scope and budget escalation, cross-task replay, and envelope tampering.
+
+## Official sites and relay URL
+
+The official site targets https://sealbridge.dev and the invite receiver targets `https://sealbridge.app/i#<invite>`. See [site operations](docs/sites.md) for source, build and deployment instructions. Adding these files does not deploy either site.
+
+Use `https://relay.sealbridge.dev` as the recommended relay. The legacy `https://acp-relay.agent-collab.workers.dev` continues to work against the same relay. Existing signed invitations remain usable; do not edit their relay field. Update MCP relay allowlists when switching hosts.
