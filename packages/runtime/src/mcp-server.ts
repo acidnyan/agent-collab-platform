@@ -87,13 +87,13 @@ class RpcError extends Error {
 }
 
 const PROTOCOL_VERSION = '2024-11-05';
-const OUTBOUND_REASON = 'outbound delegation to a remote ACP worker';
+const OUTBOUND_REASON = 'outbound delegation to a remote Sealbridge worker';
 /**
  * Guidance MCP clients place ahead of the tool catalog. Keep the workflow,
  * the sibling-tool split, and the outbound security boundary in this text.
  */
 const SERVER_INSTRUCTIONS =
-  "This server delegates JSON tasks to remote ACP workers over an encrypted Blind Relay and checks the bilateral audit trail. Call acp_discover_workers or start from an acp-invite, mint one with acp_create_invite when you are the worker owner, then use acp_delegate_task for one worker or acp_delegate_multi for race or quorum. Use acp_verify_audit_bundle with an anchor or expected tail fields when truncation must be ruled out, and use acp_revoke_token with acp_inspect_revocations to record and read local invite or capability revocation. Delegation signs with this process's Ed25519 owner key, and task input is transmitted externally only after allowedWorkerDids, allowedRelayUrls, and the approval provider or webhook allow the dial. Verify and inspect stay on this machine, discover only reads a relay directory, and revoke does not push a notice to a worker. Do not put secrets in arguments: delegation is synchronous and returns the verified result in that same call.";
+  "This server delegates JSON tasks to remote Sealbridge workers over an encrypted Blind Relay and checks the bilateral audit trail. Call acp_discover_workers or start from an acp-invite, mint one with acp_create_invite when you are the worker owner, then use acp_delegate_task for one worker or acp_delegate_multi for race or quorum. Use acp_verify_audit_bundle with an anchor or expected tail fields when truncation must be ruled out, and use acp_revoke_token with acp_inspect_revocations to record and read local invite or capability revocation. Delegation signs with this process's Ed25519 owner key, and task input is transmitted externally only after allowedWorkerDids, allowedRelayUrls, and the approval provider or webhook allow the dial. Verify and inspect stay on this machine, discover only reads a relay directory, and revoke does not push a notice to a worker. Do not put secrets in arguments: delegation is synchronous and returns the verified result in that same call.";
 
 function rpcError(id: unknown, code: number, message: string): Json {
   return { jsonrpc: '2.0', id: (id ?? null) as Json, error: { code, message } };
@@ -275,7 +275,7 @@ export class AcpMcpServer {
       return {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'acp-mcp-server', version: '0.1.0' },
+        serverInfo: { name: 'sealbridge-mcp-server', version: '0.1.0' },
         instructions: SERVER_INSTRUCTIONS,
       };
     }
@@ -557,7 +557,7 @@ export class AcpMcpServer {
     const agentDid = typeof args.agentDid === 'string' ? args.agentDid : this.options.owner.did;
     const card = createSignedAgentCard(
       {
-        name: typeof args.name === 'string' ? args.name : (this.options.name ?? 'ACP Worker'),
+        name: typeof args.name === 'string' ? args.name : (this.options.name ?? 'Sealbridge Worker'),
         agentDid,
         relayEndpoint: args.relayUrl,
         skills: [{ id: 'json-task', name: 'JSON task' }],

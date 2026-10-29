@@ -155,7 +155,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
   if (command === 'invite') {
     const card = createSignedAgentCard(
       {
-        name: text(f, 'name', 'ACP Worker'),
+        name: text(f, 'name', 'Sealbridge Worker'),
         agentDid: key.did,
         relayEndpoint: text(f, 'relay'),
         skills: [{ id: 'json-task', name: 'JSON task' }],
@@ -275,7 +275,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     }
     if (acceptance.publishToRegistry) await worker.register();
     if (accessMode === 'open' && automatic && !acceptance.allowedRequesterDids?.length)
-      console.error(`[ACP WARNING] Worker started in --open mode with ${f.has('--yes') ? '--yes' : 'automatic approval'} and no requester allowlist. Any requester can submit tasks for automatic acceptance within configured limits.`);
+      console.error(`[Sealbridge WARNING] Worker started in --open mode with ${f.has('--yes') ? '--yes' : 'automatic approval'} and no requester allowlist. Any requester can submit tasks for automatic acceptance within configured limits.`);
     console.log(worker.invite());
     const stop = () => worker.stop();
     process.once('SIGINT', stop);

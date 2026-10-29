@@ -2,7 +2,7 @@
 
 **English** | [日本語](./ux1.ja.md)
 
-Agent Collaboration Platform (ACP) stores contacts locally and renders audit
+Sealbridge stores contacts locally and renders audit
 receipts without changing the relay or protocol. This implements the contacts
 and receipt subset of [UX_LAYER.md](../UX_LAYER.md); QR sharing, the job board,
 monetary caps and a graphical approval screen are outside this change.
@@ -10,11 +10,11 @@ monetary caps and a graphical approval screen are outside this change.
 ## Contacts
 
 ```sh
-acp contacts add <invite> --key owner.private.json --name "My collaborator"
-acp contacts list --key owner.private.json
-acp contacts allow <ownerDid> --key owner.private.json
-acp contacts revoke <ownerDid> --key owner.private.json
-acp contacts remove <ownerDid> --key owner.private.json
+sealbridge contacts add <invite> --key owner.private.json --name "My collaborator"
+sealbridge contacts list --key owner.private.json
+sealbridge contacts allow <ownerDid> --key owner.private.json
+sealbridge contacts revoke <ownerDid> --key owner.private.json
+sealbridge contacts remove <ownerDid> --key owner.private.json
 ```
 
 `add` verifies the invite and signed card before saving owner DID, agent DID,
@@ -55,8 +55,8 @@ Protect the user data directory and owner key with host access controls and back
 ## Receipts
 
 ```sh
-acp receipt audit.jsonl
-acp receipt audit.jsonl --out receipt --trust-anchor trusted-head.json
+sealbridge receipt audit.jsonl
+sealbridge receipt audit.jsonl --out receipt --trust-anchor trusted-head.json
 ```
 
 The first command writes `audit.jsonl.receipt.json` and

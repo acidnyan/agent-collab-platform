@@ -62,16 +62,16 @@ describe('root agent operating instructions', () => {
       expect(content).toContain('mkdir -p ~/.acp && chmod 700 ~/.acp');
       for (const role of ['worker', 'requester']) {
         expect(content).toContain(`if [ ! -e ~/.acp/${role}.private.json ]; then`);
-        expect(content).toContain(`pnpm acp keygen ~/.acp/${role}.private.json`);
+        expect(content).toContain(`pnpm sealbridge keygen ~/.acp/${role}.private.json`);
       }
       for (const command of [
-        'pnpm acp relay start --port 8787 --host 127.0.0.1',
-        'pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL>',
-        'pnpm acp delegate --key ~/.acp/requester.private.json --to "<acp-invite:...>"',
-        'pnpm acp audit-verify ~/.acp/audit-<taskId>.jsonl',
-        'pnpm acp invite create --key ~/.acp/worker.private.json --relay <URL>',
-        'pnpm acp discover --relay <URL>',
-        'pnpm acp validate <manifest.json>',
+        'pnpm sealbridge relay start --port 8787 --host 127.0.0.1',
+        'pnpm sealbridge worker start --key ~/.acp/worker.private.json --relay <URL>',
+        'pnpm sealbridge delegate --key ~/.acp/requester.private.json --to "<acp-invite:...>"',
+        'pnpm sealbridge audit-verify ~/.acp/audit-<taskId>.jsonl',
+        'pnpm sealbridge invite create --key ~/.acp/worker.private.json --relay <URL>',
+        'pnpm sealbridge discover --relay <URL>',
+        'pnpm sealbridge validate <manifest.json>',
       ])
         expect(content).toContain(command);
       expect(content).toContain(
@@ -103,8 +103,8 @@ describe('root agent operating instructions', () => {
     const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(skill);
     expect(frontmatter?.[1]).toBe(
       [
-        'name: agent-collab-platform',
-        "description: Autonomous cross-owner agent collaboration via Agent Collaboration Platform (ACP). Use when asked to act as an ACP Worker (wait for delegated tasks, issue acp-invite tokens), delegate a task to another owner's agent via an acp-invite token or DID over a Blind Relay, discover remote agents, or verify bilateral hash-chained audit logs.",
+        'name: sealbridge',
+        "description: Autonomous cross-owner agent collaboration via Sealbridge. Use when asked to act as a Sealbridge Worker (wait for delegated tasks, issue acp-invite tokens), delegate a task to another owner's agent via an acp-invite token or DID over a Blind Relay, discover remote agents, or verify bilateral hash-chained audit logs.",
       ].join('\n'),
     );
     const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');

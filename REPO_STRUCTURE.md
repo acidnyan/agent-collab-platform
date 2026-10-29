@@ -179,7 +179,7 @@ Prove, with running code and tests, that **agents belonging to two different own
    - Owner Bob's (worker) Gateway passes HITL (`ApprovalReceipt`), sends `ACCEPT`, and the `TaskContract` is formed.
    - Bob's agent uses a read-only `CapabilityToken` granted by Alice (`docs/read` only, at most five calls) to fetch the documents through Alice's Gateway MCP proxy.
    - Bob `DELIVER`s an artifact (JSON with a SHA-256 hash) and a `UsageReceipt` whose consumed tokens are inside the budget.
-   - Alice's Gateway checks `outputSchema` and the digest, moves `VERIFY_ACCEPT` to `SETTLED`, and `acp audit-verify` reports `VALID` for both audit logs.
+   - Alice's Gateway checks `outputSchema` and the digest, moves `VERIFY_ACCEPT` to `SETTLED`, and `sealbridge audit-verify` reports `VALID` for both audit logs.
 2. **Blocked attack 1 (Capability escalation)**:
    - The moment Bob (or an injected prompt) calls a forbidden `docs/delete` tool, or a sixth call past the cap, Alice's Gateway blocks it with `CAPABILITY_VIOLATION` and records the audit log.
 3. **Blocked attack 2 (automatic stop on budget overrun)**:
@@ -246,7 +246,7 @@ its sources and the package has its own declaration-producing build.
 
 New CLI commands: `relay start`, `worker start`, `delegate`, `discover`,
 `invite create`. Existing `keygen`, `validate`, `approve`, `audit-verify`, and
-`demo` retain their interfaces. `pnpm acp` runs the source CLI; `node
+`demo` retain their interfaces. `pnpm sealbridge` runs the source CLI; `node
 cli/dist/index.js` and the package binary run the compiled CLI.
 
 Cloudflare's default worker export is `packages/relay/src/worker.ts`; it routes

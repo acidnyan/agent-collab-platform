@@ -137,7 +137,7 @@ stateDiagram-v2
 
 招待と能力の失効は、タスク単位の `revokeTask` とは別です。`RevocationNotice` は Ed25519 の JCS 声明です。ワーカーは `ACCEPT` の前に招待トークンを検査します。`CapabilityGuard` はツール呼び出しの前に能力 ID とトークンダイジェストを検査し、`TOKEN_REVOKED` を投げます。
 
-`RequesterClient.delegateMulti` はワーカーごとに独立した契約を開きます。`race` は最初に検証を通過した成果物を採用します。`quorum` は検証済み出力を JCS SHA-256 でまとめ、`quorumSize` に達した時点で確定し、実行中のワーカーを取り消します。`acp mcp-server` はこれらの操作を stdio の MCP ツールとして公開します。
+`RequesterClient.delegateMulti` はワーカーごとに独立した契約を開きます。`race` は最初に検証を通過した成果物を採用します。`quorum` は検証済み出力を JCS SHA-256 でまとめ、`quorumSize` に達した時点で確定し、実行中のワーカーを取り消します。`sealbridge mcp-server` はこれらの操作を stdio の MCP ツールとして公開します。
 
 ---
 
@@ -317,13 +317,13 @@ sequenceDiagram
 
 ## M2/M3 実装プロファイル（WP-7〜WP-12）
 
-`WorkerNode` と `RequesterClient` は `@acp/runtime` の本番プロトコル調整器です。それぞれが1人のオーナーの鍵を持ち、リレーへ外向きに接続します。`PROPOSE → ACCEPT → START/IN_PROGRESS → DELIVER → VERIFY_ACCEPT → SETTLED` は M1 の署名付き契約状態機械を使います。すべてのアプリケーションイベントのあとに、行為者署名の監査本体と、相手が署名した AckReceipt が続きます。最終の署名付きチェックポイントはネットワーク越しに副署されます。どちらのプロセスも相手の鍵を持ちません。監査 JSONL は逐次書き込まれ、決済時に封印され、既存の `verifyAudit` / `acp audit-verify` で検査されます。中断されたログは未封印のままなので、完了した有効なバンドルと取り違えられません。
+`WorkerNode` と `RequesterClient` は `@acp/runtime` の本番プロトコル調整器です。それぞれが1人のオーナーの鍵を持ち、リレーへ外向きに接続します。`PROPOSE → ACCEPT → START/IN_PROGRESS → DELIVER → VERIFY_ACCEPT → SETTLED` は M1 の署名付き契約状態機械を使います。すべてのアプリケーションイベントのあとに、行為者署名の監査本体と、相手が署名した AckReceipt が続きます。最終の署名付きチェックポイントはネットワーク越しに副署されます。どちらのプロセスも相手の鍵を持ちません。監査 JSONL は逐次書き込まれ、決済時に封印され、既存の `verifyAudit` / `sealbridge audit-verify` で検査されます。中断されたログは未封印のままなので、完了した有効なバンドルと取り違えられません。
 
 `@acp/adapters` は `CommandAgentAdapter`、`ClaudeCodeAdapter`、`CodexCliAdapter`、`OpenAICompatibleAdapter`、`McpClientAdapter` と、便利ラッパー `SandboxAgentAdapter` を提供します。共有の `AgentAdapter` インターフェースは、依存の循環を避けるため runtime に置いています。タスクコンテキストには JSON、AbortSignal、使い捨て作業ディレクトリ、利用量の報告、保護されたツールコールバックが入ります。秘密鍵とオーナーの認証情報はそのコンテキストに入りません。コマンド実行器は環境変数の許可リストを使います。CLI プロバイダーの認証にはホストのループバック仲介を使え、本物の API 鍵は上流リクエストにだけ付きます。OpenAI / Anthropic の HTTP アダプタはホスト所有の fetch を行います。MCP SDK のトランスポートは MCPProxy で終わり、バックエンド実行の前に、マニフェストに束縛された Capability 連鎖、クォータ、署名付き副作用承認を強制します。
 
 オーナー承認は `InteractiveCliApprovalProvider`（ストリームベースの `[y/N]`）、`WebhookApprovalProvider`（署名付きリクエストと、対象に束縛され検証済みの ApprovalReceipt 応答）、または `PolicyAutoApprovalProvider` が供給します。契約の自動受諾と最終検収は、明示的な CLI の選択です。`--yes` もポリシー自動承認も、外部副作用や予算増額を認可しません。それらの操作には、プログラムからの明示的な確認済みゲートが必要です。検証器は、暗号・予算とスキーマ・隔離チェックが通ったあとでのみ、最終承認を取ります。未知の決定論的チェック対象は拒否します。
 
-Blind Relay は HTTP、上限付きロングポーリング、SSE、WebSocket のポーリングまたはライブ購読を提供します。外側の署名と形を検証し、キューと本体のサイズを制限し、エンベロープ ID の再生を防ぎ、署名付き AgentCard 登録を検証します。`/.well-known/agent.json` は、署名付き ACP 拡張を載せた A2A 形のカードを返します。`/agents` と `/agents/:did` は署名済みレコードを公開します。招待は、オーナー署名のカード、経路の識別子、リレー URL、有効期間を、対応するどちらかの URI 形式に埋め込みます。Gateway はメッセージ順序を独立に強制し、再生を拒否します。
+Blind Relay は HTTP、上限付きロングポーリング、SSE、WebSocket のポーリングまたはライブ購読を提供します。外側の署名と形を検証し、キューと本体のサイズを制限し、エンベロープ ID の再生を防ぎ、署名付き AgentCard 登録を検証します。`/.well-known/agent.json` は、署名付き Sealbridge 拡張を載せた A2A 形のカードを返します。`/agents` と `/agents/:did` は署名済みレコードを公開します。招待は、オーナー署名のカード、経路の識別子、リレー URL、有効期間を、対応するどちらかの URI 形式に埋め込みます。Gateway はメッセージ順序を独立に強制し、再生を拒否します。
 
 `createRelayFetchHandler` は Web の Request/Response ストリームと、ファイルシステムを持たないコア入口を使います。Cloudflare の入口は Node の crypto 互換と Durable Object バインディングを使い、キュー、レジストリ、再生状態を永続化します。バインディングが無いときのインメモリハンドラはローカル開発用で、isolate の退避でリセットされます。Node の `startLocalRelay` は同じ経路に加えて WebSocket を提供します。エッジ入口は HTTP / SSE / ロングポーリングを支え、Node が WebSocket アップグレードを提供します。
 

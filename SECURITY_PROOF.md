@@ -133,11 +133,11 @@ Threat class: a relay reads a `PROGRESS` message; a compromised worker returns a
 
 ## Audit log truncation
 
-Threat class: an operator treats `acp audit-verify` output of `VALID` as proof that the file is the latest log. An older, still-consistent bilateral bundle — a truncated prefix with its own checkpoint — verifies the same way. The hash chain cannot name the latest head by itself.
+Threat class: an operator treats `sealbridge audit-verify` output of `VALID` as proof that the file is the latest log. An older, still-consistent bilateral bundle — a truncated prefix with its own checkpoint — verifies the same way. The hash chain cannot name the latest head by itself.
 
 | Threat class | Architectural control | Adversarial test |
 | --- | --- | --- |
-| Tail truncation mistaken for the latest log | `verifyAudit` in `packages/ledger/src/index.ts` sets `statusLabel` to `VALID (no trust anchor: truncation not checked)`, with `trustAnchorVerified` and `truncationChecked` false, unless `expectedLastEntryHash`, `expectedEntryCount`, `expectedFinalState`, `head`, `taskId` / `actors`, or `trustAnchor` was supplied and matched. `acp audit-verify` accepts `--expect-final-state`, `--expect-last-hash`, and `--expect-entry-count` in addition to the positional trust-anchor file. `acp_verify_audit_bundle` accepts the same fields. A prefix that does not match is `INVALID`. | `conformance/p2-12-audit-verify-trust-anchor-notice.test.ts` (`pnpm test`) |
+| Tail truncation mistaken for the latest log | `verifyAudit` in `packages/ledger/src/index.ts` sets `statusLabel` to `VALID (no trust anchor: truncation not checked)`, with `trustAnchorVerified` and `truncationChecked` false, unless `expectedLastEntryHash`, `expectedEntryCount`, `expectedFinalState`, `head`, `taskId` / `actors`, or `trustAnchor` was supplied and matched. `sealbridge audit-verify` accepts `--expect-final-state`, `--expect-last-hash`, and `--expect-entry-count` in addition to the positional trust-anchor file. `acp_verify_audit_bundle` accepts the same fields. A prefix that does not match is `INVALID`. | `conformance/p2-12-audit-verify-trust-anchor-notice.test.ts` (`pnpm test`) |
 
 This check is part of `pnpm test`. It is not part of `pnpm test:security-proof`.
 

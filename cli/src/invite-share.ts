@@ -74,7 +74,7 @@ export function setupInvite(value: string, keyPath: string, contactPath: string,
   }
   if (!verifySigned(signPayload({ type: 'IdentityCheck' }, key), key.did)) throw new Error('INVALID_IDENTITY_KEY');
   if (key.did === invite.ownerDid) throw new Error('SELF_INVITE');
-  const card = createSignedAgentCard({ name: 'ACP contact', agentDid: key.did, relayEndpoint: invite.relayUrl,
+  const card = createSignedAgentCard({ name: 'Sealbridge contact', agentDid: key.did, relayEndpoint: invite.relayUrl,
     skills: [{ id: 'json-task', name: 'JSON task' }], accessMode: 'invite-only',
     expiresAt: new Date(Date.now() + 86400000).toISOString() }, key);
   const reciprocal = createInviteToken({ agentCard: card, expiresInSeconds: 86400 }, key);

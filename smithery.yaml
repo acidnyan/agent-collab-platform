@@ -1,4 +1,4 @@
-# Smithery.ai MCP server configuration for Agent Collaboration Platform (ACP)
+# Smithery.ai MCP server configuration for Sealbridge
 startCommand:
   type: stdio
   configSchema:
@@ -8,7 +8,7 @@ startCommand:
     properties:
       keyFile:
         type: string
-        description: Path to the Ed25519 owner private key JSON file (generated via `pnpm acp keygen <path>`).
+        description: Path to the Ed25519 owner private key JSON file (generated via `pnpm sealbridge keygen <path>`).
       relayUrl:
         type: string
         default: "https://acp-relay.agent-collab.workers.dev"

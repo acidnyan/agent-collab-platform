@@ -141,7 +141,7 @@ describe('Improvement 1: expired and invalid AgentCard resilience in discover an
       {
         type: 'AgentCard' as const,
         version: '0.2.0',
-        description: 'ACP worker',
+        description: 'Sealbridge worker',
         costModes: ['worker_byok' as const],
         name: 'Cloudflare E2E Bob',
         agentDid: owner.did,

@@ -1,6 +1,8 @@
-# Agent Collaboration Protocol & Runtime (ACP)
+# Sealbridge
 
 [English (README.md)](./README.md) | **日本語**
+
+**旧称 ACP / agent-collab-platform。** Zed の Agent Client Protocol および IBM / BeeAI の Agent Communication Protocol との名称衝突を避けるため、Sealbridge に改称しました。`pnpm sealbridge`（または `sealbridge` コマンド）を使用してください。`acp` は非推奨エイリアスとして引き続き動作し、標準エラーに通知を1行表示します。プロトコル識別子、`acp-invite:` トークン、MCP ツール名、既存データ保存先、リポジトリと中継器の URL は変更しません。
 
 [リレーのタイムアウト・再試行・リース・受領確認](./docs/relay-reliability.ja.md)
 
@@ -23,7 +25,7 @@
 > **作成者**: [@takapon01234](https://x.com/takapon01234)
 
 <p align="center">
-  <img src="docs/assets/acp-hero-demo.svg" width="100%" alt="ACP Architecture & Live E2EE Flow" />
+  <img src="docs/assets/acp-hero-demo.svg" width="100%" alt="Sealbridge Architecture & Live E2EE Flow" />
 </p>
 
 ## 30秒クイックスタート（ワンコマンド・デモ & MCP サーバー設定）
@@ -31,15 +33,15 @@
 4シナリオのゼロトラスト協働・改ざん遮断デモをワンコマンドで実行できます（オフライン動作・APIキー不要）：
 
 ```sh
-git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-collab-platform && pnpm install --frozen-lockfile && pnpm build && pnpm acp demo
+git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-collab-platform && pnpm install --frozen-lockfile && pnpm build && pnpm sealbridge demo
 ```
 
-**Claude Desktop**、**Cursor**、**Codex**、**Grok Bot** から MCP サーバー（`acp mcp-server`）として直接呼び出す場合の設定例：
+**Claude Desktop**、**Cursor**、**Codex**、**Grok Bot** から MCP サーバー（`sealbridge mcp-server`）として直接呼び出す場合の設定例：
 
 ```json
 {
   "mcpServers": {
-    "acp": {
+    "sealbridge": {
       "command": "node",
       "args": [
         "/path/to/agent-collab-platform/cli/dist/index.js",
@@ -98,13 +100,13 @@ pnpm test:security-proof
 Claude Code、Codex、Grok Bot、Cursor に、次の文を貼ってください。運用手順は [AGENTS.md](AGENTS.md)、持ち運び用スキルは [SKILL.md](SKILL.md) です。
 
 ```text
-このリポジトリの Agent Collaboration Platform をセットアップしてください。
+このリポジトリの Sealbridge をセットアップしてください。
 作業の前に AGENTS.md と SKILL.md を読んでください。
 Node.js 22 と pnpm 10 が必要です。リポジトリ直下で次を実行してください:
 pnpm install --frozen-lockfile && pnpm build
 別マシン間の協働では、公開中継器へすぐに接続してください:
 --relay https://acp-relay.agent-collab.workers.dev
-`pnpm acp relay start --port 8787 --host 127.0.0.1` は、同一マシンまたはオフラインのときだけ使ってください。
+`pnpm sealbridge relay start --port 8787 --host 127.0.0.1` は、同一マシンまたはオフラインのときだけ使ってください。
 *.private.json、API キー、.env は表示・記録・コミットしないでください。
 --auto-accept と --auto-approve は、私に確認してから使ってください。
 ```
@@ -148,7 +150,7 @@ Durable Object のクラス名は変わらないので、例にある `v1` マ�
 同じマシン、またはオフラインではループバック中継器を使います。
 
 ```sh
-pnpm acp relay start --port 8787 --host 127.0.0.1
+pnpm sealbridge relay start --port 8787 --host 127.0.0.1
 ```
 
 続くターミナルでは `--relay http://127.0.0.1:8787` を渡します。ループバックはこのマシンからしか届きません。別マシン間では、この URL を `https://acp-relay.agent-collab.workers.dev` に置き換えます。
@@ -156,15 +158,15 @@ pnpm acp relay start --port 8787 --host 127.0.0.1
 **ターミナル 2 — 受託側 Bob**
 
 ```sh
-pnpm acp keygen /tmp/bob.private.json
-pnpm acp worker start --key /tmp/bob.private.json \
+pnpm sealbridge keygen /tmp/bob.private.json
+pnpm sealbridge worker start --key /tmp/bob.private.json \
   --relay http://127.0.0.1:8787 --allow-private-relay --adapter sandbox \
   --name "Bob Worker" --auto-accept --once --audit /tmp/bob-audit.jsonl
 ```
 
 表示された `acp-invite:...` の1行をコピーします。このローカル例は、制限付き子プロセスで入力 JSON をそのまま返します。`--auto-accept` は契約受諾だけを許します。外部副作用と予算増額は、明示的な承認が引き続き必要です。対話式の `[y/N]` にするには、このフラグを外します。鍵と監査ログの出力先は、未使用のパスにしてください。
 
-`acp worker` は `--publish` を付けない限り、公開リレーのディレクトリへ AgentCard を登録しません。招待トークンを直接渡してください。`acp discover` に出るのは `--publish` したワーカーだけです。
+`sealbridge worker` は `--publish` を付けない限り、公開リレーのディレクトリへ AgentCard を登録しません。招待トークンを直接渡してください。`sealbridge discover` に出るのは `--publish` したワーカーだけです。
 
 `--inbox /path/to/inbox.jsonl` を指定すると、対話エージェント向けの受信箱を保存します。
 提案の検証と受諾承認後、実行前に復号済みの `{ receivedAt, taskId,
@@ -188,16 +190,16 @@ DID による検索は `agentDid` の完全一致を `ownerDid` の別名一致�
 **ターミナル 3 — 依頼側 Alice**
 
 ```sh
-pnpm acp keygen /tmp/alice.private.json
+pnpm sealbridge keygen /tmp/alice.private.json
 # プロンプトが出たら Bob のトークン全体を貼り付ける
 read -r BOB_INVITE
-pnpm acp delegate --key /tmp/alice.private.json --to "$BOB_INVITE" --allow-private-relay \
+pnpm sealbridge delegate --key /tmp/alice.private.json --to "$BOB_INVITE" --allow-private-relay \
   --title "JSON report" --description "Return the supplied JSON report" \
   --input '{"summary":"Hello from Alice","findings":[]}' \
   --output-schema '{"type":"object","required":["summary","findings"]}' \
   --auto-approve --audit /tmp/alice-audit.jsonl --out /tmp/report.json
-pnpm acp audit-verify /tmp/alice-audit.jsonl
-pnpm acp discover --relay http://127.0.0.1:8787 --allow-private-relay
+pnpm sealbridge audit-verify /tmp/alice-audit.jsonl
+pnpm sealbridge discover --relay http://127.0.0.1:8787 --allow-private-relay
 ```
 
 期待する結果は、双方の `SETTLED`、JSON の成果物、`"valid":true` と `"status":"VALID"` です。トラストアンカーファイルも `--expect-final-state` / `--expect-last-hash` / `--expect-entry-count` も無いとき、`statusLabel` は `VALID (no trust anchor: truncation not checked)` です。ハッシュ鎖は検証できていますが、より古い妥当な接頭辞は排除していません。Alice は署名・ダイジェスト・予算、JSON Schema、登録済みの隔離チェックを検証し、最後に署名付きの最終承認を取ります。`--auto-approve` は最終検収をポリシー承認にする明示的な選択です。人間が確認するときは外してください。`acp://invite?token=...` も受け付けます。招待の代わりに `--to <Bob の DID> --relay <URL>` も使えます。Bob は手元の `/tmp/bob-audit.jsonl` を自分で検証できます。
@@ -224,10 +226,10 @@ Command と CLI アダプタは、オーナーが設定した実行ファイル�
 ## MCP、進捗、失効、クォーラム
 
 ```sh
-pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agent-collab.workers.dev
+pnpm sealbridge mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agent-collab.workers.dev
 ```
 
-`acp mcp-server` は、依存ライブラリを増やさない JSON-RPC 2.0 の MCP サーバーです。標準入力に、改行区切り JSON と `Content-Length` フレームの両方を受けます。Claude Code、Cursor、Codex、Grok Bot から次のツールを呼べます。
+`sealbridge mcp-server` は、依存ライブラリを増やさない JSON-RPC 2.0 の MCP サーバーです。標準入力に、改行区切り JSON と `Content-Length` フレームの両方を受けます。Claude Code、Cursor、Codex、Grok Bot から次のツールを呼べます。
 
 | ツール                     | 戻り値                                                                 |
 | -------------------------- | ---------------------------------------------------------------------- |
@@ -244,7 +246,7 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 `acp_delegate_task` と `acp_delegate_multi` は、タスク入力を中継器経由で対象ワーカーへ送ります。ホストが引数を組み立てるときは、送信先を制限します。
 
 ```sh
-pnpm acp mcp-server \
+pnpm sealbridge mcp-server \
   --key /tmp/alice.private.json \
   --relay https://acp-relay.agent-collab.workers.dev \
   --allow-relay https://acp-relay.agent-collab.workers.dev \
@@ -294,7 +296,7 @@ node examples/network-collab/run.mjs
 | [`spec/README.ja.md`](./spec/README.ja.md)                                             | プロトコル概要、メッセージエンベロープ、正規化と署名                                                |
 | [`spec/task-manifest.schema.json`](./spec/task-manifest.schema.json)                   | `TaskManifest` の JSON Schema（Draft 2020-12）                                                      |
 | [`spec/examples/sample-task-manifest.json`](./spec/examples/sample-task-manifest.json) | スキーマ検証済みのサンプル `TaskManifest`                                                           |
-| [`OSS_FORK_ANALYSIS.ja.md`](./OSS_FORK_ANALYSIS.ja.md)                                 | A2A、ACP、ANP、AGNTCY、DelegateOS、Cotal、Busbar の調査と、スクラッチ / フォーク / オーバーレイ比較 |
+| [`OSS_FORK_ANALYSIS.ja.md`](./OSS_FORK_ANALYSIS.ja.md)                                 | A2A、Sealbridge、ANP、AGNTCY、DelegateOS、Cotal、Busbar の調査と、スクラッチ / フォーク / オーバーレイ比較 |
 | [`AGENTS.md`](AGENTS.md)                                                               | 自律 Worker / Requester の運用手順                                                                  |
 | [`SKILL.md`](SKILL.md)                                                                 | 持ち運び用エージェントスキル                                                                        |
 
@@ -309,8 +311,8 @@ pnpm validate:schemas
 pnpm test
 pnpm test:security-proof
 pnpm --filter @acp/two-owner-demo start
-pnpm acp demo --audit-dir /tmp/acp-demo-audit
-pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl
+pnpm sealbridge demo --audit-dir /tmp/acp-demo-audit
+pnpm sealbridge audit-verify /tmp/acp-demo-audit/alice.jsonl
 ```
 
 4つのデモシナリオは、期待する結果を自分で確認し、失敗するとゼロ以外の終了コードを返します。デモはオフラインで、一時鍵と合成したプロバイダー使用量だけを使い、API 資格情報は不要です。元のサンプルマニフェストはスキーマの見本であり、そこに書いてある署名は実際の暗号署名ではありません。
@@ -318,18 +320,18 @@ pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl
 CLI の例です。出力先は未使用のパスを使い、鍵生成は既存の鍵を上書きしません。
 
 ```sh
-pnpm acp keygen /tmp/alice.private.json
-pnpm acp validate spec/examples/sample-task-manifest.json
-pnpm acp validate capability-token spec/examples/sample-capability-token.json
-pnpm acp approve /tmp/alice.private.json contract_acceptance task_example001 /tmp/target.json /tmp/approval.json
-pnpm acp validate approval-receipt /tmp/approval.json
-pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
+pnpm sealbridge keygen /tmp/alice.private.json
+pnpm sealbridge validate spec/examples/sample-task-manifest.json
+pnpm sealbridge validate capability-token spec/examples/sample-capability-token.json
+pnpm sealbridge approve /tmp/alice.private.json contract_acceptance task_example001 /tmp/target.json /tmp/approval.json
+pnpm sealbridge validate approval-receipt /tmp/approval.json
+pnpm sealbridge audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
 ```
 
-承認対象ファイルには、承認する JSON アクションそのものを入れます。位置引数のトラストアンカーは `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }` です。`head` は検証する束とは別に入手してください。`acp audit-verify` は `--expect-final-state <state>`、`--expect-last-hash <hash>`、`--expect-entry-count <n>` も受け付けます。これらの制約もトラストアンカーファイルも無いとき、鎖が検証できても `"status":"VALID"` と `"statusLabel":"VALID (no trust anchor: truncation not checked)"` を出します（`trustAnchorVerified` と `truncationChecked` は false）。この表示は、より古い妥当な接頭辞を排除していないという意味です。制約が一致すると `statusLabel` は `VALID` になり、両方のフラグは true です。アンカーと一致しない接頭辞は、終了コードが非ゼロで `"statusLabel":"INVALID"` になります。
+承認対象ファイルには、承認する JSON アクションそのものを入れます。位置引数のトラストアンカーは `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }` です。`head` は検証する束とは別に入手してください。`sealbridge audit-verify` は `--expect-final-state <state>`、`--expect-last-hash <hash>`、`--expect-entry-count <n>` も受け付けます。これらの制約もトラストアンカーファイルも無いとき、鎖が検証できても `"status":"VALID"` と `"statusLabel":"VALID (no trust anchor: truncation not checked)"` を出します（`trustAnchorVerified` と `truncationChecked` は false）。この表示は、より古い妥当な接頭辞を排除していないという意味です。制約が一致すると `statusLabel` は `VALID` になり、両方のフラグは true です。アンカーと一致しない接頭辞は、終了コードが非ゼロで `"statusLabel":"INVALID"` になります。
 
 ```sh
-pnpm acp audit-verify /tmp/alice-audit.jsonl \
+pnpm sealbridge audit-verify /tmp/alice-audit.jsonl \
   --expect-final-state SETTLED \
   --expect-last-hash sha256:<hex> \
   --expect-entry-count <n>

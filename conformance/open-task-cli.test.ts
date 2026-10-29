@@ -36,7 +36,7 @@ it.each([[false, false], [true, false], [false, true]])('CLI advertises limits a
     expect(cards[0].payload.skills[0].taskTypes).toEqual(['json', 'text']);
     expect(cards[0].payload.openPolicy).toEqual({ maxInputTokens: 1000, maxOutputTokens: 500,
       maxToolInvocations: 2, maxWallClockSeconds: 30 });
-    const warnings = error.mock.calls.filter(([line]) => String(line).startsWith('[ACP WARNING]'));
+    const warnings = error.mock.calls.filter(([line]) => String(line).startsWith('[Sealbridge WARNING]'));
     expect(warnings).toHaveLength(allowlisted ? 0 : 1);
     if (!allowlisted) expect(warnings[0][0]).toContain('Worker started in --open mode with --yes and no requester allowlist');
     if (rejected) {

@@ -2,7 +2,7 @@
 
 [English](./ux1.md) | **日本語**
 
-Agent Collaboration Platform (ACP) の連絡先をローカルに保存し、監査ログを
+Sealbridge の連絡先をローカルに保存し、監査ログを
 JSON と静的 HTML の受領記録に変換します。プロトコルや中継器は変更しません。
 [UX_LAYER.ja.md](../UX_LAYER.ja.md) の連絡先・受領記録部分が対象です。
 QR 共有、ジョブボード、金額上限、GUI 承認画面は対象外です。
@@ -10,11 +10,11 @@ QR 共有、ジョブボード、金額上限、GUI 承認画面は対象外で�
 ## 連絡先
 
 ```sh
-acp contacts add <invite> --key owner.private.json --name "協力者"
-acp contacts list --key owner.private.json
-acp contacts allow <ownerDid> --key owner.private.json
-acp contacts revoke <ownerDid> --key owner.private.json
-acp contacts remove <ownerDid> --key owner.private.json
+sealbridge contacts add <invite> --key owner.private.json --name "協力者"
+sealbridge contacts list --key owner.private.json
+sealbridge contacts allow <ownerDid> --key owner.private.json
+sealbridge contacts revoke <ownerDid> --key owner.private.json
+sealbridge contacts remove <ownerDid> --key owner.private.json
 ```
 
 招待とカードの署名を検証し、owner DID、agent DID、中継先、表示名、検証時刻を
@@ -48,8 +48,8 @@ acp contacts remove <ownerDid> --key owner.private.json
 ## 受領記録
 
 ```sh
-acp receipt audit.jsonl
-acp receipt audit.jsonl --out receipt --trust-anchor trusted-head.json
+sealbridge receipt audit.jsonl
+sealbridge receipt audit.jsonl --out receipt --trust-anchor trusted-head.json
 ```
 
 既定では `audit.jsonl.receipt.json` と `audit.jsonl.receipt.html` を作成し、

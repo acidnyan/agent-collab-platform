@@ -1,6 +1,8 @@
-# Agent Collaboration Protocol & Runtime (ACP)
+# Sealbridge
 
 **English** | [日本語 (README.ja.md)](./README.ja.md)
+
+**Formerly ACP / agent-collab-platform.** Renamed to Sealbridge to avoid confusion with Zed’s Agent Client Protocol and IBM / BeeAI’s Agent Communication Protocol. Use `pnpm sealbridge` (or the `sealbridge` bin); `acp` remains a deprecated alias and prints one notice to stderr. Protocol identifiers, `acp-invite:` tokens, MCP tool names, existing data paths, repository and relay URLs remain unchanged.
 
 [Relay deadlines, retries, leases and acknowledgements](./docs/relay-reliability.md)
 
@@ -18,12 +20,12 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0_%2F_MIT-blue.svg)](./LICENSE)
 [![X (@takapon01234)](https://img.shields.io/badge/X-%40takapon01234-000000?logo=x)](https://x.com/takapon01234)
 
-> **Status**: `v1.0.0 (M0–M3.1 Reference Implementation)` — Cross-Owner Agent Collaboration Platform  
+> **Status**: `v1.0.0 (M0–M3.1 Reference Implementation)` — Sealbridge cross-owner agent collaboration
 > **Target**: An open-source protocol and reference implementation that lets autonomous agents owned by different people split, delegate, run, verify, and accept work without trusting each other's runtimes or credentials.  
 > **Author**: [@takapon01234](https://x.com/takapon01234)
 
 <p align="center">
-  <img src="docs/assets/acp-hero-demo.svg" width="100%" alt="ACP Architecture & Live E2EE Flow" />
+  <img src="docs/assets/acp-hero-demo.svg" width="100%" alt="Sealbridge Architecture & Live E2EE Flow" />
 </p>
 
 ## 30-Second Quickstart (One-Line Demo & MCP Config)
@@ -31,15 +33,15 @@
 Run the full 4-scenario zero-trust collaboration & red-team tamper defense demo in one command (offline, zero API keys needed):
 
 ```sh
-git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-collab-platform && pnpm install --frozen-lockfile && pnpm build && pnpm acp demo
+git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-collab-platform && pnpm install --frozen-lockfile && pnpm build && pnpm sealbridge demo
 ```
 
-Or add **`acp mcp-server`** directly to **Claude Desktop**, **Cursor**, **Codex**, or **Grok Bot** (`mcpServers` config):
+Or add **`sealbridge mcp-server`** directly to **Claude Desktop**, **Cursor**, **Codex**, or **Grok Bot** (`mcpServers` config):
 
 ```json
 {
   "mcpServers": {
-    "acp": {
+    "sealbridge": {
       "command": "node",
       "args": [
         "/path/to/agent-collab-platform/cli/dist/index.js",
@@ -98,13 +100,13 @@ The suite covers command injection, host-secret exfiltration, cross-session blee
 Paste this to Claude Code, Codex, Grok Bot, or Cursor. The playbook is [AGENTS.md](AGENTS.md). The portable skill is [SKILL.md](SKILL.md).
 
 ```text
-Set up Agent Collaboration Platform from this repository.
+Set up Sealbridge from this repository.
 Read AGENTS.md and SKILL.md before acting.
 Requires Node.js 22 and pnpm 10. From the repository root run:
 pnpm install --frozen-lockfile && pnpm build
 For cross-machine work, connect immediately with:
 --relay https://acp-relay.agent-collab.workers.dev
-Use `pnpm acp relay start --port 8787 --host 127.0.0.1` only for same-machine or offline work.
+Use `pnpm sealbridge relay start --port 8787 --host 127.0.0.1` only for same-machine or offline work.
 Never print, log, or commit *.private.json, API keys, or .env.
 Ask me before using --auto-accept or --auto-approve.
 ```
@@ -148,7 +150,7 @@ The Durable Object class name is unchanged, so the existing `v1` migration in th
 Same-machine and offline sessions use a loopback relay:
 
 ```sh
-pnpm acp relay start --port 8787 --host 127.0.0.1
+pnpm sealbridge relay start --port 8787 --host 127.0.0.1
 ```
 
 Then pass `--relay http://127.0.0.1:8787` in the terminals below. Loopback is reachable only on this machine. For cross-machine runs, replace that URL with `https://acp-relay.agent-collab.workers.dev`.
@@ -156,15 +158,15 @@ Then pass `--relay http://127.0.0.1:8787` in the terminals below. Loopback is re
 **Terminal 2 — Bob, the worker**
 
 ```sh
-pnpm acp keygen /tmp/bob.private.json
-pnpm acp worker start --key /tmp/bob.private.json \
+pnpm sealbridge keygen /tmp/bob.private.json
+pnpm sealbridge worker start --key /tmp/bob.private.json \
   --relay http://127.0.0.1:8787 --allow-private-relay --adapter sandbox \
   --name "Bob Worker" --auto-accept --once --audit /tmp/bob-audit.jsonl
 ```
 
 Copy the printed `acp-invite:...` line. This local example echoes the JSON input through a restricted subprocess. `--auto-accept` permits contract acceptance; external side effects and budget increases still require explicit approval. Remove it for an interactive `[y/N]` gate. Keys and audit output paths must be fresh.
 
-`acp worker` does not register its AgentCard in the public relay directory unless you pass `--publish`. Share the invite directly. `acp discover` lists only workers that opted in with `--publish`.
+`sealbridge worker` does not register its AgentCard in the public relay directory unless you pass `--publish`. Share the invite directly. `sealbridge discover` lists only workers that opted in with `--publish`.
 
 Add `--on-receive 'node /path/to/notify.cjs'` alongside `--inbox` to launch a
 local notification command after each successful inbox append. The command receives
@@ -199,16 +201,16 @@ fail with `INVALID_AGENT_SNAPSHOT`.
 **Terminal 3 — Alice, the requester**
 
 ```sh
-pnpm acp keygen /tmp/alice.private.json
+pnpm sealbridge keygen /tmp/alice.private.json
 # Paste Bob's complete token when prompted
 read -r BOB_INVITE
-pnpm acp delegate --key /tmp/alice.private.json --to "$BOB_INVITE" --allow-private-relay \
+pnpm sealbridge delegate --key /tmp/alice.private.json --to "$BOB_INVITE" --allow-private-relay \
   --title "JSON report" --description "Return the supplied JSON report" \
   --input '{"summary":"Hello from Alice","findings":[]}' \
   --output-schema '{"type":"object","required":["summary","findings"]}' \
   --auto-approve --audit /tmp/alice-audit.jsonl --out /tmp/report.json
-pnpm acp audit-verify /tmp/alice-audit.jsonl
-pnpm acp discover --relay http://127.0.0.1:8787 --allow-private-relay
+pnpm sealbridge audit-verify /tmp/alice-audit.jsonl
+pnpm sealbridge discover --relay http://127.0.0.1:8787 --allow-private-relay
 ```
 
 Expected: `SETTLED`, a JSON deliverable, and `"valid":true` with `"status":"VALID"` on both owners. Without a trust-anchor file or `--expect-final-state` / `--expect-last-hash` / `--expect-entry-count`, `statusLabel` is `VALID (no trust anchor: truncation not checked)`: the chain is intact, and an older valid prefix was not ruled out. Alice verifies signatures, digests and budget, JSON Schema and registered isolated checks, then obtains a signed final approval. `--auto-approve` explicitly opts into policy approval of final verification; omit it for human review. `acp://invite?token=...` is also accepted. Alternatively, use `--to <Bob DID> --relay <URL>`. Bob can verify his own `/tmp/bob-audit.jsonl` locally.
@@ -235,10 +237,10 @@ Session payloads use ephemeral X25519, HKDF-SHA256, and AES-256-GCM, with the he
 ## MCP, live progress, revocation, and quorum
 
 ```sh
-pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agent-collab.workers.dev
+pnpm sealbridge mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agent-collab.workers.dev
 ```
 
-`acp mcp-server` is a dependency-free JSON-RPC 2.0 MCP server on stdio. It accepts newline-delimited JSON and `Content-Length` frames. Hosts such as Claude Code, Cursor, Codex, and Grok Bot can call:
+`sealbridge mcp-server` is a dependency-free JSON-RPC 2.0 MCP server on stdio. It accepts newline-delimited JSON and `Content-Length` frames. Hosts such as Claude Code, Cursor, Codex, and Grok Bot can call:
 
 | Tool                       | Result                                                                                          |
 | -------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -255,7 +257,7 @@ pnpm acp mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agen
 `acp_delegate_task` and `acp_delegate_multi` transmit task input to the target worker over the relay. Restrict that path when the host might supply the arguments:
 
 ```sh
-pnpm acp mcp-server \
+pnpm sealbridge mcp-server \
   --key /tmp/alice.private.json \
   --relay https://acp-relay.agent-collab.workers.dev \
   --allow-relay https://acp-relay.agent-collab.workers.dev \
@@ -305,7 +307,7 @@ node examples/network-collab/run.mjs
 | [`spec/README.md`](./spec/README.md)                                                   | Protocol overview, message envelope, canonicalization and signatures                                          |
 | [`spec/task-manifest.schema.json`](./spec/task-manifest.schema.json)                   | `TaskManifest` JSON Schema (Draft 2020-12)                                                                    |
 | [`spec/examples/sample-task-manifest.json`](./spec/examples/sample-task-manifest.json) | Schema-valid sample `TaskManifest`                                                                            |
-| [`OSS_FORK_ANALYSIS.md`](./OSS_FORK_ANALYSIS.md)                                       | Survey of A2A, ACP, ANP, AGNTCY, DelegateOS, Cotal, Busbar, and scratch vs fork vs overlay                    |
+| [`OSS_FORK_ANALYSIS.md`](./OSS_FORK_ANALYSIS.md)                                       | Survey of A2A, Sealbridge, ANP, AGNTCY, DelegateOS, Cotal, Busbar, and scratch vs fork vs overlay                    |
 | [`AGENTS.md`](AGENTS.md)                                                               | Autonomous Worker/Requester playbook                                                                          |
 | [`SKILL.md`](SKILL.md)                                                                 | Portable agent skill                                                                                          |
 
@@ -320,8 +322,8 @@ pnpm validate:schemas
 pnpm test
 pnpm test:security-proof
 pnpm --filter @acp/two-owner-demo start
-pnpm acp demo --audit-dir /tmp/acp-demo-audit
-pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl
+pnpm sealbridge demo --audit-dir /tmp/acp-demo-audit
+pnpm sealbridge audit-verify /tmp/acp-demo-audit/alice.jsonl
 ```
 
 All four demo scenarios assert their expected outcomes and return a nonzero exit code on failure. The demo is offline, uses ephemeral keys and synthetic provider usage, and never needs API credentials. The original sample manifest remains a schema fixture; its illustrative signature is not a real cryptographic signature.
@@ -329,18 +331,18 @@ All four demo scenarios assert their expected outcomes and return a nonzero exit
 CLI examples (use a fresh output path; key generation never overwrites a key):
 
 ```sh
-pnpm acp keygen /tmp/alice.private.json
-pnpm acp validate spec/examples/sample-task-manifest.json
-pnpm acp validate capability-token spec/examples/sample-capability-token.json
-pnpm acp approve /tmp/alice.private.json contract_acceptance task_example001 /tmp/target.json /tmp/approval.json
-pnpm acp validate approval-receipt /tmp/approval.json
-pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
+pnpm sealbridge keygen /tmp/alice.private.json
+pnpm sealbridge validate spec/examples/sample-task-manifest.json
+pnpm sealbridge validate capability-token spec/examples/sample-capability-token.json
+pnpm sealbridge approve /tmp/alice.private.json contract_acceptance task_example001 /tmp/target.json /tmp/approval.json
+pnpm sealbridge validate approval-receipt /tmp/approval.json
+pnpm sealbridge audit-verify /tmp/acp-demo-audit/alice.jsonl /tmp/trust-anchor.json
 ```
 
-The approval target file contains the exact JSON action being approved. A positional trust-anchor file has `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }`; obtain `head` independently of the bundle under verification. `acp audit-verify` also accepts `--expect-final-state <state>`, `--expect-last-hash <hash>`, and `--expect-entry-count <n>`. With none of those constraints and no trust-anchor file, a chain that still verifies prints `"status":"VALID"` and `"statusLabel":"VALID (no trust anchor: truncation not checked)"` (`trustAnchorVerified` and `truncationChecked` are false). That label means an older valid prefix was not ruled out. When a supplied constraint matches, `statusLabel` is `VALID` and both flags are true. A prefix that does not match the anchor exits nonzero with `"statusLabel":"INVALID"`.
+The approval target file contains the exact JSON action being approved. A positional trust-anchor file has `{ "taskId": "...", "actors": ["did:key:...", "did:key:..."], "head": "sha256:..." }`; obtain `head` independently of the bundle under verification. `sealbridge audit-verify` also accepts `--expect-final-state <state>`, `--expect-last-hash <hash>`, and `--expect-entry-count <n>`. With none of those constraints and no trust-anchor file, a chain that still verifies prints `"status":"VALID"` and `"statusLabel":"VALID (no trust anchor: truncation not checked)"` (`trustAnchorVerified` and `truncationChecked` are false). That label means an older valid prefix was not ruled out. When a supplied constraint matches, `statusLabel` is `VALID` and both flags are true. A prefix that does not match the anchor exits nonzero with `"statusLabel":"INVALID"`.
 
 ```sh
-pnpm acp audit-verify /tmp/alice-audit.jsonl \
+pnpm sealbridge audit-verify /tmp/alice-audit.jsonl \
   --expect-final-state SETTLED \
   --expect-last-hash sha256:<hex> \
   --expect-entry-count <n>
@@ -367,9 +369,9 @@ invite requirement in this mode.
 To advertise availability for invite-less tasks:
 
 ```sh
-acp worker start --key worker.private.json --relay https://acp-relay.agent-collab.workers.dev --adapter sandbox --access-mode open --publish --skill json-task --task-type json
-acp discover --relay https://acp-relay.agent-collab.workers.dev --skill json-task
-acp delegate --key requester.private.json --relay https://acp-relay.agent-collab.workers.dev --discover json-task --title Echo --description Echo --input '{"hello":"world"}'
+sealbridge worker start --key worker.private.json --relay https://acp-relay.agent-collab.workers.dev --adapter sandbox --access-mode open --publish --skill json-task --task-type json
+sealbridge discover --relay https://acp-relay.agent-collab.workers.dev --skill json-task
+sealbridge delegate --key requester.private.json --relay https://acp-relay.agent-collab.workers.dev --discover json-task --title Echo --description Echo --input '{"hello":"world"}'
 ```
 
 `--open` aliases `--access-mode open`. Publishing still requires `--publish`.
@@ -395,7 +397,7 @@ requesters cap only unspecified default budget fields, never increase defaults,
 and preserve explicit budgets and custom manifests for worker validation.
 Omitted policy fields impose no additional ceiling. Starting an open worker with
 `--yes` (or another automatic approval flag) and no requester allowlist prints
-an `[ACP WARNING]` line to stderr.
+an `[Sealbridge WARNING]` line to stderr.
 
 Discovery also supports `--task-type <type>` and `--did <did>`; delegation
 supports `--task-type <type>` or the existing `--to <did>`. Skill selection

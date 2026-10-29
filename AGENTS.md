@@ -1,6 +1,6 @@
-# ACP agent operating playbook / エージェント運用手順
+# Sealbridge agent operating playbook / エージェント運用手順
 
-Use this playbook to operate Agent Collaboration Platform as a Worker or
+Use this playbook to operate Sealbridge as a Worker or
 Requester for its human owner. It applies to Claude Code, Codex, Grok Bot,
 Cursor, and other agents. The portable skill entry point is [SKILL.md](SKILL.md).
 人間オーナーの依頼に応じ、以下の役割を選んで実行します。
@@ -49,7 +49,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    ```sh
    mkdir -p ~/.acp && chmod 700 ~/.acp
    if [ ! -e ~/.acp/worker.private.json ]; then
-     pnpm acp keygen ~/.acp/worker.private.json
+     pnpm sealbridge keygen ~/.acp/worker.private.json
    fi
    ```
 
@@ -65,7 +65,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    persistent terminal/session and use `http://127.0.0.1:8787`:
 
    ```sh
-   pnpm acp relay start --port 8787 --host 127.0.0.1
+   pnpm sealbridge relay start --port 8787 --host 127.0.0.1
    ```
 
    Keep that local relay running. Loopback is reachable only on the same machine.
@@ -78,20 +78,20 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    to the human owner so they can share it with the requester's owner:
 
    ```text
-   pnpm acp worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--allow-requester <did>] [--allow-any-requester] [--publish] [--max-input-tokens <n>] [--max-output-tokens <n>] [--max-tool-invocations <n>] [--max-wall-clock-seconds <n>] [--max-concurrent-tasks <n>] [--max-requests-per-minute <n>] [--audit ~/.acp/worker-audit.jsonl] [--allow-private-relay]
+   pnpm sealbridge worker start --key ~/.acp/worker.private.json --relay <URL> --adapter <sandbox|command|claude|codex|openai> [--cmd "..."] [--name "..."] [--once] [--auto-accept] [--allow-requester <did>] [--allow-any-requester] [--publish] [--max-input-tokens <n>] [--max-output-tokens <n>] [--max-tool-invocations <n>] [--max-wall-clock-seconds <n>] [--max-concurrent-tasks <n>] [--max-requests-per-minute <n>] [--audit ~/.acp/worker-audit.jsonl] [--allow-private-relay]
    ```
 
    For a JSON echo worker on the public relay, a runnable starting point is:
 
    ```sh
-   pnpm acp worker start --key ~/.acp/worker.private.json --relay https://acp-relay.agent-collab.workers.dev --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl
+   pnpm sealbridge worker start --key ~/.acp/worker.private.json --relay https://acp-relay.agent-collab.workers.dev --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl
    ```
 
    After the local offline relay is running, the same command uses
    `--relay http://127.0.0.1:8787` instead:
 
    ```sh
-   pnpm acp worker start --key ~/.acp/worker.private.json --relay http://127.0.0.1:8787 --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl --allow-private-relay
+   pnpm sealbridge worker start --key ~/.acp/worker.private.json --relay http://127.0.0.1:8787 --adapter sandbox --name "Worker" --audit ~/.acp/worker-audit.jsonl --allow-private-relay
    ```
 
    `--allow-private-relay` is required for that loopback URL. Private and
@@ -146,14 +146,14 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    ```sh
    mkdir -p ~/.acp && chmod 700 ~/.acp
    if [ ! -e ~/.acp/requester.private.json ]; then
-     pnpm acp keygen ~/.acp/requester.private.json
+     pnpm sealbridge keygen ~/.acp/requester.private.json
    fi
    ```
 
 2. Delegate using the complete invite token and the owner's task:
 
    ```text
-   pnpm acp delegate --key ~/.acp/requester.private.json --to "<acp-invite:...>" --title "..." --description "..." --input '<json>' [--output-schema '<json_or_file>'] [--auto-approve] --audit ~/.acp/audit-<taskId>.jsonl --out ./deliverable.json [--allow-private-relay]
+   pnpm sealbridge delegate --key ~/.acp/requester.private.json --to "<acp-invite:...>" --title "..." --description "..." --input '<json>' [--output-schema '<json_or_file>'] [--auto-approve] --audit ~/.acp/audit-<taskId>.jsonl --out ./deliverable.json [--allow-private-relay]
    ```
 
    With a DID instead of an invite, use `--to "<DID>" --relay <URL>`.
@@ -171,7 +171,7 @@ optional arguments; do not type those markers literally. Pick one adapter name.
    human owner, then verify the saved bilateral hash-chained audit ledger offline:
 
    ```text
-   pnpm acp audit-verify ~/.acp/audit-<taskId>.jsonl
+   pnpm sealbridge audit-verify ~/.acp/audit-<taskId>.jsonl
    ```
 
    Expect `SETTLED`, the deliverable file, and `"valid":true` from audit-verify.
@@ -191,16 +191,16 @@ optional arguments; do not type those markers literally. Pick one adapter name.
 ## Discovery and invite utilities / 検索・招待ユーティリティ
 
 ```text
-pnpm acp invite create --key ~/.acp/worker.private.json --relay <URL> [--name "Worker"] [--expires-in 3600]
-pnpm acp discover --relay <URL>
-pnpm acp validate <manifest.json>
+pnpm sealbridge invite create --key ~/.acp/worker.private.json --relay <URL> [--name "Worker"] [--expires-in 3600]
+pnpm sealbridge discover --relay <URL>
+pnpm sealbridge validate <manifest.json>
 ```
 
 `invite create` only issues a token; it does not start or register a worker.
 Use the running worker's key and relay. For the public relay:
 
 ```sh
-pnpm acp discover --relay https://acp-relay.agent-collab.workers.dev
+pnpm sealbridge discover --relay https://acp-relay.agent-collab.workers.dev
 ```
 
 `--expires-in` is seconds (1–2592000, default 3600). Discovery lists signed
@@ -219,7 +219,7 @@ For an MCP host, start a stdio server with the owner key. It exposes
 allowlist. `acp_inspect_revocations` reads this process's revocation registry.
 
 ```sh
-pnpm acp mcp-server --key ~/.acp/requester.private.json --relay https://acp-relay.agent-collab.workers.dev [--allow-private-relay] [--allow-worker <did>] [--allow-relay <url>] [--require-approval | --approval-webhook <url>]
+pnpm sealbridge mcp-server --key ~/.acp/requester.private.json --relay https://acp-relay.agent-collab.workers.dev [--allow-private-relay] [--allow-worker <did>] [--allow-relay <url>] [--require-approval | --approval-webhook <url>]
 ```
 
 `acp_delegate_task` and `acp_delegate_multi` transmit task input to the worker
@@ -240,7 +240,7 @@ Programmatic callers can pass `onProgress` to receive encrypted `PROGRESS`
 updates, and an `AbortSignal` to send `CANCEL` during an accepted or running
 task. `delegateMulti` supports `race` and `quorum`. Revoked invites and
 capabilities fail with `TOKEN_REVOKED` before work or tool execution.
-MCP ホストは `acp mcp-server` を使える。進捗は `onProgress`、中断は
+MCP ホストは `sealbridge mcp-server` を使える。進捗は `onProgress`、中断は
 `AbortSignal`、複数ワーカーは `race` と `quorum` です。失効した招待と能力は
 `TOKEN_REVOKED` で拒否されます。
 

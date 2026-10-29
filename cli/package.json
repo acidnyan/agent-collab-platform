@@ -27,9 +27,16 @@
     "node": ">=22 <23"
   },
   "bin": {
-    "acp": "./dist/index.js"
+    "sealbridge": "./dist/index.js",
+    "acp": "./dist/acp.js"
   },
   "devDependencies": {
     "@types/qrcode": "^1.5.6"
-  }
+  },
+  "description": "Sealbridge: encrypted cross-owner agent collaboration (cli)",
+  "keywords": [
+    "sealbridge",
+    "agent-collaboration",
+    "mcp"
+  ]
 }
