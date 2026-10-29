@@ -22,6 +22,8 @@ import type { RelayAuthContext, RelayInboxRole, RelayReceiveFilter } from './fet
 import { createPinnedRelayFetch, resolveAndValidateRelayEndpoint } from './ssrf.js';
 import type { RelayClientSecurityOptions } from './ssrf.js';
 export * from './fetch.js';
+export * from './retry.js';
+import { isTransientRelayError, relayRetryDelay, waitForRelayRetry, relayDeadline } from './retry.js';
 export { createPinnedRelayFetch, resolveAndValidateRelayEndpoint } from './ssrf.js';
 export type {
   RelayClientSecurityOptions,
@@ -280,6 +282,7 @@ export interface RelayTransport {
   withRecipient?(key: KeyPair): RelayTransport;
   setRecipientKey?(key: KeyPair): unknown;
   send(envelope: SignedEnvelope): void | Promise<void>;
+  acknowledgeDelivery?(recipientDid: string, envelopeId: string): void | Promise<void>;
   receive(
     recipientDid: string,
     waitMs?: number,
@@ -328,6 +331,7 @@ function splitRelayArgs(
 }
 export class HttpRelayClient extends RelayCredentials implements RelayTransport {
   private buffered = new Map<string, SignedEnvelope[]>();
+  private delivered = new Map<string, { expires: number; acknowledged: boolean }>();
   private readonly baseFetcher: typeof fetch;
   private readonly security: RelayClientSecurityOptions;
   private transportPromise?: Promise<typeof fetch>;
@@ -350,8 +354,11 @@ export class HttpRelayClient extends RelayCredentials implements RelayTransport 
     return transport(input, init);
   }
   private prepare(): Promise<typeof fetch> {
-    // Keep a rejected resolution cached so a later lookup cannot rebind the target.
-    this.transportPromise ??= this.buildTransport();
+    // Cache successful pins and security failures; transient DNS failures can be retried.
+    this.transportPromise ??= this.buildTransport().catch((error: unknown) => {
+      if (isTransientRelayError(error)) this.transportPromise = undefined;
+      throw error;
+    });
     return this.transportPromise;
   }
   private async buildTransport(): Promise<typeof fetch> {
@@ -362,7 +369,7 @@ export class HttpRelayClient extends RelayCredentials implements RelayTransport 
     }
     const resolved = await resolveAndValidateRelayEndpoint(this.url, this.security);
     if (custom) return this.baseFetcher;
-    return createPinnedRelayFetch(resolved);
+    return createPinnedRelayFetch(resolved, this.security);
   }
   async send(envelope: SignedEnvelope): Promise<void> {
     const result = await this.fetcher(this.url + '/envelopes', {
@@ -373,13 +380,30 @@ export class HttpRelayClient extends RelayCredentials implements RelayTransport 
     if (!result.ok) throw new Error('RELAY_REJECTED: ' + (await result.text()));
   }
   async register(card: import('@acp/core').SignedAgentCard): Promise<void> {
-    const r = await this.fetcher(this.url + '/agents', {
-      method: 'POST',
-      body: JSON.stringify(card),
-      headers: { 'content-type': 'application/json' },
-    });
-    if (!r.ok) throw new Error('RELAY_REGISTRATION_REJECTED');
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const timeout = this.security.requestTimeoutMs ?? 45_000;
+        await relayDeadline((async () => {
+          const r = await this.fetcher(this.url + '/agents', {
+            method: 'POST', body: JSON.stringify(card),
+            headers: { 'content-type': 'application/json' },
+            signal: AbortSignal.timeout(timeout),
+          });
+          if (!r.ok) {
+            await r.body?.cancel();
+            throw new Error('RELAY_REGISTRATION_REJECTED: ' + r.status);
+          }
+          await r.arrayBuffer();
+        })(), timeout);
+        return;
+      } catch (error) {
+        if (attempt >= 4 || !isTransientRelayError(error)) throw error;
+        console.warn('Relay registration retry ' + (attempt + 1));
+        await waitForRelayRetry(relayRetryDelay(attempt));
+      }
+    }
   }
+
   async discover(): Promise<import('@acp/core').SignedAgentCard[]> {
     const r = await this.fetcher(this.url + '/agents');
     if (!r.ok) throw new Error('DISCOVERY_FAILED');
@@ -399,7 +423,7 @@ export class HttpRelayClient extends RelayCredentials implements RelayTransport 
     const bufferKey =
       recipientDid +
       '\0' +
-      (normalized.role ?? '') +
+      (normalized.lease ? 'lease:' : '') + (normalized.role ?? '') +
       '\0' +
       (normalized.taskIds ? [...normalized.taskIds].sort().join(',') : '');
     if (!normalized.peek) {
@@ -413,19 +437,56 @@ export class HttpRelayClient extends RelayCredentials implements RelayTransport 
       for (const id of normalized.taskIds) params.append('taskId', id);
     }
     if (normalized.peek) params.set('peek', 'true');
+    else if (normalized.lease) params.set('lease', 'true');
     const r = await this.fetcher(this.url + '/envelopes?' + params.toString(), {
       signal,
       headers: { authorization: 'Bearer ' + (await this.authToken(recipientDid, 'receive')) },
     });
     if (r.status === 204) return;
-    if (!r.ok) throw new Error('RELAY_REJECTED: ' + r.status);
+    if (!r.ok) {
+      await r.body?.cancel();
+      throw new Error('RELAY_REJECTED: ' + r.status);
+    }
     const body = (await r.json()) as SignedEnvelope | { envelopes: SignedEnvelope[] };
-    const values = 'envelopes' in body ? body.envelopes : [body];
+    let values = 'envelopes' in body ? body.envelopes : [body];
     if (!Array.isArray(values) || values.some((e) => !verifyEnvelope(e, recipientDid)))
       throw new Error('RELAY_TAMPERING_DETECTED');
     if (normalized.peek) return values[0];
+    if (normalized.lease) {
+      const now = Date.now();
+      for (const [id, entry] of this.delivered) if (entry.expires <= now) this.delivered.delete(id);
+      const fresh: SignedEnvelope[] = [];
+      for (const envelope of values) {
+        const id = recipientDid + ':' + envelope.payload.envelopeId;
+        const prior = this.delivered.get(id);
+        if (prior) {
+          if (prior.acknowledged) {
+            try { await this.acknowledgeDelivery(recipientDid, envelope.payload.envelopeId); }
+            catch (error) { if (!isTransientRelayError(error)) throw error; }
+          }
+          continue;
+        }
+        if (this.delivered.size >= 16384) throw new Error('RELAY_DEDUPE_CAPACITY');
+        this.delivered.set(id, { expires: now + 10 * 60_000, acknowledged: false });
+        fresh.push(envelope);
+      }
+      values = fresh;
+    }
     this.buffered.set(bufferKey, values);
     return values.shift();
+  }
+  async acknowledgeDelivery(recipientDid: string, envelopeId: string): Promise<void> {
+    const entry = this.delivered.get(recipientDid + ':' + envelopeId);
+    if (!entry) return;
+    // Processing has completed even if the DELETE response is lost. Redelivery retries the ack.
+    entry.acknowledged = true;
+    const r = await this.fetcher(this.url + '/envelopes/' + encodeURIComponent(envelopeId) +
+      '?recipient=' + encodeURIComponent(recipientDid), {
+        method: 'DELETE',
+        headers: { authorization: 'Bearer ' + await this.authToken(recipientDid, 'receive') },
+      });
+    await r.arrayBuffer();
+    if (!r.ok && r.status !== 404) throw new Error('RELAY_REJECTED: ' + r.status);
   }
   async peek(
     recipientDid: string,

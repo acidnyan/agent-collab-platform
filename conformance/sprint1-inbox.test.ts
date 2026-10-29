@@ -79,7 +79,7 @@ describe('Sprint 1 accepted task inbox', () => {
     const lines = (await readFile(inbox, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
     expect(lines).toHaveLength(2);
     expect(new Set(lines.map((line) => line.taskId)).size).toBe(2);
-    expect(lines[0]).toEqual({ receivedAt: expect.any(String), taskId: expect.any(String),
+    expect(lines[0]).toEqual({ envelopeId: expect.any(String), receivedAt: expect.any(String), taskId: expect.any(String),
       requesterOwnerDid: f.requester.did, requesterAgentDid: f.requester.did,
       title: 'Sprint 1', description: '仕様\n複数行', input: { message: 'hello\nworld' } });
     expect(Number.isFinite(Date.parse(lines[0].receivedAt))).toBe(true);

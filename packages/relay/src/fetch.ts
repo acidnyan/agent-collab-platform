@@ -53,6 +53,7 @@ export interface RelaySnapshot {
   authSeen?: string[];
   agents: SignedAgentCard[];
   envelopeExpiry?: [string, number][];
+  leaseExpiry?: [string, number][];
   seenExpiry?: [string, number][];
   authExpiry?: [string, number][];
   agentExpiry?: [string, number][];
@@ -84,11 +85,13 @@ export interface RelayReceiveFilter {
   taskId?: string | readonly string[];
   role?: RelayInboxRole;
   peek?: boolean;
+  lease?: boolean;
 }
 interface StoredEnvelope {
   envelope: SignedEnvelope;
   bytes: number;
   expiresAt: number;
+  leasedUntil?: number;
   role: RelayInboxRole;
 }
 interface TaskRoleState {
@@ -102,6 +105,7 @@ interface NormalizedReceiveFilter {
   taskIds?: Set<string>;
   role?: RelayInboxRole;
   peek: boolean;
+  lease?: boolean;
 }
 const WORKER_PRIMARY_EVENTS: ReadonlySet<string> = new Set([
   'PROPOSE',
@@ -236,6 +240,7 @@ export function normalizeReceiveFilter(filter?: RelayReceiveFilter): NormalizedR
     ...(taskIds ? { taskIds } : {}),
     ...(filter.role ? { role: filter.role } : {}),
     peek: filter.peek === true,
+    lease: filter.lease === true,
   };
 }
 export function parseReceiveFilterFromUrl(url: URL): RelayReceiveFilter | undefined {
@@ -256,12 +261,16 @@ export function parseReceiveFilterFromUrl(url: URL): RelayReceiveFilter | undefi
     .flatMap((v) => v.split(','))
     .map((v) => v.trim())
     .filter(Boolean);
+  const leaseParam = url.searchParams.get('lease');
+  if (leaseParam !== null && leaseParam !== 'true' && leaseParam !== 'false') throw new Error('INVALID_REQUEST');
+  const lease = leaseParam === 'true';
   const peek = peekParam === 'true' || peekParam === '1';
-  if (!roleParam && taskIdParams.length === 0 && !peek) return undefined;
+  if (!roleParam && taskIdParams.length === 0 && !peek && !lease) return undefined;
   return {
     ...(roleParam ? { role: roleParam as RelayInboxRole } : {}),
     ...(taskIdParams.length > 0 ? { taskId: taskIdParams } : {}),
     ...(peek ? { peek: true } : {}),
+    ...(lease ? { lease: true } : {}),
   };
 }
 export function inboxRecipientFromRequest(path: string, url: URL): string | undefined {
@@ -542,7 +551,7 @@ export class InMemoryRelay {
   ): SignedEnvelope | undefined {
     const isFilter =
       checkOrFilter !== undefined &&
-      ('role' in checkOrFilter || 'taskId' in checkOrFilter || 'peek' in checkOrFilter);
+      ('role' in checkOrFilter || 'taskId' in checkOrFilter || 'peek' in checkOrFilter || 'lease' in checkOrFilter);
     const check = isFilter ? undefined : (checkOrFilter as RelayAuthContext | undefined);
     const filter = isFilter ? (checkOrFilter as RelayReceiveFilter) : maybeFilter;
     const normalized = normalizeReceiveFilter(filter);
@@ -601,11 +610,13 @@ export class InMemoryRelay {
     if (!q || !q.length) return undefined;
     const index = q.findIndex(
       (item) =>
+        (normalized.peek || (item.leasedUntil ?? 0) <= this.now()) &&
         matchesStoredEnvelope(item, normalized) &&
         (!seenInPeek || !seenInPeek.has(item.envelope.payload.envelopeId)),
     );
     if (index < 0) return undefined;
-    const item = normalized.peek ? q[index] : q.splice(index, 1)[0];
+    const item = normalized.peek || normalized.lease ? q[index] : q.splice(index, 1)[0];
+    if (item && normalized.lease && !normalized.peek) item.leasedUntil = Math.min(item.expiresAt, this.now() + 30_000);
     if (!normalized.peek) {
       if (!q.length && !this.listeners.get(recipientDid)?.size) this.queues.delete(recipientDid);
       if (item) this.version++;
@@ -689,7 +700,7 @@ export class InMemoryRelay {
     const q = this.queues.get(did);
     if (!q?.length) return false;
     const normalized = normalizeReceiveFilter(filter);
-    return q.some((item) => matchesStoredEnvelope(item, normalized));
+    return q.some((item) => (normalized.peek || (item.leasedUntil ?? 0) <= this.now()) && matchesStoredEnvelope(item, normalized));
   }
   async wait(
     did: string,
@@ -699,6 +710,10 @@ export class InMemoryRelay {
   ): Promise<void> {
     this.evictExpired();
     if (signal?.aborted || ms <= 0 || this.hasMatching(did, filter)) return;
+    const normalized = normalizeReceiveFilter(filter);
+    const leaseWait = (this.queues.get(did) ?? [])
+      .filter(item => matchesStoredEnvelope(item, normalized) && (item.leasedUntil ?? 0) > this.now())
+      .reduce((delay, item) => Math.min(delay, item.leasedUntil! - this.now()), ms);
     await new Promise<void>((resolve) => {
       let settled = false;
       const done = () => {
@@ -713,7 +728,7 @@ export class InMemoryRelay {
         if (this.hasMatching(did, filter)) done();
       };
       const off = this.subscribe(did, checkWake),
-        timer = setTimeout(done, ms);
+        timer = setTimeout(done, leaseWait);
       signal?.addEventListener('abort', done, { once: true });
       // Cover the gap between the length check and listener installation.
       if (signal?.aborted || this.hasMatching(did, filter)) done();
@@ -722,11 +737,13 @@ export class InMemoryRelay {
   snapshot(): RelaySnapshot {
     this.evictExpired();
     const envelopeExpiry: [string, number][] = [];
+    const leaseExpiry: [string, number][] = [];
     const queues: [string, SignedEnvelope[]][] = [];
     for (const [did, queue] of this.queues) {
       const envelopes: SignedEnvelope[] = [];
       for (const item of queue) {
         envelopes.push(item.envelope);
+        if (item.leasedUntil) leaseExpiry.push([item.envelope.payload.envelopeId, item.leasedUntil]);
         envelopeExpiry.push([item.envelope.payload.envelopeId, item.expiresAt]);
       }
       queues.push([did, envelopes]);
@@ -737,6 +754,7 @@ export class InMemoryRelay {
       authSeen: [...this.authSeen.keys()],
       agents: [...this.agents.values()],
       envelopeExpiry,
+      leaseExpiry,
       seenExpiry: [...this.seen],
       authExpiry: [...this.authSeen],
       agentExpiry: [...this.agentExpiry],
@@ -746,6 +764,7 @@ export class InMemoryRelay {
     const seenExpiry = new Map(snapshot.seenExpiry ?? []);
     const authExpiry = new Map(snapshot.authExpiry ?? []);
     const envelopeExpiry = new Map(snapshot.envelopeExpiry ?? []);
+    const leaseExpiry = new Map(snapshot.leaseExpiry ?? []);
     const agentExpiry = new Map(snapshot.agentExpiry ?? []);
     const now = this.now();
     this.assertValidAgentSnapshot(snapshot, agentExpiry);
@@ -774,6 +793,7 @@ export class InMemoryRelay {
         did,
         envelopes.map((envelope) => ({
           envelope,
+          leasedUntil: leaseExpiry.get(envelope.payload.envelopeId),
           bytes: Buffer.byteLength(JSON.stringify(envelope)),
           expiresAt:
             envelopeExpiry.get(envelope.payload.envelopeId) ?? this.now() + this.envelopeTtlMs,

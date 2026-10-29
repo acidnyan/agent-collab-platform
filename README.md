@@ -2,6 +2,8 @@
 
 **English** | [日本語 (README.ja.md)](./README.ja.md)
 
+[Relay deadlines, retries, leases and acknowledgements](./docs/relay-reliability.md)
+
 [Persistent contacts and human-readable receipts](./docs/ux1.md)
 
 [Invite sharing, open job board and daily limits](./docs/ux2.md)

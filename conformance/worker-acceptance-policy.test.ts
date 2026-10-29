@@ -296,6 +296,9 @@ describe('acp worker CLI acceptance guard', () => {
     const close = async () => {
       if (closed) return;
       closed = true;
+      // Network outages are now retried. Terminate CLI readers with a permanent auth error.
+      server.relay.openInbox = () => { throw new Error('RELAY_UNAUTHORIZED'); };
+      await new Promise(resolve => setTimeout(resolve, 1100));
       await server.close();
     };
     cleanup.push(() => close());
@@ -513,7 +516,7 @@ describe('acp worker CLI acceptance guard', () => {
       '--adapter',
       'sandbox',
       '--once',
-    ]);
+    ]).catch(() => undefined);
     cleanup.push(async () => {
       await server.close().catch(() => undefined);
       await hidden.catch(() => undefined);
@@ -543,7 +546,7 @@ describe('acp worker CLI acceptance guard', () => {
       'sandbox',
       '--publish',
       '--once',
-    ]);
+    ]).catch(() => undefined);
     cleanup.push(async () => {
       await publishedServer.close().catch(() => undefined);
       await published.catch(() => undefined);

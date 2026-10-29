@@ -54,6 +54,7 @@ export interface JournalPlan {
 }
 
 interface StoredQueueItem {
+  leasedUntil?: number;
   envelope: SignedEnvelope;
   expiresAt: number;
   bytes: number;
@@ -141,6 +142,8 @@ export function planJournal(
   const puts: JournalPut[] = [];
   const deletes: string[] = [];
   const envelopeExpiry = pairMap(next.envelopeExpiry);
+  const leaseExpiry = pairMap(next.leaseExpiry);
+  const previousLease = pairMap(prev.leaseExpiry);
   const seenExpiry = pairMap(next.seenExpiry);
   const authExpiry = pairMap(next.authExpiry);
   const nextIds = new Set<string>();
@@ -149,13 +152,15 @@ export function planJournal(
     for (const envelope of queue) {
       const id = envelope.payload.envelopeId;
       nextIds.add(id);
-      if (nextCursor.seqById.has(id)) continue;
-      const seq = nextCursor.tail++;
+      const existing = nextCursor.seqById.get(id);
+      if (existing !== undefined && leaseExpiry.get(id) === previousLease.get(id)) continue;
+      const seq = existing ?? nextCursor.tail++;
       nextCursor.seqById.set(id, seq);
       puts.push({
         key: 'env:' + seq,
         value: {
           envelope,
+          leasedUntil: leaseExpiry.get(id),
           expiresAt: envelopeExpiry.get(id) ?? 0,
           bytes: Buffer.byteLength(JSON.stringify(envelope)),
         } satisfies StoredQueueItem,
@@ -314,6 +319,7 @@ async function loadMeta(
   cursor.agentGen = meta.agentGen;
   const queues = new Map<string, SignedEnvelope[]>();
   const envelopeExpiry: [string, number][] = [];
+  const leaseExpiry: [string, number][] = [];
   for (let seq = meta.head; seq < meta.tail; seq++) {
     const row = await storage.get<StoredQueueItem>('env:' + seq);
     if (!row?.envelope?.payload?.envelopeId) {
@@ -331,6 +337,7 @@ async function loadMeta(
     queue.push(row.envelope);
     queues.set(did, queue);
     envelopeExpiry.push([id, row.expiresAt]);
+    if (row.leasedUntil) leaseExpiry.push([id, row.leasedUntil]);
   }
   const seen: StoredSeen[] = [];
   const seenStart = Math.max(0, meta.seenTail - cursor.seenMod);
@@ -374,6 +381,7 @@ async function loadMeta(
       authSeen: cursor.liveAuth,
       agents,
       envelopeExpiry,
+      leaseExpiry,
       seenExpiry: seen.map((row) => [row.id, row.expiresAt]),
       authExpiry: auth.map((row) => [row.id, row.expiresAt]),
       agentExpiry,
