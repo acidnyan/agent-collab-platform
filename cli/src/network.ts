@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { inviteShareCommand } from './invite-share.js';
+import { publicSettingsFlags, publicProfileSummary } from './public-settings.js';
 import type { KeyPair, Schema, OpenPolicy } from '@acp/core';
 import { createSignedAgentCard, createInviteToken, discoverAgentCards } from '@acp/core';
 import { startLocalRelay, HttpRelayClient } from '@acp/relay';
@@ -112,9 +115,18 @@ function assertLlmAutoAccept(
 }
 export async function networkCommand(command: string, args: string[]): Promise<void> {
   const sub = ['relay', 'worker', 'invite'].includes(command) ? args.shift() : undefined;
+  if (command === 'worker' && sub === 'public') {
+    const index = args.indexOf('--settings');
+    if (index < 0 || !args[index + 1]) throw new Error('Missing --settings');
+    const settings = JSON.parse(readFileSync(args[index + 1], 'utf8'));
+    args.splice(index, 2);
+    if (args.some(a => ['--open','--publish','--auto-accept','--auto-approve','--yes','--allow-any-requester','--access-mode'].includes(a) || a.startsWith('--open-') || a === '--max-tasks-per-day'))
+      throw new Error('CONFLICTING_PUBLIC_SETTINGS');
+    return networkCommand('worker', ['start', ...args, ...publicSettingsFlags(settings)]);
+  }
+  if (command === 'invite' && sub !== 'create') return inviteShareCommand(sub ?? '', args);
   if ((command === 'relay' || command === 'worker') && sub !== 'start')
     throw new Error('Expected ' + command + ' start');
-  if (command === 'invite' && sub !== 'create') throw new Error('Expected invite create');
   const f = flags(args);
   const allowPrivateRelay = f.has('--allow-private-relay');
   if (command === 'relay') {
@@ -200,6 +212,10 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     }
     if (Object.keys(openPolicy).length && accessMode !== 'open')
       throw new Error('OPEN_POLICY_REQUIRES_OPEN_MODE');
+    if (accessMode === 'open') for (const field of Object.keys(openFlags) as (keyof OpenPolicy)[]) {
+      const general = acceptance[field];
+      if (general !== undefined) openPolicy[field] = Math.min(openPolicy[field] ?? general, general);
+    }
     assertLlmAutoAccept(adapterName, automatic, acceptance);
     let adapter: AgentAdapter;
     switch (adapterName) {
@@ -233,6 +249,10 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     if (allowedTaskTypes)
       adapter.skills = adapter.skills.map((skill) => ({ ...skill, taskTypes: allowedTaskTypes }));
     const worker = new WorkerNode({
+      ...(f.has('--max-tasks-per-day') ? { dailyLimit: {
+        path: join(dirname(contactsPath()), 'daily-tasks.json'),
+        maxTasks: optionalCount(f, 'max-tasks-per-day')!,
+      } } : {}),
       accessMode: accessMode as 'invite-only' | 'open',
       ...(Object.keys(openPolicy).length ? { openPolicy } : {}),
       owner: key,
@@ -248,6 +268,11 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       ...acceptance,
       allowPrivateRelay,
     });
+    if (f.has('--preview')) {
+      console.log(JSON.stringify(publicProfileSummary(worker.agentCard, acceptance.maxTasksPerRequesterPerMinute,
+        optionalCount(f, 'max-tasks-per-day'), automatic), null, 2));
+      return;
+    }
     if (acceptance.publishToRegistry) await worker.register();
     if (accessMode === 'open' && automatic && !acceptance.allowedRequesterDids?.length)
       console.error(`[ACP WARNING] Worker started in --open mode with ${f.has('--yes') ? '--yes' : 'automatic approval'} and no requester allowlist. Any requester can submit tasks for automatic acceptance within configured limits.`);
