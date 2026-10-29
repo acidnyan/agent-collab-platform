@@ -8,6 +8,8 @@ import type { AuditBundle, AuditVerificationOptions } from '@acp/ledger';
 import { runDemo } from '@acp/two-owner-demo';
 import { networkCommand } from './network.js';
 import { mcpServerCommand } from './mcp.js';
+import { contactsCommand } from './contacts.js';
+import { receiptCommand } from './receipt.js';
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as unknown;
 const AUDIT_VERIFY_USAGE =
   'Usage: acp audit-verify <audit.jsonl|bundle.json> [trust-anchor.json] ' +
@@ -73,6 +75,12 @@ function save(path: string, value: unknown, privateFile = false) {
 async function main(args: string[]) {
   const [command, ...rest] = args;
   switch (command) {
+    case 'contacts':
+      contactsCommand(rest);
+      break;
+    case 'receipt':
+      receiptCommand(rest);
+      break;
     case 'relay':
     case 'worker':
     case 'delegate':
@@ -171,7 +179,7 @@ async function main(args: string[]) {
     }
     default:
       throw new Error(
-        'Usage: acp <keygen|validate|approve|audit-verify|demo|relay|worker|delegate|discover|invite|mcp-server>',
+        'Usage: acp <keygen|validate|approve|audit-verify|receipt|contacts|demo|relay|worker|delegate|discover|invite|mcp-server>',
       );
   }
 }
