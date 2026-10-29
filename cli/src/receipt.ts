@@ -36,7 +36,7 @@ export function createReceipt(raw: string, anchor?: AuditVerificationOptions) {
     message: status === 'COMPLETED' ? 'Completed. Both sides signed this record.' :
       status === 'UNCONFIRMED' ? 'Settlement recorded; completeness unconfirmed without an independent audit head.' :
       status === 'INCOMPLETE' ? 'Incomplete record; completion not established.' : 'Invalid record; completion not established.',
-    paymentNotice: 'SETTLED is not proof of payment. ACP settlement records work, not money.',
+    paymentNotice: 'SETTLED is not proof of payment. Sealbridge settlement records work, not money.',
     verification: checked,
     taskId: entries.length ? safeId(entries[0].body.taskId) : null,
     who: entries.length ? bundle!.checkpoint.actor.payload.actors.map(safeId) : [],
@@ -56,8 +56,8 @@ export function receiptHtml(receipt: ReturnType<typeof createReceipt>): string {
   const row = (label: string, v: string | number | null) => '<tr><th scope="row">' + escape(label) + '</th><td>' + value(v) + '</td></tr>';
   return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">' +
     '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'">' +
-    '<title>Agent Collaboration Platform receipt</title><style>body{font:16px system-ui;max-width:56rem;margin:3rem auto;padding:1rem;line-height:1.6}pre,td{white-space:pre-wrap;overflow-wrap:anywhere}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.5rem;border-bottom:1px solid #ccc}th{width:12rem}details{margin-top:2rem}</style>' +
-    '<h1>Agent Collaboration Platform receipt</h1><h2>' + escape(receipt.message) + '</h2><p>' + escape(receipt.paymentNotice) +
+    '<title>Sealbridge receipt</title><style>body{font:16px system-ui;max-width:56rem;margin:3rem auto;padding:1rem;line-height:1.6}pre,td{white-space:pre-wrap;overflow-wrap:anywhere}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:.5rem;border-bottom:1px solid #ccc}th{width:12rem}details{margin-top:2rem}</style>' +
+    '<h1>Sealbridge receipt</h1><h2>' + escape(receipt.message) + '</h2><p>' + escape(receipt.paymentNotice) +
     '</p><table><caption>Recorded task summary</caption>' + row('Job', receipt.taskId) +
     row('Participants', receipt.who.join('\n') || null) + row('What', receipt.what) +
     row('First signed (UTC)', receipt.when.firstSignedAt) + row('Last signed (UTC)', receipt.when.lastSignedAt) +
@@ -69,7 +69,7 @@ export function receiptHtml(receipt: ReturnType<typeof createReceipt>): string {
 }
 export function receiptCommand(args: string[]): void {
   const input = args.shift();
-  if (!input || input.startsWith('--')) throw new Error('Usage: acp receipt <audit.jsonl> [--out <prefix>] [--trust-anchor <json>]');
+  if (!input || input.startsWith('--')) throw new Error('Usage: sealbridge receipt <audit.jsonl> [--out <prefix>] [--trust-anchor <json>]');
   const options = new Map<string, string>();
   for (let i = 0; i < args.length; i += 2) {
     if (!['--out', '--trust-anchor'].includes(args[i]) || options.has(args[i]) || !args[i + 1] || args[i + 1].startsWith('--')) throw new Error('INVALID_RECEIPT_OPTION');

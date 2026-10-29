@@ -7,9 +7,9 @@ pnpm install
 pnpm build
 pnpm test
 pnpm --filter @acp/two-owner-demo start
-pnpm acp demo --audit-dir /tmp/acp-demo-audit
-pnpm acp audit-verify /tmp/acp-demo-audit/alice.jsonl
-pnpm acp audit-verify /tmp/acp-demo-audit/bob.jsonl
+pnpm sealbridge demo --audit-dir /tmp/acp-demo-audit
+pnpm sealbridge audit-verify /tmp/acp-demo-audit/alice.jsonl
+pnpm sealbridge audit-verify /tmp/acp-demo-audit/bob.jsonl
 ```
 
 Those two commands do not pass a trust anchor, so a valid file prints

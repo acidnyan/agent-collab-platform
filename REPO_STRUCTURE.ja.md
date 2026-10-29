@@ -179,7 +179,7 @@ agent-collab-platform/
    - Owner Bob（Worker）のGatewayがHITL承認（`ApprovalReceipt`）を経て `ACCEPT` し、`TaskContract` が成立。
    - BobのエージェントがAliceから付与されたRead-Only `CapabilityToken`（`docs/read` のみ許可、最大5回）を使ってAlice GatewayのMCPプロキシから対象文書を取得。
    - Bobが成果物（SHA-256ハッシュ付きJSON）と `UsageReceipt`（消費トークンが予算内）を `DELIVER`。
-   - Alice Gatewayが `outputSchema` とダイジェストを自動検証して `VERIFY_ACCEPT` → `SETTLED` へ遷移し、双方の監査ログを `acp audit-verify` で検証して `VALID` となる。
+   - Alice Gatewayが `outputSchema` とダイジェストを自動検証して `VERIFY_ACCEPT` → `SETTLED` へ遷移し、双方の監査ログを `sealbridge audit-verify` で検証して `VALID` となる。
 2. **攻撃遮断1（Capability権限昇格の拒否）**:
    - Bob（またはインジェクションされたプロンプト）が許可されていない `docs/delete` ツールや回数上限（6回目）を呼び出そうとした瞬間、Alice Gatewayが `CAPABILITY_VIOLATION` で遮断し監査ログに記録する。
 3. **攻撃遮断2（予算超過の自動停止）**:
@@ -241,6 +241,6 @@ agent-collab-platform/
 
 依存の向きは `adapters → runtime → relay/core/ledger/sandbox` です。`cli → adapters/runtime/relay` であり、元のサンプルもそのまま使えます。ワイルドカードの pnpm ワークスペースは `packages/adapters` を含みます。ルートの tsconfig はそのソースを含め、パッケージ自身が宣言ファイルを出すビルドを持ちます。
 
-新しい CLI コマンドは `relay start`、`worker start`、`delegate`、`discover`、`invite create` です。既存の `keygen`、`validate`、`approve`、`audit-verify`、`demo` はインターフェースを保ちます。`pnpm acp` はソースの CLI を実行します。`node cli/dist/index.js` とパッケージのバイナリは、コンパイル済み CLI を実行します。
+新しい CLI コマンドは `relay start`、`worker start`、`delegate`、`discover`、`invite create` です。既存の `keygen`、`validate`、`approve`、`audit-verify`、`demo` はインターフェースを保ちます。`pnpm sealbridge` はソースの CLI を実行します。`node cli/dist/index.js` とパッケージのバイナリは、コンパイル済み CLI を実行します。
 
 Cloudflare の既定ワーカーエクスポートは `packages/relay/src/worker.ts` で、設定された Durable Object へリクエストを振ります。Web の fetch ハンドラは、Node のソケットを束縛しなくても、ローカルまたは組み込みホストで使えます。WebSocket は Node の入口が提供します。デプロイと認証情報は、オーナーが自分で管理します。

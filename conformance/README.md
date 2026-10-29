@@ -1,4 +1,4 @@
-# ACP conformance suite
+# Sealbridge conformance suite
 
 Run `pnpm build && pnpm test` with Node 22 and pnpm 10. The suite is offline after
 installation; all keys and provider usage are synthetic. `pnpm validate:schemas`
@@ -65,7 +65,7 @@ that level when the contract requires `oci_container`. The same test reads
 and that kernel network isolation is `oci_container` (`--network none`).
 
 `p2-12-audit-verify-trust-anchor-notice.test.ts` checks that `verifyAudit` and
-`acp audit-verify` report `VALID (no trust anchor: truncation not checked)` when
+`sealbridge audit-verify` report `VALID (no trust anchor: truncation not checked)` when
 no external anchor is supplied. `--expect-final-state`, `--expect-last-hash`,
 and `--expect-entry-count` (and the same fields on `verifyAudit` and
 `acp_verify_audit_bundle`) set `trustAnchorVerified` and `truncationChecked`

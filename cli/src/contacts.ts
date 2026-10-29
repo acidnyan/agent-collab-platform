@@ -106,7 +106,7 @@ export function contactsCommand(args: string[]): void {
     options.set(flag, value);
   }
   if (!['list', 'add', 'allow', 'revoke', 'remove'].includes(action) || positional.length !== (action === 'list' ? 0 : 1) || !options.has('--key'))
-    throw new Error('Usage: acp contacts list|add <invite>|allow <ownerDid>|revoke <ownerDid>|remove <ownerDid> --key <key> [--file <contacts.json>] [--name <name>]');
+    throw new Error('Usage: sealbridge contacts list|add <invite>|allow <ownerDid>|revoke <ownerDid>|remove <ownerDid> --key <key> [--file <contacts.json>] [--name <name>]');
   const key = JSON.parse(readFileSync(options.get('--key')!, 'utf8')) as KeyPair;
   const path = options.get('--file') ?? contactsPath();
   let contacts: Contact[];

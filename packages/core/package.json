@@ -24,5 +24,11 @@
   },
   "engines": {
     "node": ">=22 <23"
-  }
+  },
+  "description": "Sealbridge: encrypted cross-owner agent collaboration (core)",
+  "keywords": [
+    "sealbridge",
+    "agent-collaboration",
+    "mcp"
+  ]
 }

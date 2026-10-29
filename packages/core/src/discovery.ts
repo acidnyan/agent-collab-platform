@@ -345,7 +345,7 @@ export function createSignedAgentCard(
     {
       type: 'AgentCard' as const,
       version: options.version ?? '0.2.0',
-      description: options.description ?? 'ACP worker',
+      description: options.description ?? 'Sealbridge worker',
       costModes: options.costModes ?? (['worker_byok'] as BudgetSpec['costBearer'][]),
       name: options.name,
       skills: options.skills,

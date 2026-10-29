@@ -16,7 +16,7 @@ const KNOWN = new Set([
   '--approval-webhook',
 ]);
 const USAGE =
-  'Usage: acp mcp-server [--key <file>] [--relay URL] [--allow-private-relay] [--allow-worker <did>] [--allow-relay <url>] [--require-approval | --approval-webhook <url>]';
+  'Usage: sealbridge mcp-server [--key <file>] [--relay URL] [--allow-private-relay] [--allow-worker <did>] [--allow-relay <url>] [--require-approval | --approval-webhook <url>]';
 
 function flags(args: string[]): Map<string, string | true> {
   const out = new Map<string, string | true>();

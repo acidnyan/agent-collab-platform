@@ -1,4 +1,4 @@
-# ACP Protocol Specification (`spec/`)
+# Sealbridge Protocol Specification (`spec/`)
 
 **English** | [日本語 (README.ja.md)](./README.ja.md)
 
@@ -102,8 +102,8 @@ An independent latest head is required to detect rollback to an older valid bund
 A valid `reportProgress` may include intermediate `metrics`, and those metrics are charged to the session quota before the progress frame is queued. An invalid `reportProgress` payload (`INVALID_PROGRESS`) does not apply its `metrics`. The returned promise rejects immediately, and the session records a sticky failure, so a later deliverable cannot settle. The requester observes `PEER_REJECTED: {"code":"INVALID"}` and the worker fails with `INVALID_PROGRESS`, even if the adapter catches the promise.
 
 A2A AgentCard, Task, Message and Artifact retain SDK wire shapes, carried inside
-signed ACP envelopes. The bridge uses the installed A2A SDK 0.3 wire profile;
-ACP contract/receipt objects are overlay payloads rather than changes to A2A.
+signed Sealbridge envelopes. The bridge uses the installed A2A SDK 0.3 wire profile;
+Sealbridge contract/receipt objects are overlay payloads rather than changes to A2A.
 MCP `tools/call` requests and results use the official SDK and are physically
 proxied outside the sandbox. Unknown tools and metadata-free bypasses are denied.
 

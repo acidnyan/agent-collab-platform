@@ -219,7 +219,7 @@ describe('progress streaming and multi-worker delegation', () => {
   });
 });
 
-describe('ACP MCP server', () => {
+describe('Sealbridge MCP server', () => {
   it('answers initialize, tools/list, invite, revoke, and audit verification', async () => {
     const owner = generateKeyPair();
     const server = new AcpMcpServer({ owner, relay: 'http://127.0.0.1:9' });
@@ -228,7 +228,7 @@ describe('ACP MCP server', () => {
       result: {
         protocolVersion: '2024-11-05',
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: 'acp-mcp-server', version: '0.1.0' },
+        serverInfo: { name: 'sealbridge-mcp-server', version: '0.1.0' },
       },
     });
     expect((init as { result: { instructions: string } }).result.instructions.length).toBeGreaterThan(

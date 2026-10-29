@@ -1,5 +1,5 @@
 {
-  "name": "agent-collab-platform",
+  "name": "sealbridge",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -16,7 +16,8 @@
     "test:security-proof": "vitest run conformance/security-proofs.test.ts",
     "security-proof": "vitest run conformance/security-proofs.test.ts",
     "validate:schemas": "tsx scripts/validate-schemas.ts",
-    "acp": "tsx cli/src/index.ts"
+    "acp": "tsx cli/src/acp.ts",
+    "sealbridge": "tsx cli/src/index.ts"
   },
   "devDependencies": {
     "typescript": "~5.9.3",
@@ -29,5 +30,11 @@
   "dependencies": {
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.1"
-  }
+  },
+  "description": "Sealbridge: encrypted cross-owner agent collaboration",
+  "keywords": [
+    "sealbridge",
+    "agent-collaboration",
+    "mcp"
+  ]
 }

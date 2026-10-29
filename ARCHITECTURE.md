@@ -1,4 +1,4 @@
-# ARCHITECTURE: Cross-Owner Agent Collaboration Platform
+# ARCHITECTURE: Cross-Owner Sealbridge
 
 **English** | [日本語 (ARCHITECTURE.ja.md)](./ARCHITECTURE.ja.md)
 
@@ -137,7 +137,7 @@ stateDiagram-v2
 
 Invite and capability revocation are separate from task-scoped `revokeTask`. A `RevocationNotice` is an Ed25519 JCS statement. The worker checks invite tokens before `ACCEPT`. `CapabilityGuard` checks capability ids and token digests before a tool call and throws `TOKEN_REVOKED`.
 
-`RequesterClient.delegateMulti` opens one independent contract per worker. `race` keeps the first verified deliverable. `quorum` groups verified outputs by JCS SHA-256 and resolves at `quorumSize`, cancelling workers that are still running. `acp mcp-server` exposes these operations as MCP tools over stdio.
+`RequesterClient.delegateMulti` opens one independent contract per worker. `race` keeps the first verified deliverable. `quorum` groups verified outputs by JCS SHA-256 and resolves at `quorumSize`, cancelling workers that are still running. `sealbridge mcp-server` exposes these operations as MCP tools over stdio.
 
 ---
 
@@ -321,7 +321,7 @@ uses the M1 signed contract machine. Every application event is followed by an
 actor-signed audit body and a peer-signed AckReceipt. A final signed checkpoint
 is countersigned over the network; neither process possesses the peer key.
 Audit JSONL is written incrementally, sealed at settlement, and checked with the
-existing `verifyAudit` / `acp audit-verify`. Interrupted logs remain unsealed and
+existing `verifyAudit` / `sealbridge audit-verify`. Interrupted logs remain unsealed and
 therefore cannot be mistaken for completed valid bundles.
 
 `@acp/adapters` supplies `CommandAgentAdapter`, `ClaudeCodeAdapter`,
@@ -348,7 +348,7 @@ checks pass. Unknown deterministic check targets are rejected.
 The blind relay offers HTTP, bounded long polling, SSE and WebSocket polling or
 live subscriptions. It verifies outer signatures and shape, bounds queue/body
 sizes, prevents envelope-ID replay, and verifies signed AgentCard registration.
-`/.well-known/agent.json` returns an A2A-shaped card with the signed ACP extension;
+`/.well-known/agent.json` returns an A2A-shaped card with the signed Sealbridge extension;
 `/agents` and `/agents/:did` expose the signed records. Invites embed an owner-signed
 card, routing identities, relay URL and validity window in either supported URI
 format. Gateways independently enforce message order and reject replay.

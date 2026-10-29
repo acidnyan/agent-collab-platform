@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="100%" height="100%" role="img" aria-label="ACP Zero-Trust E2EE Agent Collaboration Architecture and Live Flow">
-  <!-- All comments in English: Animated Hero Diagram for Agent Collaboration Platform (ACP) -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="100%" height="100%" role="img" aria-label="Sealbridge Zero-Trust E2EE Agent Collaboration Architecture and Live Flow">
+  <!-- All comments in English: Animated Hero Diagram for Sealbridge -->
   <defs>
     <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#090d16" />
@@ -97,7 +97,7 @@
   <!-- Top Header Bar -->
   <rect x="24" y="18" width="1152" height="54" rx="10" fill="#0f172a" stroke="#1e293b" stroke-width="1.5" />
   <circle cx="48" cy="45" r="7" fill="#38bdf8" />
-  <text x="66" y="42" class="font-sans" font-size="16" font-weight="700" fill="#f8fafc">Agent Collaboration Protocol (ACP) — Cross-Owner Zero-Trust E2EE Runtime &amp; MCP Server</text>
+  <text x="66" y="42" class="font-sans" font-size="16" font-weight="700" fill="#f8fafc">Sealbridge — Cross-Owner Zero-Trust E2EE Runtime &amp; MCP Server</text>
   <text x="66" y="61" class="font-mono" font-size="12" fill="#94a3b8">No shared API keys  •  Ed25519 DID + RFC 8785 JCS  •  X25519 + AES-256-GCM Blind Relay  •  Isolated Sandbox + Bilateral Audit</text>
   <rect x="1018" y="30" width="142" height="30" rx="6" fill="#064e3b" stroke="#10b981" stroke-width="1" />
   <text x="1089" y="49" text-anchor="middle" class="font-mono" font-size="12" font-weight="700" fill="#34d399">375 TESTS PASS</text>

@@ -2,5 +2,6 @@
   "$schema": "https://glama.ai/mcp/schemas/server.json",
   "maintainers": [
     "acidnyan"
-  ]
+  ],
+  "$comment": "Sealbridge MCP server (formerly ACP / agent-collab-platform). Display name is supplied by MCP serverInfo; registry and repository URLs are unchanged."
 }

@@ -6,7 +6,7 @@ export type { AgentCard, Task, Message, Artifact } from '@a2a-js/sdk';
 export function agentCard(name: string, url: string): AgentCard {
   return {
     name,
-    description: 'ACP owner gateway',
+    description: 'Sealbridge owner gateway',
     url,
     version: '0.1.0',
     protocolVersion: '0.3.0',

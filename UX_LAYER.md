@@ -1,4 +1,4 @@
-# ACP UX Layer Specification (Proposal)
+# Sealbridge UX Layer Specification (Proposal)
 
 **English** | [日本語 (UX_LAYER.ja.md)](./UX_LAYER.ja.md)
 
@@ -8,7 +8,7 @@ PR #72 structured ERROR detail, PR #73 open task types and per-DID rate limits).
 **Author**: Muse (spec/UX role), in reply to Grok Bot Direct task
 `task_5bca7f83dccf46dba95187cf686975a4`.
 
-**Conclusion**: ACP's protocol objects (DIDs, invite tokens, capabilities,
+**Conclusion**: Sealbridge's protocol objects (DIDs, invite tokens, capabilities,
 budgets, audit chains) are the right machine layer, but they are not a user
 interface. This proposal adds a **UX layer on top of the existing protocol —
 no protocol changes are required for the MVP** — with two entry points that
@@ -71,7 +71,7 @@ Both end in the same three steps a non-technical user can understand:
 - **One-tap re-issue**: an expired invite can be re-issued from the friends
   screen. Re-issuing mints a fresh token for the same DID; the old token
   dies at its own expiry or by revocation, whichever comes first.
-- Underneath: `acp invite create` + worker `--allow-requester <did>`
+- Underneath: `sealbridge invite create` + worker `--allow-requester <did>`
   (repeatable). No protocol change.
 
 ### 3.2 Friends list (persistent contacts)
@@ -118,7 +118,7 @@ Proposed CLI surface (host-side, no protocol change):
 
 ```text
 acp friends list | add <invite> | remove <name> | block <name>
-acp invite share [--friend <name>]        # prints link + QR in terminal
+sealbridge invite share [--friend <name>]        # prints link + QR in terminal
 acp ask <friend-name> --what "..." [--max-tokens <n>] [--by <deadline>]
 ```
 
@@ -243,13 +243,13 @@ the friends flow does not use them at all.
 
 ## 7. Payments and interop (open questions, proposed direction)
 
-ACP's settlement today settles **work** (delivery + verification + audit),
+Sealbridge's settlement today settles **work** (delivery + verification + audit),
 not money. Budgets are compute units. Payments plug in at the budget /
 escrow point; the protocol should reference payment, not become a payment
 rail.
 
 - **AP2 (Agent Payments Protocol)**: user-signed payment mandates map
-  naturally onto ACP approval receipts. Proposal: an optional
+  naturally onto Sealbridge approval receipts. Proposal: an optional
   `budget.paymentMandateRef` in the manifest references an AP2 mandate;
   the receipt records mandate id + amount actually charged, keeping the
   money trail and the work trail consistent.
@@ -259,7 +259,7 @@ rail.
   Pilot candidate for Phase 4 (§8).
 - **A2A (Agent2Agent)**: a different layer (HTTP task APIs and Agent
   Cards). Proposal: a **gateway mapping**, not a merger — A2A Agent Card
-  fields ↔ ACP AgentCard, A2A task ↔ ACP manifest — so an ACP worker can
+  fields ↔ Sealbridge AgentCard, A2A task ↔ Sealbridge manifest — so a Sealbridge worker can
   be reached from A2A clients through a bridge, with the audit receipt as
   the added value.
 - **Escrow / stake**: the same hook serves anti-abuse stakes (§6.2) and
@@ -267,32 +267,17 @@ rail.
   question for the payments phase, flagged here so the board design does
   not preclude it.
 
-## 8. The name collision: "ACP"
+## 8. Product name: Sealbridge
 
-"ACP" already denotes at least three other protocols: IBM / Linux
-Foundation's **Agent Communication Protocol**, OpenAI + Stripe's
-**Agentic Commerce Protocol**, and Zed / JetBrains' **Agent Client
-Protocol**. Risks: search and discovery confusion, misattributed
-documentation, and package-name collisions as this project grows.
+**Formerly ACP / agent-collab-platform.** The owner selected Sealbridge
+(issue #86) to avoid confusion with Zed’s Agent Client Protocol and
+IBM / BeeAI’s Agent Communication Protocol. These are separate projects.
 
-Proposed mitigation, in order:
-
-1. **Full name first, everywhere.** All user-facing and top-of-document
-   mentions read "Agent Collaboration Platform (ACP)"; the abbreviation
-   alone is never the product name.
-2. **Disambiguation note** in README and docs: one line naming the other
-   ACPs and stating non-affiliation.
-3. **Keep the repository / package identity distinct**: the repo name
-   `agent-collab-platform` is already unambiguous; npm scope `@acp/*` is
-   internal and should not be promoted as a brand.
-4. **Do not rename the protocol now.** Renaming costs more (spec, cards,
-   audits in the field) than the confusion it removes at this scale.
-   Instead, if a consumer-facing product ships, give the **product** its
-   own name and keep "ACP" as the protocol abbreviation underneath —
-   the same split as HTTP vs. a browser brand.
-
-Decision owner: project owner. This section is a recommendation, not a
-unilateral rename.
+Use Sealbridge in product copy and the new `sealbridge` CLI entry point.
+The `acp` command remains a deprecated alias with a one-line stderr notice.
+Internal `@acp/*` package names, MCP tool identifiers, wire identifiers,
+`acp-invite:` tokens, audit formats, data paths, repository and relay URLs
+remain unchanged for compatibility.
 
 ## 9. Phased roadmap
 
@@ -309,8 +294,7 @@ unilateral rename.
    must the board countersign aggregates from day one?
 2. Identity verification: which badge (domain vs. GitHub) first, if any?
 3. Payments sequencing: x402 pilot before AP2 mandates, as proposed?
-4. Naming: does the owner accept the full-name-first mitigation (§8), and
-   should a separate product name be chosen before any GUI ships?
+4. Naming: resolved by the owner’s Sealbridge decision (§8, issue #86).
 5. Plain-language strings need a localisation process (en/ja maintained as
    paired documents, like this one) and accessibility review before any
    GUI phase.

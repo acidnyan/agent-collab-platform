@@ -38,7 +38,7 @@ const signatureSchema = objectSchema(
   'Ed25519 signature over the RFC 8785 JCS payload.',
   {
     signerDid: described('did:key that produced this signature.', { type: 'string' }),
-    canonicalization: described('Canonicalization used before signing. ACP signatures use RFC8785-JCS.', {
+    canonicalization: described('Canonicalization used before signing. Sealbridge signatures use RFC8785-JCS.', {
       type: 'string',
       enum: ['RFC8785-JCS'],
     }),
@@ -458,7 +458,7 @@ export const mcpTools: Json = [
     name: 'acp_delegate_task',
     title: 'Delegate one task',
     description:
-      'Delegate one JSON task to a single remote ACP worker and return the verified deliverable, taskId, status, and audit summary. Use acp_delegate_multi for race or quorum, and acp_verify_audit_bundle to check a bundle you already hold. Pass inviteToken, or workerDid plus relayUrl: an invite matches allowedWorkerDids on agentDid or ownerDid and embeds its relay, while a bare DID must be listed exactly. The server signs with its Ed25519 owner key, enforces worker and relay allowlists, and obtains approval before task input is transmitted externally over the relay; each call opens a new session and is not idempotent. Bad arguments are JSON-RPC -32602, and operational failure returns isError true with { error: CODE } without sending input.',
+      'Delegate one JSON task to a single remote Sealbridge worker and return the verified deliverable, taskId, status, and audit summary. Use acp_delegate_multi for race or quorum, and acp_verify_audit_bundle to check a bundle you already hold. Pass inviteToken, or workerDid plus relayUrl: an invite matches allowedWorkerDids on agentDid or ownerDid and embeds its relay, while a bare DID must be listed exactly. The server signs with its Ed25519 owner key, enforces worker and relay allowlists, and obtains approval before task input is transmitted externally over the relay; each call opens a new session and is not idempotent. Bad arguments are JSON-RPC -32602, and operational failure returns isError true with { error: CODE } without sending input.',
     readOnlyHint: false,
     destructiveHint: false,
     idempotentHint: false,
@@ -496,7 +496,7 @@ export const mcpTools: Json = [
     name: 'acp_delegate_multi',
     title: 'Delegate to multiple workers',
     description:
-      'Delegate one JSON task to several remote ACP workers and return the winning deliverable, output digest, task ids, and per-worker audit summaries. Use acp_delegate_task for a single worker; do not use this to mint invites or revoke tokens. mode race keeps the first verified deliverable and cancels the rest, while mode quorum waits until quorumSize workers agree on one output digest (default is floor of the worker count over 2, plus 1) or fails with QUORUM_NOT_REACHED. Each workers item needs workerDid and may include inviteToken or relayUrl; allowlists, Ed25519 signing, and outbound approval run before input is transmitted externally to the worker agents over the relay. The call is not idempotent, bad arguments are JSON-RPC -32602, and other failures return isError true with { error: CODE } and no partial deliverable.',
+      'Delegate one JSON task to several remote Sealbridge workers and return the winning deliverable, output digest, task ids, and per-worker audit summaries. Use acp_delegate_task for a single worker; do not use this to mint invites or revoke tokens. mode race keeps the first verified deliverable and cancels the rest, while mode quorum waits until quorumSize workers agree on one output digest (default is floor of the worker count over 2, plus 1) or fails with QUORUM_NOT_REACHED. Each workers item needs workerDid and may include inviteToken or relayUrl; allowlists, Ed25519 signing, and outbound approval run before input is transmitted externally to the worker agents over the relay. The call is not idempotent, bad arguments are JSON-RPC -32602, and other failures return isError true with { error: CODE } and no partial deliverable.',
     readOnlyHint: false,
     destructiveHint: false,
     idempotentHint: false,
@@ -629,7 +629,7 @@ export const mcpTools: Json = [
     name: 'acp_create_invite',
     title: 'Create an invite token',
     description:
-      'Sign an acp-invite token for this server owner and return it for a requester to pass to acp_delegate_task. Use this to mint a shareable invite, use acp_revoke_token to invalidate one, and use acp_discover_workers to list registered workers instead of guessing a DID. relayUrl is required and is embedded in the token, name defaults to the server name or ACP Worker, expiresInSeconds defaults to 3600 and must be an integer from 1 to 2592000, and agentDid defaults to the owner DID. A different agentDid is signed only when this server holds that agent key; otherwise the call fails with AGENT_DELEGATION_REQUIRED. Signing is local Ed25519 with no relay traffic, each call mints a distinct token so it is not idempotent, and bad arguments are JSON-RPC -32602 while other failures return isError true with { error: CODE }.',
+      'Sign an acp-invite token for this server owner and return it for a requester to pass to acp_delegate_task. Use this to mint a shareable invite, use acp_revoke_token to invalidate one, and use acp_discover_workers to list registered workers instead of guessing a DID. relayUrl is required and is embedded in the token, name defaults to the server name or Sealbridge Worker, expiresInSeconds defaults to 3600 and must be an integer from 1 to 2592000, and agentDid defaults to the owner DID. A different agentDid is signed only when this server holds that agent key; otherwise the call fails with AGENT_DELEGATION_REQUIRED. Signing is local Ed25519 with no relay traffic, each call mints a distinct token so it is not idempotent, and bad arguments are JSON-RPC -32602 while other failures return isError true with { error: CODE }.',
     readOnlyHint: false,
     destructiveHint: false,
     idempotentHint: false,
@@ -642,7 +642,7 @@ export const mcpTools: Json = [
           { type: 'string' },
         ),
         name: described(
-          'Display name stored on the signed agent card inside the invite. Defaults to the server name, or ACP Worker when the server has no name.',
+          'Display name stored on the signed agent card inside the invite. Defaults to the server name, or Sealbridge Worker when the server has no name.',
           { type: 'string' },
         ),
         expiresInSeconds: described(

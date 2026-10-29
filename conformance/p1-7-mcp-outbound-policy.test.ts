@@ -390,12 +390,12 @@ describe('MCP outbound approval', () => {
       taskId: 'task_mcp_1',
       gate: 'external_side_effect',
       target,
-      details: { reason: 'outbound delegation to a remote ACP worker' },
+      details: { reason: 'outbound delegation to a remote Sealbridge worker' },
     });
     expect(body).toEqual({
       taskId: 'task_mcp_1',
       summaryHash: digest(target),
-      reason: 'outbound delegation to a remote ACP worker',
+      reason: 'outbound delegation to a remote Sealbridge worker',
       approverDid: owner.did,
     });
     expect(verifyApproval(receipt, owner.did, 'task_mcp_1', 'external_side_effect', target)).toBe(
@@ -452,7 +452,7 @@ describe('MCP outbound approval', () => {
       expect(result.body.status).toBe('SETTLED');
       expect(result.body.deliverable).toEqual({ tag: 'bob', input: { n: 1 } });
       expect(posts[0]).toMatchObject({
-        reason: 'outbound delegation to a remote ACP worker',
+        reason: 'outbound delegation to a remote Sealbridge worker',
         approverDid: alice.did,
       });
       expect(posts[0].summaryHash).toMatch(/^sha256:[a-f0-9]{64}$/);

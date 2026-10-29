@@ -87,7 +87,7 @@ when checking for replacement or rollback to an older, legitimately signed bundl
 No offline hash chain can distinguish a complete old valid history from a current
 one without such an external trust anchor. `verifyAudit` records that distinction:
 `statusLabel` is `VALID (no trust anchor: truncation not checked)` when no external
-anchor was supplied, while `status` stays `VALID`. `acp audit-verify` accepts
+anchor was supplied, while `status` stays `VALID`. `sealbridge audit-verify` accepts
 `--expect-final-state`, `--expect-last-hash`, and `--expect-entry-count` in addition
 to the positional trust-anchor file. `acp_verify_audit_bundle` accepts the same three
 fields. A matching anchor sets `trustAnchorVerified` and `truncationChecked`. The

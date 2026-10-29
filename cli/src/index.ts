@@ -13,7 +13,7 @@ import { receiptCommand } from './receipt.js';
 import { boardCommand } from './board.js';
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as unknown;
 const AUDIT_VERIFY_USAGE =
-  'Usage: acp audit-verify <audit.jsonl|bundle.json> [trust-anchor.json] ' +
+  'Usage: sealbridge audit-verify <audit.jsonl|bundle.json> [trust-anchor.json] ' +
   '[--expect-final-state <state>] [--expect-last-hash <hash>] [--expect-entry-count <n>]';
 function auditVerifyFlag(args: string[], index: number, name: string): string {
   const value = args[index + 1];
@@ -96,7 +96,7 @@ async function main(args: string[]) {
       await mcpServerCommand(rest);
       break;
     case 'keygen': {
-      if (rest.length !== 1) throw new Error('Usage: acp keygen <owner.private.json>');
+      if (rest.length !== 1) throw new Error('Usage: sealbridge keygen <owner.private.json>');
       const key = generateKeyPair();
       save(rest[0], key, true);
       console.log(JSON.stringify({ did: key.did, keyFile: rest[0] }));
@@ -105,7 +105,7 @@ async function main(args: string[]) {
     case 'validate': {
       const schema = rest.length === 1 ? 'task-manifest' : rest[0],
         path = rest.length === 1 ? rest[0] : rest[1];
-      if (!schema || !path) throw new Error('Usage: acp validate [schema-name] <file.json>');
+      if (!schema || !path) throw new Error('Usage: sealbridge validate [schema-name] <file.json>');
       validateSchema(schema, read(path));
       console.log('VALID');
       break;
@@ -114,7 +114,7 @@ async function main(args: string[]) {
       const [keyFile, gate, taskId, targetFile, outputFile] = rest;
       if (!keyFile || !gate || !taskId || !targetFile || !outputFile)
         throw new Error(
-          'Usage: acp approve <key.private.json> <gate> <taskId> <target.json> <approval.json>',
+          'Usage: sealbridge approve <key.private.json> <gate> <taskId> <target.json> <approval.json>',
         );
       if (
         ![
@@ -183,7 +183,7 @@ async function main(args: string[]) {
     }
     default:
       throw new Error(
-        'Usage: acp <keygen|validate|approve|audit-verify|receipt|contacts|board|demo|relay|worker|delegate|discover|invite|mcp-server>',
+        'Usage: sealbridge <keygen|validate|approve|audit-verify|receipt|contacts|board|demo|relay|worker|delegate|discover|invite|mcp-server>',
       );
   }
 }
