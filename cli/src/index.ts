@@ -10,6 +10,7 @@ import { networkCommand } from './network.js';
 import { mcpServerCommand } from './mcp.js';
 import { contactsCommand } from './contacts.js';
 import { receiptCommand } from './receipt.js';
+import { doctorCommand } from './doctor.js';
 import { boardCommand } from './board.js';
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as unknown;
 const AUDIT_VERIFY_USAGE =
@@ -76,6 +77,13 @@ function save(path: string, value: unknown, privateFile = false) {
 async function main(args: string[]) {
   const [command, ...rest] = args;
   switch (command) {
+    case '--version':
+    case '-v':
+      console.log(JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version);
+      break;
+    case 'doctor':
+      await doctorCommand();
+      break;
     case 'board':
       await boardCommand(rest);
       break;
@@ -183,7 +191,7 @@ async function main(args: string[]) {
     }
     default:
       throw new Error(
-        'Usage: sealbridge <keygen|validate|approve|audit-verify|receipt|contacts|board|demo|relay|worker|delegate|discover|invite|mcp-server>',
+        'Usage: sealbridge <doctor|keygen|validate|approve|audit-verify|receipt|contacts|board|demo|relay|worker|delegate|discover|invite|mcp-server>',
       );
   }
 }

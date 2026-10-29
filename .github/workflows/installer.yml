@@ -1,0 +1,57 @@
+name: Installer
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec vitest run conformance/doctor.test.ts
+      - run: npm pack
+      - name: Install in a clean user directory (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export SEALBRIDGE_INSTALL_TARBALL="$PWD/sealbridge-0.1.0.tgz"
+          export HOME="$(mktemp -d)"
+          mkdir -p "$HOME/fake-node"
+          printf '#!/bin/sh\nexit 1\n' > "$HOME/fake-node/node"
+          chmod +x "$HOME/fake-node/node"
+          export PATH="$HOME/fake-node:$PATH"
+          sh sites/install.sh
+          sh sites/install.sh
+          . "$HOME/.profile"
+          cd "$HOME"
+          sealbridge --version
+          sealbridge demo
+          sh "$GITHUB_WORKSPACE/sites/install.sh" --uninstall
+          test ! -d "$HOME/.local/share/sealbridge"
+      - name: Install in a clean user directory (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'sealbridge-clean-user'
+          $env:SEALBRIDGE_INSTALL_TARBALL = Join-Path $PWD 'sealbridge-0.1.0.tgz'
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+          & ./sites/install.ps1 -NoProfile
+          & ./sites/install.ps1 -NoProfile
+          Set-Location $env:RUNNER_TEMP
+          sealbridge.cmd --version
+          if ($LASTEXITCODE -ne 0) { throw 'version failed' }
+          sealbridge.cmd demo
+          if ($LASTEXITCODE -ne 0) { throw 'demo failed' }
+          & "$env:GITHUB_WORKSPACE/sites/install.ps1" -Uninstall -NoProfile

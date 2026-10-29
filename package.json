@@ -1,12 +1,12 @@
 {
   "name": "sealbridge",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "license": "Apache-2.0",
   "packageManager": "pnpm@10.34.6",
   "engines": {
-    "node": ">=22 <23"
+    "node": ">=22"
   },
   "scripts": {
     "build": "pnpm -r build",
@@ -17,24 +17,49 @@
     "security-proof": "vitest run conformance/security-proofs.test.ts",
     "validate:schemas": "tsx scripts/validate-schemas.ts",
     "acp": "tsx cli/src/acp.ts",
-    "sealbridge": "tsx cli/src/index.ts"
+    "sealbridge": "tsx cli/src/index.ts",
+    "package:cli": "pnpm build && node scripts/package-cli.mjs",
+    "prepack": "pnpm run package:cli",
+    "publish:dry-run": "npm publish --dry-run"
   },
   "devDependencies": {
     "typescript": "~5.9.3",
     "vitest": "^4.1.12",
     "tsx": "^4.20.6",
     "@types/node": "^22.18.0",
-    "@types/ws": "^8.18.1",
-    "ws": "^8.18.3"
+    "@types/ws": "^8.18.1"
   },
   "dependencies": {
     "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1"
+    "ajv-formats": "^3.0.1",
+    "qrcode": "^1.5.4",
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "canonicalize": "^2.1.0",
+    "ws": "^8.18.3",
+    "@a2a-js/sdk": "^0.3.10"
   },
   "description": "Sealbridge: encrypted cross-owner agent collaboration",
   "keywords": [
     "sealbridge",
     "agent-collaboration",
     "mcp"
-  ]
+  ],
+  "bin": {
+    "sealbridge": "./dist/cli/dist/index.js",
+    "acp": "./dist/cli/dist/acp.js"
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "README.ja.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sealbridge/sealbridge.git"
+  }
 }
