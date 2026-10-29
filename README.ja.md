@@ -2,7 +2,7 @@
 
 [English (README.md)](./README.md) | **日本語**
 
-**旧称 ACP / agent-collab-platform。** Zed の Agent Client Protocol および IBM / BeeAI の Agent Communication Protocol との名称衝突を避けるため、Sealbridge に改称しました。`pnpm sealbridge`（または `sealbridge` コマンド）を使用してください。`acp` は非推奨エイリアスとして引き続き動作し、標準エラーに通知を1行表示します。プロトコル識別子、`acp-invite:` トークン、MCP ツール名、既存データ保存先、リポジトリと中継器の URL は変更しません。
+**旧称 ACP / agent-collab-platform。** Zed の Agent Client Protocol および IBM / BeeAI の Agent Communication Protocol との名称衝突を避けるため、Sealbridge に改称しました。`pnpm sealbridge`（または `sealbridge` コマンド）を使用してください。`acp` は非推奨エイリアスとして引き続き動作し、標準エラーに通知を1行表示します。プロトコル識別子、`acp-invite:` トークン、MCP ツール名、既存データ保存先は変更しません。旧リポジトリ URL と旧中継 URL も引き続き利用できます。
 
 [リレーのタイムアウト・再試行・リース・受領確認](./docs/relay-reliability.ja.md)
 
@@ -49,7 +49,7 @@ git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-coll
         "--key",
         "/tmp/alice.private.json",
         "--relay",
-        "https://acp-relay.agent-collab.workers.dev"
+        "https://relay.sealbridge.dev"
       ]
     }
   }
@@ -105,7 +105,7 @@ Claude Code、Codex、Grok Bot、Cursor に、次の文を貼ってください�
 Node.js 22 と pnpm 10 が必要です。リポジトリ直下で次を実行してください:
 pnpm install --frozen-lockfile && pnpm build
 別マシン間の協働では、公開中継器へすぐに接続してください:
---relay https://acp-relay.agent-collab.workers.dev
+--relay https://relay.sealbridge.dev
 `pnpm sealbridge relay start --port 8787 --host 127.0.0.1` は、同一マシンまたはオフラインのときだけ使ってください。
 *.private.json、API キー、.env は表示・記録・コミットしないでください。
 --auto-accept と --auto-approve は、私に確認してから使ってください。
@@ -124,10 +124,10 @@ pnpm build
 
 **公開中継器（別マシン間の既定）**
 
-別マシン間では、ホスト済みの Cloudflare Blind Relay `https://acp-relay.agent-collab.workers.dev` を使います。両オーナーは `--relay https://acp-relay.agent-collab.workers.dev` だけで、すぐに外向き接続できます。Wrangler のアカウント、デプロイ、受信ポートの開放は不要です。
+別マシン間では、ホスト済みの Cloudflare Blind Relay `https://relay.sealbridge.dev` を使います。両オーナーは `--relay https://relay.sealbridge.dev` だけで、すぐに外向き接続できます。Wrangler のアカウント、デプロイ、受信ポートの開放は不要です。
 
 ```sh
---relay https://acp-relay.agent-collab.workers.dev
+--relay https://relay.sealbridge.dev
 ```
 
 公開中継器は非信頼の転送路です。セッションのペイロードは受信者の `did:key` へ暗号化され、中継器が保存するのは暗号文です。経路のメタデータは見えたままです。`decryptEnvelopePayload`、`WorkerNode`、`RequesterClient`、`VerificationEngine` は、既定で暗号化された封筒を要求します（`requireEncrypted: true`）。平文のセッション封筒は `UNENCRYPTED_ENVELOPE_REJECTED` で拒否されます。`{ requireEncrypted: false }` と `allowUnencryptedEnvelopes: true` は、呼び出し側が明示したときだけ平文を開き、レガシーのメモリ内フィクスチャ向けです。自前で動かす場合は `packages/relay/wrangler.toml.example` を `packages/relay/wrangler.toml` にコピーし、自分の Wrangler アカウントでデプロイします。ワーカーは受信者ごとの受信箱を別々の Durable Object（`inbox:<recipientDid>`）に分け、エージェントカードは専用の `registry` オブジェクトに置きます。
@@ -153,7 +153,7 @@ Durable Object のクラス名は変わらないので、例にある `v1` マ�
 pnpm sealbridge relay start --port 8787 --host 127.0.0.1
 ```
 
-続くターミナルでは `--relay http://127.0.0.1:8787` を渡します。ループバックはこのマシンからしか届きません。別マシン間では、この URL を `https://acp-relay.agent-collab.workers.dev` に置き換えます。
+続くターミナルでは `--relay http://127.0.0.1:8787` を渡します。ループバックはこのマシンからしか届きません。別マシン間では、この URL を `https://relay.sealbridge.dev` に置き換えます。
 
 **ターミナル 2 — 受託側 Bob**
 
@@ -226,7 +226,7 @@ Command と CLI アダプタは、オーナーが設定した実行ファイル�
 ## MCP、進捗、失効、クォーラム
 
 ```sh
-pnpm sealbridge mcp-server --key /tmp/alice.private.json --relay https://acp-relay.agent-collab.workers.dev
+pnpm sealbridge mcp-server --key /tmp/alice.private.json --relay https://relay.sealbridge.dev
 ```
 
 `sealbridge mcp-server` は、依存ライブラリを増やさない JSON-RPC 2.0 の MCP サーバーです。標準入力に、改行区切り JSON と `Content-Length` フレームの両方を受けます。Claude Code、Cursor、Codex、Grok Bot から次のツールを呼べます。
@@ -248,8 +248,8 @@ pnpm sealbridge mcp-server --key /tmp/alice.private.json --relay https://acp-rel
 ```sh
 pnpm sealbridge mcp-server \
   --key /tmp/alice.private.json \
-  --relay https://acp-relay.agent-collab.workers.dev \
-  --allow-relay https://acp-relay.agent-collab.workers.dev \
+  --relay https://relay.sealbridge.dev \
+  --allow-relay https://relay.sealbridge.dev \
   --allow-worker did:key:z... \
   --approval-webhook https://approvals.example/acp
 ```
@@ -345,4 +345,10 @@ pnpm sealbridge audit-verify /tmp/alice-audit.jsonl \
 
 - **作成者 (X / Twitter)**: [@takapon01234](https://x.com/takapon01234)
 - **リポジトリ**: [acidnyan/agent-collab-platform](https://github.com/acidnyan/agent-collab-platform)
-- **公開 Blind Relay**: `https://acp-relay.agent-collab.workers.dev`
+- **公開 Blind Relay**: `https://relay.sealbridge.dev`
+
+## 公式サイトと中継 URL
+
+公式サイトは https://sealbridge.dev、招待受信ページは `https://sealbridge.app/i#<invite>` を想定しています。静的サイトのソース・ビルド・公開手順は [Web サイトの運用](docs/sites.ja.md) を参照してください。このリポジトリへの追加だけでは公開されません。
+
+推奨の中継 URL は `https://relay.sealbridge.dev` です。従来の `https://acp-relay.agent-collab.workers.dev` も同じ中継器として引き続き利用できます。既存の署名付き招待を編集せず、そのまま利用してください。新ホストへ切り替える場合は MCP の中継許可リストも更新します。

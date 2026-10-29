@@ -26,6 +26,10 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm validate:schemas
       - run: pnpm test
+      - name: Install browser for static site checks
+        run: pnpm --filter @sealbridge/sites exec playwright install --with-deps chromium
+      - name: Verify static sites and invite privacy
+        run: pnpm --filter @sealbridge/sites test
       - name: Run Security Proof Suite (Red-Team Adversarial Tests)
         run: pnpm test:security-proof
       - run: pnpm acp demo

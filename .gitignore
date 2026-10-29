@@ -3,6 +3,8 @@ dist/
 *.log
 codex-*.log
 coverage/
+test-results/
+playwright-report/
 *.tsbuildinfo
 .pnpm-store/
 .env
