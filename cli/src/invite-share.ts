@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, lstatSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import QRCode from 'qrcode';
-import { createInviteToken, createSignedAgentCard, parseAndVerifyInviteToken, signPayload, verifySigned } from '@acp/core';
+import { createInviteToken, createSignedAgentCard, generateKeyPair, parseAndVerifyInviteToken, signPayload, verifySigned } from '@acp/core';
 import type { Invite, KeyPair, Signed } from '@acp/core';
 import { addContact, contactsPath } from './contacts.js';
 
@@ -41,12 +43,44 @@ export function verifiedExpiredInvite(value: string): Invite {
   if (!Number.isFinite(time) || time > Date.now()) throw new Error('INVALID_INVITE');
   return parseAndVerifyInviteToken(token, time);
 }
-export function reissueInvite(value: string, key: KeyPair, seconds = 86400): string {
+export function reissueInvite(value: string, key: KeyPair, seconds = 86400, agentKey?: KeyPair): string {
   const old = verifiedExpiredInvite(value);
-  if (old.ownerDid !== key.did || old.agentDid !== key.did) throw new Error('INVITE_ISSUER_KEY_REQUIRED');
+  if (old.ownerDid !== key.did) throw new Error('INVITE_ISSUER_KEY_REQUIRED');
   const { type: _type, ownerDid: _owner, agentDelegation: _delegation, ...card } = old.agentCard.payload;
   return createInviteToken({ agentCard: createSignedAgentCard({ ...card,
-    expiresAt: new Date(Date.now() + seconds * 1000).toISOString() }, key), expiresInSeconds: seconds }, key);
+    expiresAt: new Date(Date.now() + seconds * 1000).toISOString() }, key, agentKey), expiresInSeconds: seconds }, key);
+}
+export function friendlyExpiry(expiresAt: string, now = Date.now(), locale?: string, timeZone?: string): string {
+  const date = new Date(expiresAt), remaining = date.getTime() - now;
+  if (!Number.isFinite(remaining)) throw new Error('INVALID_INVITE_EXPIRY');
+  const minutes = Math.max(1, Math.ceil(Math.abs(remaining) / 60000));
+  const amount = minutes < 60 ? `${minutes} minute${minutes === 1 ? '' : 's'}`
+    : `${Math.ceil(minutes / 60)} hour${Math.ceil(minutes / 60) === 1 ? '' : 's'}`;
+  const local = new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'long', timeZone }).format(date);
+  return remaining > 0 ? `Expires in ${amount} (${local})` : `Expired ${amount} ago (${local})`;
+}
+/** Validate remote input before touching local identity; never replace an existing key. */
+export function setupInvite(value: string, keyPath: string, contactPath: string, out: string, name?: string) {
+  const invite = openInvite(value);
+  let key: KeyPair;
+  try {
+    if (!lstatSync(keyPath).isFile()) throw new Error('INVALID_IDENTITY_FILE');
+    key = JSON.parse(readFileSync(keyPath, 'utf8')) as KeyPair;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    key = generateKeyPair();
+    mkdirSync(dirname(keyPath), { recursive: true, mode: 0o700 });
+    writeFileSync(keyPath, JSON.stringify(key), { flag: 'wx', mode: 0o600 });
+  }
+  if (!verifySigned(signPayload({ type: 'IdentityCheck' }, key), key.did)) throw new Error('INVALID_IDENTITY_KEY');
+  if (key.did === invite.ownerDid) throw new Error('SELF_INVITE');
+  const card = createSignedAgentCard({ name: 'ACP contact', agentDid: key.did, relayEndpoint: invite.relayUrl,
+    skills: [{ id: 'json-task', name: 'JSON task' }], accessMode: 'invite-only',
+    expiresAt: new Date(Date.now() + 86400000).toISOString() }, key);
+  const reciprocal = createInviteToken({ agentCard: card, expiresInSeconds: 86400 }, key);
+  writeFileSync(out, reciprocal, { flag: 'wx', mode: 0o600 });
+  addContact(contactPath, key, inviteToken(value), name);
+  return { ownerDid: key.did, keyFile: keyPath, reciprocalInviteFile: out };
 }
 interface ReissueRequest { type: 'InviteReissueRequest'; requesterDid: string; issuerDid: string; createdAt: string; }
 async function confirm(message: string): Promise<void> {
@@ -55,7 +89,7 @@ async function confirm(message: string): Promise<void> {
   finally { rl.close(); }
 }
 export async function inviteShareCommand(action: string, args: string[]): Promise<void> {
-  const allowed = ['--file', '--host', '--png', '--svg', '--save-contact', '--key', '--contacts', '--out', '--request'];
+  const allowed = ['--file', '--host', '--png', '--svg', '--save-contact', '--key', '--agent-key', '--contacts', '--out', '--request'];
   const flags = new Map<string, string>();
   for (let i = 0; i < args.length; i += 2) {
     if (!allowed.includes(args[i]) || flags.has(args[i]) || !args[i + 1] || args[i + 1].startsWith('--'))
@@ -66,13 +100,15 @@ export async function inviteShareCommand(action: string, args: string[]): Promis
   const value = readFileSync(need('file'), 'utf8').trim();
   if (action === 'open') {
     const p = openInvite(value);
+    const contactPath = flags.get('--contacts') ?? contactsPath();
+    const keyPath = flags.get('--key') ?? join(dirname(contactsPath()), 'owner.private.json');
+    const out = flags.get('--out') ?? join(dirname(keyPath), 'reciprocal-' + randomUUID() + '.txt');
+    const local = setupInvite(value, keyPath, contactPath, out, flags.get('--save-contact'));
+    const expiresAt = new Date(Math.min(Date.parse(p.expiresAt), Date.parse(p.agentCard.payload.expiresAt))).toISOString();
     console.log(JSON.stringify({ name: p.agentCard.payload.name, ownerDid: p.ownerDid, agentDid: p.agentDid,
-      relay: p.relayUrl, expires: new Date(Math.min(Date.parse(p.expiresAt), Date.parse(p.agentCard.payload.expiresAt))).toUTCString(),
+      relay: p.relayUrl, expires: friendlyExpiry(expiresAt), expiresAt, local,
+      nextStep: 'Share reciprocalInviteFile with the inviter through your trusted channel. Start a sandbox worker with keyFile and this relay to receive JSON jobs.',
       approval: 'Opening an invite does not approve work or allow automatic acceptance.' }));
-    if (flags.has('--save-contact')) {
-      const key = JSON.parse(readFileSync(need('key'), 'utf8')) as KeyPair;
-      addContact(flags.get('--contacts') ?? contactsPath(), key, inviteToken(value), need('save-contact'));
-    }
   } else if (action === 'share') {
     const link = shareLink(value, need('host'));
     console.log(link);
@@ -95,7 +131,8 @@ export async function inviteShareCommand(action: string, args: string[]): Promis
           Math.abs(Date.now() - Date.parse(r.payload.createdAt)) > 86400000) throw new Error('INVALID_REISSUE_REQUEST');
       await confirm('Approve re-issue requested by ' + r.payload.requesterDid + '?');
     } else await confirm('Approve a fresh 24-hour invite for the same identity?');
-    writeFileSync(need('out'), reissueInvite(value, key), { flag: 'wx', mode: 0o600 });
+    const agentKey = flags.has('--agent-key') ? JSON.parse(readFileSync(need('agent-key'), 'utf8')) as KeyPair : undefined;
+    writeFileSync(need('out'), reissueInvite(value, key, 86400, agentKey), { flag: 'wx', mode: 0o600 });
     console.log('Fresh invite saved. Previous invite retains its own expiry/revocation.');
   } else throw new Error('INVALID_INVITE_ACTION');
 }

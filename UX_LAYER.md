@@ -141,7 +141,7 @@ against each card's signed `openPolicy` **before** anything is proposed
 
 - display name (card `name`),
 - what they accept, in words ("JSON tasks", from `taskTypes`),
-- their limits, in words ("up to 50k tokens in, 60 s per job, 30 jobs/hour"),
+- their limits, in words ("up to 50k tokens in, 60 s per job, 30 jobs/minute"),
 - track record summary (§6.1),
 - a Details expander with the DID and the raw signed card.
 
@@ -158,7 +158,7 @@ One settings screen maps 1:1 onto existing flags from PR #71 / #73:
 | "Let strangers send me jobs" (on/off) | `--open` (default off = invite-only) |
 | "Jobs I accept" (checkbox list) | `--open-allow-task-type` |
 | "Max budget per job" | `openPolicy.maxInputTokens` / `maxOutputTokens` |
-| "Max jobs per person per hour" | `openPolicy.maxTasksPerRequesterPerHour`, `--open-rate-limit-per-did` |
+| "Max jobs per person per minute" | Host limit: `--open-rate-limit-per-did` (not signed `openPolicy`) |
 | "Max jobs per day" (new, host-side counter) | daily cap in the UX layer |
 | "Always ask me before accepting from strangers" | G3 HITL gate (default ON in open mode) |
 
