@@ -5,6 +5,7 @@ import https from 'node:https';
 import { Readable } from 'node:stream';
 import type { LookupFunction } from 'node:net';
 import { validateIpAddress, validateRelayEndpointUrl } from '@acp/core';
+import { RelayTimeoutError, relayDeadline, isTransientRelayError } from './retry.js';
 import type { RelayEndpointPolicy } from '@acp/core';
 
 export interface ResolvedAddress {
@@ -22,6 +23,8 @@ export interface RelayLookup {
 
 export interface RelayClientSecurityOptions extends RelayEndpointPolicy {
   lookup?: RelayLookup;
+  requestTimeoutMs?: number;
+  socketTimeoutMs?: number;
 }
 
 export interface ResolvedRelayEndpoint {
@@ -85,8 +88,9 @@ export async function resolveAndValidateRelayEndpoint(
   } else {
     let found: ResolvedAddress[];
     try {
-      found = await (options.lookup ?? systemLookup)(hostname, { all: true, verbatim: true });
+      found = await relayDeadline((options.lookup ?? systemLookup)(hostname, { all: true, verbatim: true }), options.requestTimeoutMs ?? 45_000);
     } catch (error) {
+      if (isTransientRelayError(error)) throw error;
       if (error instanceof Error && error.message === 'SSRF_BLOCKED_RELAY_URL') throw error;
       throw new Error('SSRF_BLOCKED_RELAY_URL');
     }
@@ -133,6 +137,7 @@ async function pinnedRequest(
   pin: ResolvedRelayEndpoint,
   input: RequestInfo | URL,
   init?: RequestInit,
+  options: RelayClientSecurityOptions = {},
 ): Promise<Response> {
   const target = requestUrl(input);
   if (!sameOrigin(target, pin.url)) throw new Error('SSRF_BLOCKED_RELAY_URL');
@@ -143,6 +148,7 @@ async function pinnedRequest(
   const lib = secure ? https : http;
   const signal = init?.signal ?? undefined;
   return new Promise((resolve, reject) => {
+    let response: http.IncomingMessage | undefined;
     const req = lib.request(
       {
         protocol: target.protocol,
@@ -152,9 +158,14 @@ async function pinnedRequest(
         path: target.pathname + target.search,
         headers: headerRecord(init?.headers),
         lookup: pin.lookup,
+        agent: false,
         ...(secure ? { servername: hostname } : {}),
       },
       (incoming) => {
+        response = incoming;
+        // SSE is intentionally long-lived; retain its idle timeout after headers arrive.
+        if (target.pathname.endsWith('/stream') && incoming.headers['content-type']?.startsWith('text/event-stream'))
+          clearTimeout(deadline);
         const headers = new Headers();
         for (const [key, value] of Object.entries(incoming.headers)) {
           if (value === undefined) continue;
@@ -188,8 +199,16 @@ async function pinnedRequest(
       else reject(error);
     };
     req.on('error', fail);
+    const timeout = () => {
+      const error = new RelayTimeoutError();
+      response?.destroy(error);
+      req.destroy(error);
+    };
+    const deadline = setTimeout(timeout, options.requestTimeoutMs ?? 45_000);
+    req.setTimeout(options.socketTimeoutMs ?? 35_000, timeout);
+    req.once('close', () => clearTimeout(deadline));
     if (signal) {
-      const onAbort = () => req.destroy();
+      const onAbort = () => req.destroy(abortError(signal));
       if (signal.aborted) {
         req.destroy();
         reject(abortError(signal));
@@ -214,9 +233,12 @@ export function createPinnedRelayFetch(
   let pending: Promise<ResolvedRelayEndpoint> | undefined;
   const resolve = () => {
     if (typeof endpoint !== 'string') return Promise.resolve(endpoint);
-    pending ??= resolveAndValidateRelayEndpoint(endpoint, options);
+    pending ??= resolveAndValidateRelayEndpoint(endpoint, options).catch((error: unknown) => {
+      if (isTransientRelayError(error)) pending = undefined;
+      throw error;
+    });
     return pending;
   };
   return (async (input: RequestInfo | URL, init?: RequestInit) =>
-    pinnedRequest(await resolve(), input, init)) as typeof fetch;
+    pinnedRequest(await resolve(), input, init, options)) as typeof fetch;
 }

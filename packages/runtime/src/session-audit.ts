@@ -13,6 +13,7 @@ import {
 import type { AckReceipt, Json, KeyPair, Signed, SignedEnvelope, Transition } from '@acp/core';
 import { JsonlStore, verifyAudit } from '@acp/ledger';
 import type { AuditBody, AuditBundle, AuditEntry, Checkpoint } from '@acp/ledger';
+import { isTransientRelayError, relayRetryDelay, waitForRelayRetry } from '@acp/relay';
 import type { RelayReceiveFilter, RelayTransport } from '@acp/relay';
 import type { ProgressPayload } from './adapter.js';
 import type { ErrorDetail } from './session.js';
@@ -47,27 +48,33 @@ const pause = (signal?: AbortSignal) =>
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
   });
-function isTransientPollError(error: unknown): boolean {
-  const text = error instanceof Error ? error.message : String(error);
-  return /^RELAY_REJECTED:\s*(429|502|503|504)\b/.test(text);
-}
 export async function receiveRelay(
   relay: RelayTransport,
   did: string,
   signal?: AbortSignal,
   filter?: RelayReceiveFilter,
 ): Promise<SignedEnvelope> {
+  let attempt = 0;
   while (true) {
     signal?.throwIfAborted();
     try {
-      const e = await relay.receive(did, 1000, signal, filter);
+      const e = await relay.receive(did, 1000, signal, { ...filter, lease: relay.acknowledgeDelivery !== undefined });
+      attempt = 0;
       if (e) return e;
     } catch (error) {
       if (signal?.aborted) throw new Error('SESSION_ABORTED');
-      if (!isTransientPollError(error)) throw error;
+      if (!isTransientRelayError(error)) throw error;
+      console.warn('Relay poll retry ' + (attempt + 1));
+      await waitForRelayRetry(relayRetryDelay(attempt++), signal);
+      continue;
     }
     await pause(signal);
   }
+}
+/** A lost ack is retried by the HTTP client when the completed envelope is redelivered. */
+export async function acknowledgeRelay(relay: RelayTransport, envelope: SignedEnvelope): Promise<void> {
+  try { await relay.acknowledgeDelivery?.(envelope.payload.recipientDid, envelope.payload.envelopeId); }
+  catch (error) { if (!isTransientRelayError(error)) throw error; }
 }
 interface EnvelopeWaiter {
   allowed: string[];
@@ -287,11 +294,14 @@ export class SessionWire {
     if (this.pumpError && this.inbox.length === 0 && this.stashed.length === 0)
       return Promise.reject(this.pumpError);
     const allowed = Array.isArray(expected) ? expected : [expected];
-    return new Promise((resolve, reject) => {
+    const envelope = await new Promise<SignedEnvelope>((resolve, reject) => {
       this.waiters.push({ allowed, resolve, reject });
       this.waiterAdded.shift()?.();
       void this.dispatch();
     });
+    if (['AUDIT_ACK', 'CHECKPOINT', 'CHECKPOINT_ACK', 'ATTEST'].includes(envelope.payload.eventType))
+      await acknowledgeRelay(this.relay, this.sealed(envelope));
+    return envelope;
   }
   private append(entry: AuditEntry): void {
     validateSchema('audit-entry', entry);
@@ -345,6 +355,8 @@ export class SessionWire {
       actorSignature: signed.signature,
       counterSignature: ack,
     });
+    await acknowledgeRelay(this.relay, this.sealed(audit));
+    if (event.payload.eventType !== 'PROPOSE') await acknowledgeRelay(this.relay, this.sealed(event));
     await this.rawSend('AUDIT_ACK', ack);
   }
   async sendEvent(eventType: string, payload: unknown): Promise<void> {

@@ -2,6 +2,8 @@
 
 [English (README.md)](./README.md) | **日本語**
 
+[リレーのタイムアウト・再試行・リース・受領確認](./docs/relay-reliability.ja.md)
+
 [連絡先の永続化と受領記録](./docs/ux1.ja.md)
 
 [招待共有・公開掲示板・日次上限](./docs/ux2.ja.md)

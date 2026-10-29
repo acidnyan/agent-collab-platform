@@ -2,7 +2,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { consumeDailyTask } from './daily-limit.js';
 import {
-  existsSync, openSync, closeSync, fstatSync, fchmodSync, appendFileSync, constants,
+  existsSync, openSync, closeSync, fstatSync, fchmodSync, appendFileSync, constants, fsyncSync, readFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -76,7 +76,7 @@ import { MCPProxy } from './mcp.js';
 import type { ToolBackend, ToolDefinition } from './mcp.js';
 import { VerificationEngine, createDelivery } from './verifier.js';
 import type { Delivery, VerificationResult } from './verifier.js';
-import { asJson, receiveRelay, SessionWire } from './session-audit.js';
+import { asJson, receiveRelay, acknowledgeRelay, SessionWire } from './session-audit.js';
 export interface SessionResult {
   taskId: string;
   state: 'SETTLED' | 'CANCELLED';
@@ -181,6 +181,7 @@ class TaskMailbox {
 function mailboxRelay(relay: RelayTransport, mailbox: TaskMailbox): RelayTransport {
   return {
     send: (envelope) => relay.send(envelope),
+    ...(relay.acknowledgeDelivery ? { acknowledgeDelivery: (did: string, id: string) => relay.acknowledgeDelivery!(did, id) } : {}),
     receive: (_recipientDid, _waitMs, signal) => mailbox.take(signal),
   };
 }
@@ -565,6 +566,7 @@ export class WorkerNode {
         const envelope = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
           role: 'worker',
         });
+        if (await this.alreadyPersisted(envelope)) continue;
         if (this.deliver(envelope)) continue;
         const job = this.beginTask(envelope, idleSignal, options.once === true);
         if (!job) continue;
@@ -582,6 +584,25 @@ export class WorkerNode {
       await Promise.allSettled([...jobs]);
     }
     return this.lastResult;
+  }
+  private persistedEnvelopeIds?: Set<string>;
+  private async alreadyPersisted(envelope: SignedEnvelope): Promise<boolean> {
+    if (!this.options.inboxPath || envelope.payload.eventType !== 'PROPOSE' ||
+        !verifyEnvelope(envelope, this.options.owner.did)) return false;
+    if (!this.persistedEnvelopeIds) {
+      this.persistedEnvelopeIds = new Set();
+      if (existsSync(this.options.inboxPath)) {
+        for (const line of readFileSync(this.options.inboxPath, 'utf8').split('\n')) {
+          try {
+            const record = JSON.parse(line) as { envelopeId?: string };
+            if (typeof record.envelopeId === 'string') this.persistedEnvelopeIds.add(record.envelopeId);
+          } catch { /* A partial final write is not proof of persistence. */ }
+        }
+      }
+    }
+    if (!this.persistedEnvelopeIds.has(envelope.payload.envelopeId)) return false;
+    await acknowledgeRelay(this.relay, envelope);
+    return true;
   }
   private deliver(envelope: SignedEnvelope): boolean {
     const mailbox = this.mailboxes.get(envelope.payload.taskId);
@@ -685,9 +706,10 @@ export class WorkerNode {
   async runOnce(signal?: AbortSignal): Promise<SessionResult> {
     const idleSignal = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
     // One or more leading REVOKE envelopes are consumed before the task PROPOSE.
-    const first = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
+    let first: SignedEnvelope;
+    do { first = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
       role: 'worker',
-    });
+    }); } while (await this.alreadyPersisted(first));
     return this.executeTask(first, idleSignal, this.relay);
   }
   private async executeTask(
@@ -831,6 +853,7 @@ export class WorkerNode {
         consumeDailyTask(this.options.dailyLimit.path, this.options.dailyLimit.maxTasks, m.taskId);
       if (this.options.inboxPath) {
         const record = JSON.stringify({
+          envelopeId: first.payload.envelopeId,
           receivedAt: new Date().toISOString(),
           taskId: m.taskId,
           requesterOwnerDid: m.requester.ownerDid,
@@ -849,9 +872,12 @@ export class WorkerNode {
           if (!fstatSync(fd).isFile()) throw new Error('INVALID_INBOX_FILE');
           fchmodSync(fd, 0o600);
           appendFileSync(fd, record);
+          fsyncSync(fd);
         } finally {
           closeSync(fd);
         }
+        this.persistedEnvelopeIds?.add(first.payload.envelopeId);
+        await acknowledgeRelay(relay, first);
         // Notification errors must not fail a persisted task.
         try {
           void Promise.resolve(this.options.onInboxRecord?.(record)).catch(() => undefined);
@@ -1034,6 +1060,7 @@ export class WorkerNode {
         },
       };
       const output = await abortable(this.options.adapter.executeTask(context), executionSignal);
+      if (!this.options.inboxPath) await acknowledgeRelay(relay, first);
       // A task may return while a queued progress update is still waiting for its ACK.
       // Skip the drain once the task is already aborted, cancelled, or over budget.
       if (!executionSignal.aborted && !wire.cancelHandled) {
@@ -1140,7 +1167,7 @@ export class WorkerNode {
           }
           return undefined;
         }
-        if (this.consumeRevocation(envelope)) continue;
+        if (this.consumeRevocation(envelope)) { await acknowledgeRelay(relay, envelope); continue; }
         if (
           this.isRequesterBoundFrame(envelope) &&
           forwardToRequesterInbox(this.options.owner.did, envelope)
@@ -1151,6 +1178,7 @@ export class WorkerNode {
     };
     return {
       send: (envelope) => relay.send(envelope),
+      ...(relay.acknowledgeDelivery ? { acknowledgeDelivery: (did: string, id: string) => relay.acknowledgeDelivery!(did, id) } : {}),
       receive,
       ...(relay.register ? { register: (card) => relay.register!(card) } : {}),
       ...(relay.discover ? { discover: () => relay.discover!() } : {}),
