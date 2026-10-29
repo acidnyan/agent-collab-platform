@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { mkdtemp, rm } from 'node:fs/promises';
+import { consumeDailyTask } from './daily-limit.js';
 import {
   existsSync, openSync, closeSync, fstatSync, fchmodSync, appendFileSync, constants,
 } from 'node:fs';
@@ -344,6 +345,8 @@ function recipientInbox(
   return inbox;
 }
 export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
+  /** Shared host state, independent of requester and worker identity. */
+  dailyLimit?: { path: string; maxTasks: number };
   /** Explicit admission policy. Defaults to invite-only. */
   accessMode?: 'invite-only' | 'open';
   openPolicy?: OpenPolicy;
@@ -438,6 +441,8 @@ export class WorkerNode {
   /** Inbox registry composed with options.revocation when the caller passed one. */
   readonly revocation: RevocationList;
   constructor(readonly options: WorkerNodeOptions) {
+    if (options.dailyLimit && (!options.dailyLimit.path || !Number.isSafeInteger(options.dailyLimit.maxTasks) || options.dailyLimit.maxTasks < 1))
+      throw new Error('INVALID_DAILY_LIMIT');
     if (options.accessMode !== undefined && !['invite-only', 'open'].includes(options.accessMode))
       throw new Error('INVALID_ACCESS_MODE');
     this.acceptance = acceptanceFrom(options);
@@ -822,6 +827,8 @@ export class WorkerNode {
       });
       gateway = new OwnerGateway(this.options.owner, contract, policy, this.revocation);
       const accepted = gateway.accept(approval);
+      if (this.options.dailyLimit)
+        consumeDailyTask(this.options.dailyLimit.path, this.options.dailyLimit.maxTasks, m.taskId);
       if (this.options.inboxPath) {
         const record = JSON.stringify({
           receivedAt: new Date().toISOString(),
@@ -1422,8 +1429,8 @@ function rejectionBody(error: unknown): ErrorDiagnostic & { reason?: string } {
 }
 function safeError(e: unknown): string {
   const s = String(e);
-  for (const code of ['UNENCRYPTED_ENVELOPE_REJECTED', 'INVITE_REQUIRED', 'INVITE_EXPIRED', 'INVITE_WORKER_MISMATCH', 'TASK_SCOPE_REJECTED'])
-    if (s === 'Error: ' + code) return code;
+  for (const code of ['CLAIM_LOST', 'DAILY_LIMIT_REACHED', 'DAILY_TASK_REPLAY', 'DAILY_LIMIT_CLOCK_ROLLBACK', 'DAILY_LIMIT_BUSY', 'DAILY_LIMIT_INVALID', 'UNENCRYPTED_ENVELOPE_REJECTED', 'INVITE_REQUIRED', 'INVITE_EXPIRED', 'INVITE_WORKER_MISMATCH', 'TASK_SCOPE_REJECTED'])
+    if (s === 'Error: ' + code || s.startsWith('Error: ' + code + ':')) return code;
   if (s.includes('TOKEN_REVOKED')) return 'TOKEN_REVOKED';
   return (
     ['BUDGET', 'CAPABILITY', 'APPROVAL', 'HITL', 'INVALID', 'VERIFICATION', 'SCHEMA', 'ABORT'].find(

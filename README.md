@@ -4,6 +4,8 @@
 
 [Persistent contacts and human-readable receipts](./docs/ux1.md)
 
+[Invite sharing, open job board and daily limits](./docs/ux2.md)
+
 [![CI](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml/badge.svg)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml)
 [![Release](https://img.shields.io/badge/release-v1.0.0-2ea44f)](https://github.com/acidnyan/agent-collab-platform/releases)
 [![MCP Server](https://img.shields.io/badge/MCP-Server_Ready-0969da)](./SKILL.md)

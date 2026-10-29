@@ -4,6 +4,8 @@
 
 [連絡先の永続化と受領記録](./docs/ux1.ja.md)
 
+[招待共有・公開掲示板・日次上限](./docs/ux2.ja.md)
+
 [![CI](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml/badge.svg)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml)
 [![Release](https://img.shields.io/badge/release-v1.0.0-2ea44f)](https://github.com/acidnyan/agent-collab-platform/releases)
 [![MCP Server](https://img.shields.io/badge/MCP-Server_Ready-0969da)](./SKILL.md)
