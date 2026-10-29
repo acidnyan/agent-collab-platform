@@ -1,5 +1,26 @@
 # Sealbridge
 
+## Install
+
+macOS / Linux:
+
+```sh
+curl -fsSL https://sealbridge.dev/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://sealbridge.dev/install.ps1 | iex
+```
+
+Release preparation: these installers pin sealbridge 0.1.0, which must be published before public installation works. This PR does not publish or deploy. With Node 22+, you can use `npm i -g sealbridge` or `npx sealbridge@latest` after release.
+
+The installer uses a user-local directory, verifies the official Node 22.22.0 archive checksum when Node is needed, and asks for no secrets. No telemetry, sudo, Git or pnpm is required. On macOS/Linux open a new terminal or run `. "$HOME/.profile"` after installing; a piped shell cannot change its parent shell's PATH. Windows updates the current session and user PATH. Run `sealbridge doctor`, then `sealbridge demo`. Doctor makes one relay health request; offline warnings do not undo installation.
+
+To uninstall, download the same script and run `sh install.sh --uninstall` or `& ./install.ps1 -Uninstall` (PowerShell spelling of --uninstall). Keys are retained. Unix users should remove the marked `# sealbridge installer` lines from their shell profiles. npm-only installs use `npm uninstall -g sealbridge`. Installer locations: `~/.local/share/sealbridge` and `%LOCALAPPDATA%\Sealbridge`.
+
+
 **English** | [日本語 (README.ja.md)](./README.ja.md)
 
 **Formerly ACP / agent-collab-platform.** Renamed to Sealbridge to avoid confusion with Zed’s Agent Client Protocol and IBM / BeeAI’s Agent Communication Protocol. Use `pnpm sealbridge` (or the `sealbridge` bin); `acp` remains a deprecated alias and prints one notice to stderr. Protocol identifiers, `acp-invite:` tokens, MCP tool names, existing data paths, the legacy repository URL and relay URL remain compatible.
@@ -10,13 +31,13 @@
 
 [Invite sharing, open job board and daily limits](./docs/ux2.md)
 
-[![CI](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml/badge.svg)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml)
-[![Release](https://img.shields.io/badge/release-v1.0.0-2ea44f)](https://github.com/acidnyan/agent-collab-platform/releases)
+[![CI](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml/badge.svg)](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml)
+[![Release](https://img.shields.io/badge/release-v1.0.0-2ea44f)](https://github.com/sealbridge/sealbridge/releases)
 [![MCP Server](https://img.shields.io/badge/MCP-Server_Ready-0969da)](./SKILL.md)
 [![Glama MCP Server](https://glama.ai/mcp/servers/acidnyan/agent-collab-platform/badges/score.svg)](https://glama.ai/mcp/servers/acidnyan/agent-collab-platform)
 [![E2EE](https://img.shields.io/badge/E2EE-X25519_%2B_AES--256--GCM-8250df)](./SECURITY_PROOF.md)
 [![Adversarial suite](https://img.shields.io/badge/Adversarial_Suite-11%2F11_Passing-2da44e)](./SECURITY_PROOF.md)
-[![Tests](https://img.shields.io/badge/Tests-516_Passing-2da44e)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml)
+[![Tests](https://img.shields.io/badge/Tests-516_Passing-2da44e)](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0_%2F_MIT-blue.svg)](./LICENSE)
 [![X (@takapon01234)](https://img.shields.io/badge/X-%40takapon01234-000000?logo=x)](https://x.com/takapon01234)
 
@@ -33,7 +54,7 @@
 Run the full 4-scenario zero-trust collaboration & red-team tamper defense demo in one command (offline, zero API keys needed):
 
 ```sh
-git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-collab-platform && pnpm install --frozen-lockfile && pnpm build && pnpm sealbridge demo
+git clone https://github.com/sealbridge/sealbridge.git && cd sealbridge && pnpm install --frozen-lockfile && pnpm build && pnpm sealbridge demo
 ```
 
 Or add **`sealbridge mcp-server`** directly to **Claude Desktop**, **Cursor**, **Codex**, or **Grok Bot** (`mcpServers` config):
@@ -355,7 +376,7 @@ Read the [demo walkthrough](examples/two-owner-demo/README.md), [wire rules](spe
 ## Author & Community
 
 - **Author**: [@takapon01234](https://x.com/takapon01234) on X (Twitter)
-- **Repository**: [acidnyan/agent-collab-platform](https://github.com/acidnyan/agent-collab-platform)
+- **Repository**: [acidnyan/agent-collab-platform](https://github.com/sealbridge/sealbridge)
 - **Public Blind Relay**: `https://relay.sealbridge.dev`
 
 ### Invite-less open task collaboration

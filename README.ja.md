@@ -1,5 +1,26 @@
 # Sealbridge
 
+## インストール
+
+macOS / Linux:
+
+```sh
+curl -fsSL https://sealbridge.dev/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://sealbridge.dev/install.ps1 | iex
+```
+
+リリース準備中: インストーラーは sealbridge 0.1.0 を固定指定します。一般利用には同バージョンの npm 公開が必要です。このPRでは公開・デプロイしません。公開後、Node 22以上があれば `npm i -g sealbridge` または `npx sealbridge@latest` も使えます。
+
+ユーザー専用ディレクトリに導入し、Nodeが必要な場合は公式Node 22.22.0のチェックサムを検証します。秘密情報の入力・テレメトリー・管理者権限・Git・pnpmは不要です。macOS/Linuxでは新しいターミナルを開くか `. "$HOME/.profile"` を実行してください（パイプ実行では親シェルのPATHを変更できません）。Windowsでは現在と次回のPATHを設定します。`sealbridge doctor`、`sealbridge demo` で確認できます。doctorは中継器のヘルスチェックを1回行います。オフライン警告があってもインストールは保持します。
+
+削除はスクリプトを保存して `sh install.sh --uninstall` または `& ./install.ps1 -Uninstall`（PowerShellでの --uninstall 表記）を実行します。鍵は保持します。Unixではシェル設定の `# sealbridge installer` 行も削除してください。npmのみの導入は `npm uninstall -g sealbridge` で削除できます。保存先は `~/.local/share/sealbridge` と `%LOCALAPPDATA%\Sealbridge` です。
+
+
 [English (README.md)](./README.md) | **日本語**
 
 **旧称 ACP / agent-collab-platform。** Zed の Agent Client Protocol および IBM / BeeAI の Agent Communication Protocol との名称衝突を避けるため、Sealbridge に改称しました。`pnpm sealbridge`（または `sealbridge` コマンド）を使用してください。`acp` は非推奨エイリアスとして引き続き動作し、標準エラーに通知を1行表示します。プロトコル識別子、`acp-invite:` トークン、MCP ツール名、既存データ保存先は変更しません。旧リポジトリ URL と旧中継 URL も引き続き利用できます。
@@ -10,13 +31,13 @@
 
 [招待共有・公開掲示板・日次上限](./docs/ux2.ja.md)
 
-[![CI](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml/badge.svg)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml)
-[![Release](https://img.shields.io/badge/release-v1.0.0-2ea44f)](https://github.com/acidnyan/agent-collab-platform/releases)
+[![CI](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml/badge.svg)](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml)
+[![Release](https://img.shields.io/badge/release-v1.0.0-2ea44f)](https://github.com/sealbridge/sealbridge/releases)
 [![MCP Server](https://img.shields.io/badge/MCP-Server_Ready-0969da)](./SKILL.md)
 [![Glama MCP Server](https://glama.ai/mcp/servers/acidnyan/agent-collab-platform/badges/score.svg)](https://glama.ai/mcp/servers/acidnyan/agent-collab-platform)
 [![E2EE](https://img.shields.io/badge/E2EE-X25519_%2B_AES--256--GCM-8250df)](./SECURITY_PROOF.ja.md)
 [![Adversarial suite](https://img.shields.io/badge/Adversarial_Suite-11%2F11_Passing-2da44e)](./SECURITY_PROOF.ja.md)
-[![Tests](https://img.shields.io/badge/Tests-516_Passing-2da44e)](https://github.com/acidnyan/agent-collab-platform/actions/workflows/conformance.yml)
+[![Tests](https://img.shields.io/badge/Tests-516_Passing-2da44e)](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0_%2F_MIT-blue.svg)](./LICENSE)
 [![X (@takapon01234)](https://img.shields.io/badge/X-%40takapon01234-000000?logo=x)](https://x.com/takapon01234)
 
@@ -33,7 +54,7 @@
 4シナリオのゼロトラスト協働・改ざん遮断デモをワンコマンドで実行できます（オフライン動作・APIキー不要）：
 
 ```sh
-git clone https://github.com/acidnyan/agent-collab-platform.git && cd agent-collab-platform && pnpm install --frozen-lockfile && pnpm build && pnpm sealbridge demo
+git clone https://github.com/sealbridge/sealbridge.git && cd sealbridge && pnpm install --frozen-lockfile && pnpm build && pnpm sealbridge demo
 ```
 
 **Claude Desktop**、**Cursor**、**Codex**、**Grok Bot** から MCP サーバー（`sealbridge mcp-server`）として直接呼び出す場合の設定例：
@@ -344,7 +365,7 @@ pnpm sealbridge audit-verify /tmp/alice-audit.jsonl \
 ## 作成者・リンク
 
 - **作成者 (X / Twitter)**: [@takapon01234](https://x.com/takapon01234)
-- **リポジトリ**: [acidnyan/agent-collab-platform](https://github.com/acidnyan/agent-collab-platform)
+- **リポジトリ**: [acidnyan/agent-collab-platform](https://github.com/sealbridge/sealbridge)
 - **公開 Blind Relay**: `https://relay.sealbridge.dev`
 
 ## 公式サイトと中継 URL
