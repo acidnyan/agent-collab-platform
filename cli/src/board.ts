@@ -153,10 +153,12 @@ export async function boardCommand(args: string[]): Promise<void> {
   const save = (n: string, v: unknown) => writeFileSync(need(n), JSON.stringify(v, null, 2), { flag: 'wx', mode: 0o600 });
   if (action === 'list') {
     const dir = need('dir');
+    let skipped = 0;
     const posts = readdirSync(dir).filter(n => n.endsWith('.json')).flatMap(n => {
       try { const signed = JSON.parse(readFileSync(join(dir, n), 'utf8')); return [verifyPost(signed)]; }
-      catch { return []; }
+      catch { skipped++; return []; }
     });
+    if (skipped) console.warn(`${skipped} invalid job${skipped === 1 ? '' : 's'} skipped`);
     console.log(JSON.stringify(posts)); return;
   }
   if (action === 'post') {

@@ -25,6 +25,19 @@ scanned link to a file and use `invite open` to verify it locally.
 
 Opening verifies both signatures, owner/agent DID binding, relay policy and
 both expiries. It displays the verified identity, relay and effective expiry.
+The display uses local time and relative wording; `expiresAt` retains the ISO
+timestamp for machine output. After verification, opening creates an identity
+only if absent (`owner.private.json` in the platform data directory, or `--key`).
+Existing keys are reused; corrupt or mismatched identities fail closed.
+The inviter is saved as a contact without automatic approval. A 24-hour,
+invite-only reciprocal invite is saved beside the key; `--out` selects another
+unused path. Output reports `local.keyFile` and `local.reciprocalInviteFile`,
+never the private key or reciprocal token. Share that file back through your
+trusted channel and start a sandbox worker with the reported key and relay to
+receive JSON jobs (`worker start --key ... --relay ... --adapter sandbox`).
+The reciprocal card advertises the built-in `json-task` skill.
+Opening does not send messages, start workers, copy remote capabilities or
+publish a profile.
 Saving a contact does not allowlist it or approve any task. Automatic approval
 options are rejected. QR images and links contain invitation material; share
 them only with intended recipients.
@@ -39,8 +52,9 @@ The issuer must explicitly answer the confirmation prompt; `--yes` is not
 supported. Requests expire after 24 hours. Re-issue verifies the old token at
 its original issue time, requires the issuer key, and re-signs a fresh card and
 24-hour invite. An issuer may omit `--request` to initiate re-issue locally.
-Separate owner/agent-key cards require both keys and are currently rejected by
-this convenience command; use the existing card creation API for that case.
+For separate owner/agent keys, add `--agent-key agent.private.json`. The owner
+signs the new card and invite; the matching agent key renews its delegation
+bound to the new expiry. Missing or mismatched keys are rejected.
 Old tokens retain their original expiry/revocation. Re-issue never extends them.
 
 ### QR capacity
@@ -79,7 +93,9 @@ acp board serve --post post.json --key requester.private.json --state post-lease
 Posts allow only a short public description, skill/task type, resource caps,
 input digest, timestamps, owner DID, relay and post ID. Do not put private task
 text in `--what`. Unknown fields, tampering, malformed caps and expiry fail
-verification. Invalid files are omitted from `list`. An input digest can reveal
+verification. Invalid files are omitted from the stdout JSON array; `list`
+warns on stderr with the skipped count, including malformed, forged and expired
+posts. An input digest can reveal
 low-entropy guesses; keep sensitive low-entropy inputs off public boards or
 include an application-generated random nonce in the private input before
 posting. Candidates are resolved from discovery and signed policy checked
@@ -150,8 +166,8 @@ behavior. Prefer `true`. Conflicting override flags are rejected. Turning
 public off starts invite-only without publishing; an already registered old
 card expires normally, while the running worker's admission remains authoritative.
 
-The existing rate flag measures **per minute**, not per hour as the draft UX
-spec suggests. Preview labels it accordingly. Signed openPolicy contains only
+The rate flag and UX specification measure **per minute**. Preview labels it
+accordingly. Signed openPolicy contains only
 per-job resource caps; rate and daily caps are shown separately as host limits.
 Explicit general per-job caps are intersected with open caps before signing,
 so the advertised numbers match the stricter admission limits. Allowlists,
