@@ -540,7 +540,11 @@ export function isInviteTarget(value: string): boolean {
 export function parseAndVerifyInviteToken(
   uri: string,
   now = Date.now(),
-  options: { allowPrivateRelay?: boolean } = {},
+  options: {
+    allowPrivateRelay?: boolean;
+    /** Verify historical invites for revocation lookup without requiring current validity. */
+    allowExpired?: boolean;
+  } = {},
 ): Invite {
   try {
     const token = inviteTokenFromUri(uri).slice(11);
@@ -560,7 +564,8 @@ export function parseAndVerifyInviteToken(
       Date.parse(p.expiresAt) <= Date.parse(p.issuedAt)
     )
       throw new Error();
-    if (Date.parse(p.expiresAt) <= now || Date.parse(p.agentCard.payload.expiresAt) <= now)
+    if (!options.allowExpired &&
+        (Date.parse(p.expiresAt) <= now || Date.parse(p.agentCard.payload.expiresAt) <= now))
       throw new Error('INVITE_EXPIRED');
     validateRelayEndpointUrl(p.relayUrl, options);
     return p;

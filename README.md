@@ -327,6 +327,29 @@ Command and CLI adapters run owner-configured executables with fresh working fol
 
 Session payloads use ephemeral X25519, HKDF-SHA256, and AES-256-GCM, with the header bound into the ciphertext. Use HTTPS for transit. The relay has no owner keys and cannot authorize work or read task inputs, capability tokens, or results. It can still observe routing metadata or deny delivery. See [security details](docs/security-model.md) and the [adversarial security test suite](SECURITY_PROOF.md).
 
+## Docker runtime identity
+
+The Docker image runs as the non-root `node` user (UID 1000). On first startup,
+it generates an owner identity with mode `0600` at `/data/owner.private.json`
+and reuses it on subsequent starts. Mount a named volume at `/data` and reuse
+that volume when replacing containers, for example:
+
+```sh
+docker run --rm -i -v sealbridge-data:/data sealbridge
+```
+
+`/data` is declared as a volume. Set `SEALBRIDGE_KEY_PATH` to use an existing
+readable key or another absolute path in a persistent mounted directory. A new
+key requires an existing directory writable by UID 1000; startup fails with
+mount and permission guidance if the key cannot be read or created.
+`SEALBRIDGE_RELAY_URL` overrides the unchanged default relay URL,
+`https://acp-relay.agent-collab.workers.dev`. Additional MCP flags can follow
+`mcp-server` after the image name.
+
+Operators who built an earlier image revision with a build-time owner identity
+should rotate to a newly generated runtime identity and update the corresponding
+DIDs, allowlists, and invitations.
+
 ## MCP, live progress, revocation, and quorum
 
 ```sh
@@ -365,6 +388,8 @@ pnpm sealbridge mcp-server \
 A worker reports `PROGRESS` (`percent`, `step`, `message`, and intermediate token or tool metrics) through the same encrypted, countersigned session log. `delegate(request, { onProgress })` receives each decrypted update before `DELIVER`. Reported metrics are charged against `QuotaMeter`.
 
 `RevocationRegistry` checks Ed25519 `RevocationNotice`s (RFC 8785 JCS). The worker rejects a revoked invite before `ACCEPT`. `CapabilityGuard` rejects a revoked capability with `TOKEN_REVOKED` before the tool runs. A notice signed by anyone other than `issuerDid` is invalid.
+
+Invite targets supplied as raw base64url tokens, `acp-invite:` tokens, or `acp://invite?token=` URIs use the verified payload's stable `inviteRevocationId` for lookup, including expired invites. The notice issuer must match the invite owner. Equivalent JSON serializations share that identifier. Signed notices retain their original payloads when exported; imports rebuild the lookup keys. Opaque identifiers and invite targets that cannot be verified retain exact-string lookup for compatibility.
 
 An offline worker still learns about revocation. `deliverRevocation` and `RequesterClient.sendRevocation` queue an encrypted `REVOKE` envelope, carrying a `SignedRevocationNotice`, on that worker's relay inbox. `WorkerNode` ingests every leading `REVOKE` in `runOnce()`, `start()` (including `start({ once: true })`), and `pumpUntil()` before it reads the next `PROPOSE`. An invite notice is recorded only when the sender is the worker owner. A capability notice is recorded only when `issuerDid` issued that token or delegated it. A forged or third-party `REVOKE` is ignored and is not stored. Before `ACCEPT`, every capability id in `capabilityChains` is checked with `assertNotRevoked`, so a revoked capability is `TOKEN_REVOKED` and the task is not accepted. `conformance/offline-revocation-inbox.test.ts` covers the offline queue and the spoofed notice.
 

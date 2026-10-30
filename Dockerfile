@@ -12,9 +12,15 @@ COPY spec ./spec
 COPY conformance ./conformance
 COPY examples ./examples
 COPY scripts ./scripts
+COPY docker-entrypoint.sh ./
 
 RUN pnpm install --frozen-lockfile \
-  && pnpm build \
-  && node cli/dist/index.js keygen /app/owner.private.json
+  && pnpm build
 
-CMD ["node", "cli/dist/index.js", "mcp-server", "--key", "/app/owner.private.json", "--relay", "https://acp-relay.agent-collab.workers.dev"]
+RUN mkdir -p /data && chown node:node /data && chmod 700 /data
+
+VOLUME ["/data"]
+USER node
+
+ENTRYPOINT ["sh", "/app/docker-entrypoint.sh"]
+CMD ["mcp-server"]
