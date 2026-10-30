@@ -208,6 +208,35 @@ The file is created or restricted to mode `0600`; rejected proposals are omitted
 and write failures stop execution. Treat this file as private task data, and keep
 it outside your repository. This also works with the default sandbox echo worker.
 
+Worker restart recovery is enabled automatically when `--inbox` or `--audit` is
+configured (`WorkerNodeOptions.inboxPath` / `auditPath`). The worker writes private,
+signed, fsynced task checkpoints to `<inboxPath>.tasks.jsonl`, or
+`<auditPath>.tasks.jsonl` when no inbox is configured. Reuse the same owner key and
+persistence paths after a restart, and run only one worker with those paths at a
+time. Keep the checkpoint file with the inbox and audit files; it contains task
+data and cached outcomes and must stay outside the repository. No new flag is
+required. Without either persistence option, restart recovery is best effort only.
+
+Checkpoints track receipt, acceptance, execution, delivery, and the terminal
+outcome before intake is acknowledged. On startup, a sealed audit can restore a
+completed outcome. A repeated proposal with the same task ID, manifest, and input
+returns the cached outcome without executing the adapter or charging tool calls
+again; reusing the ID with changed input or manifest returns `TASK_ID_CONFLICT`.
+Current adapters expose no execution-resume interface. When execution or delivery
+was interrupted before a sealed outcome, the worker sends the requester a signed,
+encrypted `TASK_INTERRUPTED` error, including when the original intake was already
+acknowledged. Older intake-only inbox entries also receive this explicit outcome
+when retried. Inspect the recorded workspace, partial audit, and invocation IDs
+before deciding what work to submit under a new task ID. Tool calls with an unknown
+result are never automatically retried. Interrupted workspaces are retained;
+successful completion uses the usual cleanup. Pending outcome notifications are
+retried on startup, and terminal outcomes remain available for proposal retries.
+Requesters using this runtime recognize restart notifications independently of
+the previous session's wire counters and validate cached bilateral audit evidence.
+Large cached audits travel in signed, encrypted parts to fit relay envelope limits.
+Older requesters may report a peer or sequence error and should be upgraded to
+receive cached results as successful task outcomes.
+
 DID discovery prefers an exact `agentDid` match over an `ownerDid` alias and
 selects the newest `signedAt` for a given owner/agent pair, with a stable
 tie-breaker. Multiple valid owners for the selected agent are rejected with
