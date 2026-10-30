@@ -255,6 +255,29 @@ Command and CLI adapters run owner-configured executables with fresh working fol
 
 Session payloads use ephemeral X25519, HKDF-SHA256, and AES-256-GCM, with the header bound into the ciphertext. Use HTTPS for transit. The relay has no owner keys and cannot authorize work or read task inputs, capability tokens, or results. It can still observe routing metadata or deny delivery. See [security details](docs/security-model.md) and the [adversarial security test suite](SECURITY_PROOF.md).
 
+## Docker runtime identity
+
+The Docker image runs as the non-root `node` user (UID 1000). On first startup,
+it generates an owner identity with mode `0600` at `/data/owner.private.json`
+and reuses it on subsequent starts. Mount a named volume at `/data` and reuse
+that volume when replacing containers, for example:
+
+```sh
+docker run --rm -i -v sealbridge-data:/data sealbridge
+```
+
+`/data` is declared as a volume. Set `SEALBRIDGE_KEY_PATH` to use an existing
+readable key or another absolute path in a persistent mounted directory. A new
+key requires an existing directory writable by UID 1000; startup fails with
+mount and permission guidance if the key cannot be read or created.
+`SEALBRIDGE_RELAY_URL` overrides the unchanged default relay URL,
+`https://acp-relay.agent-collab.workers.dev`. Additional MCP flags can follow
+`mcp-server` after the image name.
+
+Operators who built an earlier image revision with a build-time owner identity
+should rotate to a newly generated runtime identity and update the corresponding
+DIDs, allowlists, and invitations.
+
 ## MCP, live progress, revocation, and quorum
 
 ```sh
