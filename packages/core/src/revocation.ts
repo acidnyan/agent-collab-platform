@@ -34,12 +34,30 @@ export interface RevocationList {
   unexplainedRevocation?(targetType: 'invite' | 'capability', targetId: string): boolean;
 }
 
-/** Stable invite target id: JCS SHA-256 of the verified invite payload. */
+function verifiedInvite(token: string, options: { allowPrivateRelay?: boolean } = {}) {
+  const uri = /^[\w-]+$/.test(token) ? 'acp-invite:' + token : token;
+  return parseAndVerifyInviteToken(uri, Date.now(), { ...options, allowExpired: true });
+}
+
+/** Stable invite target id: JCS SHA-256 of the verified payload, including expired invites. */
 export function inviteRevocationId(
   token: string,
   options: { allowPrivateRelay?: boolean } = {},
 ): string {
-  return digest(parseAndVerifyInviteToken(token, Date.now(), options));
+  return digest(verifiedInvite(token, options));
+}
+
+function inviteTargetId(targetId: string, issuerDid?: string): string {
+  let invite;
+  try {
+    // Lookup is local and does not dial the invite's relay.
+    invite = verifiedInvite(targetId, { allowPrivateRelay: true });
+  } catch {
+    // Opaque ids and unverifiable invite targets retain exact-string lookup.
+    return targetId;
+  }
+  if (issuerDid && invite.ownerDid !== issuerDid) throw new Error('INVALID_REVOCATION_ISSUER');
+  return digest(invite);
 }
 
 export function createRevocationNotice(
@@ -102,6 +120,8 @@ function registryKey(targetType: string, targetId: string): string {
 
 /**
  * In-memory, serializable set of verified revocation notices.
+ * Invite lookup keys are derived from verified payloads and bound to their owner.
+ * Signed notices remain unchanged; imports rebuild the derived lookup keys.
  * Capability notices are kept per issuer. A second issuer revoking the same
  * target id must not replace the first: chain checks match the notice issuer
  * to the verified token, and a colliding id is not a global kill switch.
@@ -111,7 +131,11 @@ export class RevocationRegistry {
 
   revoke(notice: SignedRevocationNotice, expectedIssuer?: string): void {
     if (!verifyRevocationNotice(notice, expectedIssuer)) throw new Error('INVALID_REVOCATION');
-    const key = registryKey(notice.payload.targetType, notice.payload.targetId);
+    const { targetType, targetId, issuerDid } = notice.payload;
+    const key = registryKey(
+      targetType,
+      targetType === 'invite' ? inviteTargetId(targetId, issuerDid) : targetId,
+    );
     const list = this.notices.get(key) ?? [];
     const duplicate = list.some(
       (existing) =>
@@ -123,11 +147,11 @@ export class RevocationRegistry {
   }
 
   isRevoked(targetType: 'invite' | 'capability', targetId: string): boolean {
-    return (this.notices.get(registryKey(targetType, targetId))?.length ?? 0) > 0;
+    return (this.notices.get(this.lookupKey(targetType, targetId))?.length ?? 0) > 0;
   }
 
   noticesFor(targetType: 'invite' | 'capability', targetId: string): SignedRevocationNotice[] {
-    return (this.notices.get(registryKey(targetType, targetId)) ?? []).map((notice) =>
+    return (this.notices.get(this.lookupKey(targetType, targetId)) ?? []).map((notice) =>
       structuredClone(notice),
     );
   }
@@ -142,5 +166,9 @@ export class RevocationRegistry {
 
   importNotices(notices: SignedRevocationNotice[]): void {
     for (const notice of notices) this.revoke(notice);
+  }
+
+  private lookupKey(targetType: 'invite' | 'capability', targetId: string): string {
+    return registryKey(targetType, targetType === 'invite' ? inviteTargetId(targetId) : targetId);
   }
 }
