@@ -156,6 +156,7 @@ function transport(
     },
     ...(bound.acknowledgeDelivery ? { acknowledgeDelivery: (did: string, id: string) =>
       relayDeadline(Promise.resolve(bound.acknowledgeDelivery!(did, id)), security?.requestTimeoutMs ?? 45_000) } : {}),
+    ...(bound.deliveryStatus ? { deliveryStatus: (envelope: SignedEnvelope, signal?: AbortSignal) => relayDeadline(Promise.resolve(bound.deliveryStatus!(envelope, signal)), security?.requestTimeoutMs ?? 45_000, signal) } : {}),
     ...(bound.register ? { register: (card: SignedAgentCard) => bound.register!(card) } : {}),
     ...(bound.discover ? { discover: () => relayDeadline(Promise.resolve(bound.discover!()), security?.requestTimeoutMs ?? 45_000) } : {}),
   };
@@ -208,6 +209,7 @@ class TaskMailbox {
 function mailboxRelay(relay: RelayTransport, mailbox: TaskMailbox): RelayTransport {
   return {
     send: (envelope) => relay.send(envelope),
+    ...(relay.deliveryStatus ? { deliveryStatus: (envelope: SignedEnvelope, signal?: AbortSignal) => relay.deliveryStatus!(envelope, signal) } : {}),
     ...(relay.acknowledgeDelivery ? { acknowledgeDelivery: (did: string, id: string) => relay.acknowledgeDelivery!(did, id) } : {}),
     receive: (_recipientDid, _waitMs, signal) => mailbox.take(signal),
   };
@@ -2145,7 +2147,7 @@ export class RequesterClient {
       }
       // A closed recipient inbox is terminal for every attached task. Do not wait
       // for another relay send (or cancellation handshake) on the failed connection.
-      if (e instanceof Error && 'code' in e && e.code === 'RELAY_TERMINAL') throw e;
+      if (e instanceof Error && 'code' in e && ['RELAY_TERMINAL', 'RELAY_ENVELOPE_EXPIRED'].includes(String(e.code))) throw e;
       if (cancelStarted) {
         try {
           await wire.cancelSession();

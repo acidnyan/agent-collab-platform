@@ -3,6 +3,8 @@ import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
   verifyEnvelope,
+  verifySigned,
+  resolveDid,
   createRelayAuthToken,
   normalizeRelayOrigin,
   validateRelayEndpointUrl,
@@ -18,7 +20,8 @@ import {
   relayHttpHeaders,
   sanitizeRelayErrorCode,
 } from './fetch.js';
-import type { RelayAuthContext, RelayInboxRole, RelayReceiveFilter } from './fetch.js';
+import type { InMemoryRelayOptions, RelayAuthContext, RelayInboxRole, RelayReceiveFilter } from './fetch.js';
+import type { SignedRelayDeliveryStatus } from './notifications.js';
 import { createPinnedRelayFetch, resolveAndValidateRelayEndpoint } from './ssrf.js';
 import type { RelayClientSecurityOptions } from './ssrf.js';
 export * from './fetch.js';
@@ -42,6 +45,7 @@ export {
 } from '@acp/core';
 export async function startLocalRelay(
   options: {
+    relayOptions?: InMemoryRelayOptions;
     port?: number;
     host?: string;
     tamper?: (e: SignedEnvelope) => SignedEnvelope;
@@ -50,6 +54,7 @@ export async function startLocalRelay(
   } = {},
 ) {
   const relay = new InMemoryRelay({
+    ...options.relayOptions,
     tamper: options.tamper,
     allowUnboundRelayAuth: options.allowUnboundRelayAuth,
   });
@@ -238,11 +243,17 @@ export async function startLocalRelay(
       resolve();
     });
   });
+  const maintenance = setInterval(() => {
+    relay.evictExpired();
+    void relay.flushWakeNotifications();
+  }, 1000);
+  maintenance.unref();
   return {
     relay,
     url: boundOrigin,
     wsUrl: boundOrigin.replace(/^http:/, 'ws:') + '/ws',
     close: async () => {
+      clearInterval(maintenance);
       for (const client of wsServer.clients) client.terminate();
       await new Promise<void>((resolve) => wsServer.close(() => resolve()));
       server.closeAllConnections();
@@ -284,6 +295,7 @@ export interface RelayTransport {
   withRecipient?(key: KeyPair): RelayTransport;
   setRecipientKey?(key: KeyPair): unknown;
   send(envelope: SignedEnvelope): void | Promise<void>;
+  deliveryStatus?(envelope: SignedEnvelope, signal?: AbortSignal): SignedRelayDeliveryStatus | undefined | Promise<SignedRelayDeliveryStatus | undefined>;
   acknowledgeDelivery?(recipientDid: string, envelopeId: string): void | Promise<void>;
   receive(
     recipientDid: string,
@@ -332,6 +344,7 @@ function splitRelayArgs(
   return { fetcher, auth, security };
 }
 export class HttpRelayClient extends RelayCredentials implements RelayTransport {
+  private statusPins = new Map<string, string>();
   private buffered = new Map<string, SignedEnvelope[]>();
   private delivered = new Map<string, { expires: number; acknowledged: boolean }>();
   private readonly baseFetcher: typeof fetch;
@@ -383,6 +396,59 @@ export class HttpRelayClient extends RelayCredentials implements RelayTransport 
       await result.body?.cancel();
       throw new Error('RELAY_REJECTED: ' + result.status);
     }
+    const relayDid = result.headers.get('x-acp-relay-did');
+    if (relayDid) {
+      if (this.statusPins.size >= 16384) this.statusPins.delete(this.statusPins.keys().next().value!);
+      this.statusPins.set(envelope.payload.envelopeId, relayDid);
+    }
+  }
+  /** Register an operator-configured channel; null unregisters it. Startup still drains the normal inbox. */
+  async registerWake(recipientDid: string, channel: string | null): Promise<string> {
+    for (let attempt = 0; ; attempt++) {
+      const timeout = this.security.requestTimeoutMs ?? 45_000;
+      try {
+        return await relayDeadline((async () => {
+          const r = await this.fetcher(this.url + '/wake?recipient=' + encodeURIComponent(recipientDid), {
+            method: 'POST', body: JSON.stringify({ channel }), signal: AbortSignal.timeout(timeout),
+            headers: { 'content-type': 'application/json', authorization: 'Bearer ' + await this.authToken(recipientDid, 'receive') },
+          });
+          if (!r.ok) { await r.body?.cancel(); throw new Error('RELAY_REGISTRATION_REJECTED: ' + r.status); }
+          const value = await r.json() as { relayDid: string };
+          resolveDid(value.relayDid);
+          return value.relayDid;
+        })(), timeout);
+      } catch (error) {
+        if (attempt >= 4 || !isTransientRelayError(error)) throw error;
+        console.warn('Relay wake registration retry ' + (attempt + 1));
+        await waitForRelayRetry(relayRetryDelay(attempt));
+      }
+    }
+  }
+  async deliveryStatus(envelope: SignedEnvelope, signal?: AbortSignal): Promise<SignedRelayDeliveryStatus | undefined> {
+    const p = envelope.payload;
+    const relayDid = this.statusPins.get(p.envelopeId);
+    // Old relays do not advertise signed delivery status support.
+    if (!relayDid) return;
+    const timeout = this.security.requestTimeoutMs ?? 45_000;
+    const params = new URLSearchParams({ recipient: p.recipientDid, sender: p.senderDid, envelopeId: p.envelopeId });
+    return relayDeadline((async () => {
+      const r = await this.fetcher(this.url + '/delivery-status?' + params, {
+        signal: AbortSignal.any([AbortSignal.timeout(timeout), ...(signal ? [signal] : [])]),
+        headers: { authorization: 'Bearer ' + await this.authToken(p.senderDid, 'receive') },
+      });
+      if (!r.ok) { await r.body?.cancel(); throw new Error('RELAY_REJECTED: ' + r.status); }
+      const notice = await r.json() as SignedRelayDeliveryStatus;
+      const value = notice.payload;
+      if (!verifySigned(notice, relayDid) || value.type !== 'RelayDeliveryStatus' ||
+          value.envelopeId !== p.envelopeId || value.senderDid !== p.senderDid ||
+          value.recipientDid !== p.recipientDid || !['pending', 'expired', 'unknown'].includes(value.state) ||
+          (value.state !== 'unknown' && value.taskId !== p.taskId) ||
+          value.relay !== new URL(this.url).origin ||
+          (value.state !== 'unknown' && !Number.isSafeInteger(value.expiresAt)) ||
+          (value.state === 'pending' && Math.abs(Date.now() - Date.parse(notice.signature.signedAt)) > 300_000)) throw new Error('RELAY_TAMPERING_DETECTED');
+      if (value.state !== 'pending') this.statusPins.delete(p.envelopeId);
+      return notice;
+    })(), timeout, signal);
   }
   async register(card: import('@acp/core').SignedAgentCard): Promise<void> {
     for (let attempt = 0; ; attempt++) {

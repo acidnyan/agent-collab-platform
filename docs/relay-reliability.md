@@ -46,3 +46,48 @@ These options are accepted by `delegate` and `worker start`, and by `DelegateOpt
 An explicit execution limit above an explicit overall limit is rejected before a proposal is sent. Workers reject a proposed wall-clock budget exceeding their explicit execution or overall cap before `ACCEPT`. The execution quota and manifest deadline remain authoritative even with regular heartbeats or progress; budget increases still require the existing owner approval flow. Set execution, overall, and wait limits on both peers to accommodate longer tasks and human approvals. Timeouts report `EXECUTION_TIMEOUT`, `TASK_TIMEOUT`, or `PEER_WAIT_TIMEOUT` as appropriate; they never authorize a retry of uncertain task execution.
 
 For example, to propose a five-minute execution budget with ten minutes for approvals and settlement, add `--execution-timeout-ms 300000 --task-timeout-ms 600000 --wait-timeout-ms 600000` to `delegate`. Configure the worker with compatible limits. Increasing `--wait-timeout-ms` alone does not extend the overall deadline.
+
+## Offline wake notifications
+
+Wake delivery is **off by default** and requires two opt-ins: an operator configures a channel, and the recipient authenticates a registration for that channel. No sender can supply a callback URL or command. The relay calls the channel only for queued work without an active inbox subscription/long poll. A wake is an Ed25519-signed object whose payload contains exactly `{ recipientDid, taskId, relay }`; ciphertext, sender identity, envelope contents, and approval material are omitted. Several envelopes for one recipient/task produce one successful wake within the retention window.
+
+For a local relay, configure the operator-owned command and register the worker:
+
+```sh
+pnpm sealbridge relay start --port 8787 \
+  --wake-command 'node /opt/sealbridge/wake-receiver.mjs' \
+  --wake-relay http://127.0.0.1:8787 \
+  --notification-key ~/.acp/relay.private.json
+pnpm sealbridge worker start --key ~/.acp/worker.private.json \
+  --relay http://127.0.0.1:8787 --allow-private-relay \
+  --adapter sandbox --wake-channel default
+```
+
+Generate a dedicated relay key with the existing `sealbridge keygen` command before using `--notification-key`. Keep that file private. The wake command receives signed JSON on stdin, has ignored stdout/stderr, and must exit zero to acknowledge delivery. Its timeout kills its process group on POSIX. The command should validate the routing DID against its local worker configuration and start/wake that process through the owner's service manager. It must not execute anything supplied in task metadata. For receivers on another host, pin the relay's public DID and use `verifyRelayWake(notice, relayDid, relayUrl)` to check the signature, exact routing-only shape, and five-minute timestamp window; also check that the recipient DID is one the receiver operates. Retries carry fresh signatures for the same routing identifiers. Receivers should coalesce duplicate wakes by recipient/task/relay, including requests whose successful acknowledgement was lost.
+
+The recipient registration uses `POST /wake?recipient=<did>`, a fresh recipient-bound `receive` RelayAuth token, and `{ "channel": "default" }`. `{ "channel": null }` unregisters and cancels outstanding retries. `HttpRelayClient.registerWake(did, channel)` returns the public signing DID for provisioning the receiver; registration must be renewed before its retention expires. Worker startup with `--wake-channel` registers before listening and then reconciles queued work through the ordinary authenticated inbox and existing checkpoint recovery. Registration does not replay old notifications. `--on-receive` continues to run after local acceptance/persistence; it does not wake an offline process.
+
+| Relay CLI option | Library option (`InMemoryRelayOptions`) | Default |
+| --- | --- | --- |
+| `--wake-command <command>` | `wake.channels.default` (async callback receiving signed wake and abort signal) | Off |
+| `--wake-relay <url>` | `wake.relay` | Required when wake is enabled; public URL advertised to recipients |
+| `--wake-max-attempts <n>` | `wake.maxAttempts` | 5 total attempts |
+| `--wake-retry-base-ms <n>` | `wake.retryBaseMs` | 1000 ms; doubles after failure, capped at 60000 ms |
+| `--wake-timeout-ms <n>` | `wake.timeoutMs` | 5000 ms per attempt; maximum 2147483647 |
+| `--notification-key <file>` | `notificationKey` | Ephemeral identity for a local relay; persist a key to keep the identity across restarts |
+| `--notification-ttl-ms <n>` | `notificationTtlMs` | 3600000 ms for registration, wake dedup/retry retention, and recorded expiry notices |
+| `--envelope-ttl-ms <n>` | `envelopeTtlMs` | 600000 ms; existing envelope TTL |
+
+`worker start --wake-channel <name>` defaults to off. Library hosts can configure multiple named channels. They must periodically call `evictExpired()` and `flushWakeNotifications()`; the local relay runs maintenance every second. A custom callback must honor its abort signal. Notification attempts never extend envelope TTLs, task deadlines, budgets, or approval policy. A successful wake is a request to reconcile work, not approval to execute a task.
+
+For Durable Objects, `ACP_WAKE_ENDPOINT` enables channel `default` at a fixed operator-provisioned HTTPS endpoint and requires `ACP_WAKE_RELAY` (the advertised relay URL). The endpoint receives the same signed JSON by POST; redirects are refused, non-2xx responses retry, and responses are discarded. `ACP_WAKE_MAX_ATTEMPTS`, `ACP_WAKE_RETRY_BASE_MS`, and `ACP_WAKE_TIMEOUT_MS` use the defaults above. `ACP_NOTIFICATION_TTL_MS` defaults to 3600000; the existing `ACP_ENVELOPE_TTL_MS` defaults to 600000. `ACP_NOTIFICATION_KEY` is an optional secret binding containing a dedicated relay KeyPair JSON; otherwise each inbox generates and durably retains its own signing identity. Provision the corresponding public DID at the receiver. Changing the signing key requires updating pinned identities. Embedded Durable Object hosts can instead supply `ACP_WAKE: RelayWakeOptions` with their own named callbacks.
+
+Durable relays commit the envelope/outbox before notifying, and commit each attempt before calling the channel. Alarms drive retries and TTL cleanup; a restart resumes unfinished attempts. A crash after a receiver handles a wake but before the relay records success can cause another wake. Registrations, wake records, and expiry tombstones each have a separate cap of `maxSeenEntries` (default 4096); oldest records of that kind are evicted at capacity. These bounded metadata records do not consume or relax existing envelope count/byte/sender quotas. Wake delivery does not copy or decrypt an envelope.
+
+## Expiry tombstones and requester notices
+
+When an envelope expires while still queued, both in-memory and durable relays replace it with a signed `RelayDeliveryStatus` tombstone. Durable startup converts expired journal entries rather than silently dropping them; alarms perform the same conversion while idle. Tombstones contain only envelope/task/routing identifiers, expiry time, and `state: "expired"`. They are separate transport observations and do not forge peer audit entries or imply that an adapter never ran: a leased envelope can expire without its acknowledgement arriving.
+
+A requester retrieves the notice with `GET /delivery-status?recipient=<original-recipient>&sender=<requester>&envelopeId=<id>`, authenticated by its own fresh `receive` RelayAuth token. The route stays on the original recipient shard, so an offline requester does not require a second inbox write or cross-shard forwarding. Other identities receive no status for that envelope. Pending envelopes return signed `state: "pending"`; absent, delivered, or no-longer-retained records return signed `state: "unknown"`. Unknown does not prove delivery. Network failures remain unreachable/transport errors, distinct from an authenticated expiry.
+
+Admission responses advertise the inbox signing identity in `X-ACP-Relay-Did`. `HttpRelayClient` pins that identity for the accepted envelope and verifies status signatures and routing against it. HTTP/SSE runtime sessions check outstanding sends every second, retry transient status failures within the existing request/session deadlines, and throw `RelayEnvelopeExpiredError` with code `RELAY_ENVELOPE_EXPIRED` and the signed `notice`. Only that task fails; unrelated mailboxes remain active. Raw HTTP callers can retain the admission identity and verify notices themselves after a restart. Relays that do not advertise status support keep the previous timeout behavior. The relay cannot read an encrypted manifest deadline; the existing session deadline still enforces it independently. Configure queue TTL below the requester wait deadline if an expiry notice must arrive first.
