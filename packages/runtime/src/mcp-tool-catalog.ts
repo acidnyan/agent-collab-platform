@@ -167,6 +167,20 @@ const bundleSchema = objectSchema(
   ['entries', 'checkpoint'],
 );
 
+const taskTimeoutProperties = {
+  executionTimeoutMs: { type: 'integer', minimum: 1000, maximum: 2147483647,
+    description: 'Execution wall-clock ceiling in milliseconds; whole seconds are proposed as the contract budget. Default budget: 60000 ms.' },
+  taskTimeoutMs: { type: 'integer', minimum: 1, maximum: 2147483647,
+    description: 'Overall task timeout including approval and settlement. Default 600000 ms.' },
+  waitTimeoutMs: { type: 'integer', minimum: 1, maximum: 2147483647,
+    description: 'Peer or owner approval wait phase timeout. Default 600000 ms.' },
+  connectTimeoutMs: { type: 'integer', minimum: 1, maximum: 2147483647,
+    description: 'Relay request/connect timeout. Default 45000 ms.' },
+  transportIdleTimeoutMs: { type: 'integer', minimum: 1, maximum: 2147483647,
+    description: 'Authenticated peer idle limit during execution. Default 90000 ms.' },
+  heartbeatIntervalMs: { type: 'integer', minimum: 1, maximum: 2147483647,
+    description: 'Expected worker heartbeat cadence for timeout compatibility checks. Default 15000 ms. Configure the worker separately.' },
+} as const;
 const budgetSchema = objectSchema(
   'Optional task quota. Omitted fields keep the manifest defaults: costBearer worker_byok, maxInputTokens 50000, maxOutputTokens 10000, maxToolInvocations 10, maxWallClockSeconds 60, and onOverrun hard_stop.',
   {
@@ -474,6 +488,7 @@ export const mcpTools: Json = [
         input: taskInputSchema,
         outputSchema: taskOutputSchema,
         budget: budgetSchema,
+        ...taskTimeoutProperties,
         minimumIsolationLevel: isolationSchema,
       },
       ['title'],
@@ -522,6 +537,7 @@ export const mcpTools: Json = [
         input: taskInputSchema,
         outputSchema: taskOutputSchema,
         budget: budgetSchema,
+        ...taskTimeoutProperties,
         minimumIsolationLevel: isolationSchema,
       },
       ['workers', 'mode', 'title'],

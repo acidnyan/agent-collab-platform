@@ -26,6 +26,8 @@ import {
 import type { ApprovalProvider } from './approval-providers.js';
 import type { DelegateMultiOptions, DelegateOptions } from './session.js';
 import { RequesterClient } from './session.js';
+import { validateSessionTimeouts } from './session-timeouts.js';
+import type { SessionTimeoutOptions } from './session-timeouts.js';
 
 export interface AcpMcpServerOptions {
   owner: KeyPair;
@@ -111,6 +113,18 @@ function toolResult(value: Json, isError = false): Json {
   return result;
 }
 
+function taskTimeouts(args: Record<string, unknown>): SessionTimeoutOptions {
+  const options: SessionTimeoutOptions = {};
+  for (const key of ['executionTimeoutMs', 'taskTimeoutMs', 'waitTimeoutMs', 'connectTimeoutMs',
+    'transportIdleTimeoutMs', 'heartbeatIntervalMs'] as const) {
+    if (args[key] !== undefined) {
+      if (typeof args[key] !== 'number') throw new RpcError(-32602, 'Invalid timeout: ' + key);
+      options[key] = args[key];
+    }
+  }
+  validateSessionTimeouts(options);
+  return options;
+}
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new RpcError(-32602, 'Invalid params');
@@ -403,6 +417,7 @@ export class AcpMcpServer {
       relayUrls: this.relayList(explicitRelay ? [explicitRelay] : [], invite ? [invite.relayUrl] : []),
     });
     const request: DelegateOptions = {
+      ...taskTimeouts(args),
       to,
       relay,
       title: args.title,
@@ -472,6 +487,7 @@ export class AcpMcpServer {
           ? args.quorumSize
           : Number.NaN;
     const request: DelegateMultiOptions = {
+      ...taskTimeouts(args),
       workers,
       mode: args.mode,
       quorumSize,
