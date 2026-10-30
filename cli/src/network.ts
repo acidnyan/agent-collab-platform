@@ -12,7 +12,7 @@ import {
   PolicyAutoApprovalProvider,
   InteractiveCliApprovalProvider,
 } from '@acp/runtime';
-import type { AgentAdapter, ApprovalProvider, WorkerAcceptancePolicy } from '@acp/runtime';
+import type { AgentAdapter, ApprovalProvider, WorkerAcceptancePolicy, SessionTimeoutOptions } from '@acp/runtime';
 import {
   CommandAgentAdapter,
   ClaudeCodeAdapter,
@@ -67,6 +67,24 @@ function optionalCount(parsed: Map<string, string | true>, name: string): number
     throw new Error('INVALID_' + name.toUpperCase().replaceAll('-', '_'));
   return value;
 }
+function sessionTimeouts(parsed: Map<string, string | true>): SessionTimeoutOptions {
+  return {
+    executionTimeoutMs: optionalCount(parsed, 'execution-timeout-ms'),
+    taskTimeoutMs: optionalCount(parsed, 'task-timeout-ms'),
+    waitTimeoutMs: optionalCount(parsed, 'wait-timeout-ms'),
+    connectTimeoutMs: optionalCount(parsed, 'connect-timeout-ms'),
+    transportIdleTimeoutMs: optionalCount(parsed, 'transport-idle-timeout-ms'),
+    heartbeatIntervalMs: optionalCount(parsed, 'heartbeat-interval-ms'),
+  };
+}
+const TIMEOUT_HELP = `Timeout options (positive integer milliseconds):
+  --execution-timeout-ms <n>       Execution/AI-step wall-clock limit; delegate proposes this budget (default: 60000).
+  --task-timeout-ms <n>            Overall task, including approvals and settlement (default: 600000).
+  --wait-timeout-ms <n>            Each peer/owner approval wait phase (default: 600000).
+  --connect-timeout-ms <n>         Relay connection/request timeout (default: 45000).
+  --transport-idle-timeout-ms <n>  Authenticated peer idle watchdog during execution (default: 90000).
+  --heartbeat-interval-ms <n>      Worker liveness interval (default: 15000).
+Worker execution limit defaults to the agreed budget. Heartbeats do not renew task or execution deadlines.`;
 function allowRequesterDids(parsed: Map<string, string | true>): string[] {
   const raw = parsed.get('--allow-requester');
   if (raw === undefined) return [];
@@ -114,6 +132,10 @@ function assertLlmAutoAccept(
   );
 }
 export async function networkCommand(command: string, args: string[]): Promise<void> {
+  if (args.includes('--help') && ['delegate', 'worker'].includes(command)) {
+    console.log(TIMEOUT_HELP);
+    return;
+  }
   const sub = ['relay', 'worker', 'invite'].includes(command) ? args.shift() : undefined;
   if (command === 'worker' && sub === 'public') {
     const index = args.indexOf('--settings');
@@ -255,8 +277,9 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       } } : {}),
       accessMode: accessMode as 'invite-only' | 'open',
       ...(Object.keys(openPolicy).length ? { openPolicy } : {}),
+      ...sessionTimeouts(f),
       owner: key,
-      relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay }),
+      relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay, requestTimeoutMs: optionalCount(f, 'connect-timeout-ms') }),
       relayUrl: text(f, 'relay'),
       adapter,
       name: text(f, 'name', adapter.name),
@@ -264,6 +287,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
       inboxPath: f.has('--inbox') ? text(f, 'inbox') : undefined,
       onInboxRecord,
+      onStatus: (status, error) => console.error(JSON.stringify({ status, ...(error ? { error: error.message } : {}) })),
       onEvent: (event, taskId, error) => console.error(JSON.stringify({ event, taskId, ...error })),
       ...acceptance,
       allowPrivateRelay,
@@ -301,15 +325,17 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       ) as Schema;
     }
     const client = new RequesterClient({
+      ...sessionTimeouts(f),
       owner: key,
       ...(f.has('--relay')
-        ? { relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay }) }
+        ? { relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay, requestTimeoutMs: optionalCount(f, 'connect-timeout-ms') }) }
         : {}),
       approvalProvider: approval(key, automatic),
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
       allowPrivateRelay,
     });
     const result = await client.delegate({
+      ...sessionTimeouts(f),
       to: text(f, 'to', f.has('--discover') || f.has('--task-type') ? '' : undefined),
       ...(f.has('--discover') || f.has('--task-type') ? { discover: {
         ...(f.has('--discover') ? { skillId: text(f, 'discover') } : {}),

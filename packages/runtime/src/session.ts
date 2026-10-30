@@ -56,8 +56,8 @@ import type {
 } from '@acp/core';
 import { parseJsonl, verifyAudit, type AuditBundle } from '@acp/ledger';
 import type { SandboxBoundaryMetadata } from '@acp/sandbox';
-import { HttpRelayClient, waitForRelayRetry } from '@acp/relay';
-import type { RelayClientSecurityOptions, RelayTransport } from '@acp/relay';
+import { HttpRelayClient, waitForRelayRetry, relayDiagnostic, relayDeadline } from '@acp/relay';
+import type { RelayClientSecurityOptions, RelayTransport, RelayConnectionStatus } from '@acp/relay';
 import type {
   AgentAdapter,
   AgentTaskContext,
@@ -76,6 +76,9 @@ import type { ToolBackend, ToolDefinition } from './mcp.js';
 import { VerificationEngine, createDelivery } from './verifier.js';
 import type { Delivery, VerificationResult } from './verifier.js';
 import { asJson, receiveRelay, acknowledgeRelay, PeerRejectedError, SessionWire } from './session-audit.js';
+import { SessionTimeouts, validateSessionTimeouts, resolveSessionTimeouts } from './session-timeouts.js';
+import type { SessionTimeoutOptions } from './session-timeouts.js';
+export type { SessionTimeoutOptions } from './session-timeouts.js';
 import { TaskJournal } from './task-journal.js';
 import type { TaskCheckpoint, TaskOutcome } from './task-journal.js';
 export interface SessionResult {
@@ -135,13 +138,29 @@ function transport(
       ? new HttpRelayClient(relay.replace(/\/$/, ''), owner, security)
       : relay;
   client.setRecipientKey?.(owner);
-  return client.withRecipient?.(owner) ?? client;
+  const bound = client.withRecipient?.(owner) ?? client;
+  return {
+    get connectionStatus() { return bound.connectionStatus; },
+    send: (envelope) => relayDeadline(Promise.resolve(bound.send(envelope)), security?.requestTimeoutMs ?? 45_000),
+    receive: async (did, waitMs, signal, filter) => {
+      const controller = new AbortController();
+      const readSignal = AbortSignal.any([controller.signal, ...(signal ? [signal] : [])]);
+      try {
+        return await relayDeadline(Promise.resolve(bound.receive(did, waitMs, readSignal, filter)),
+          security?.requestTimeoutMs ?? 45_000, readSignal);
+      } catch (error) {
+        controller.abort(error);
+        throw error;
+      }
+    },
+    ...(bound.acknowledgeDelivery ? { acknowledgeDelivery: (did: string, id: string) =>
+      relayDeadline(Promise.resolve(bound.acknowledgeDelivery!(did, id)), security?.requestTimeoutMs ?? 45_000) } : {}),
+    ...(bound.register ? { register: (card: SignedAgentCard) => bound.register!(card) } : {}),
+    ...(bound.discover ? { discover: () => relayDeadline(Promise.resolve(bound.discover!()), security?.requestTimeoutMs ?? 45_000) } : {}),
+  };
 }
 function freshAudit(path?: string): void {
   if (path && existsSync(path)) throw new Error('AUDIT_FILE_ALREADY_EXISTS');
-}
-function sessionSignal(timeout: number, signal?: AbortSignal): AbortSignal {
-  return AbortSignal.any([AbortSignal.timeout(timeout), ...(signal ? [signal] : [])]);
 }
 /** Cleartext is rejected unless the owner explicitly opts out for a legacy fixture. */
 function sessionDecryptOptions(allowUnencryptedEnvelopes?: boolean): { requireEncrypted: boolean } {
@@ -150,6 +169,11 @@ function sessionDecryptOptions(allowUnencryptedEnvelopes?: boolean): { requireEn
 /** Per-task queue so one session cannot dequeue another task's envelopes. */
 class TaskMailbox {
   private queue: SignedEnvelope[] = [];
+  private error?: Error;
+  close(error: Error): void {
+    this.error ??= error;
+    for (const wake of this.waiters.splice(0)) wake();
+  }
   private waiters: Array<() => void> = [];
   push(envelope: SignedEnvelope): void {
     this.queue.push(envelope);
@@ -157,6 +181,7 @@ class TaskMailbox {
   }
   async take(signal?: AbortSignal): Promise<SignedEnvelope> {
     for (;;) {
+      if (this.error) throw this.error;
       signal?.throwIfAborted();
       const next = this.queue.shift();
       if (next) return next;
@@ -169,7 +194,7 @@ class TaskMailbox {
           this.waiters = this.waiters.filter((waiter) => waiter !== onWake);
           error ? reject(error) : resolve();
         };
-        const onAbort = () => finish(new Error('SESSION_ABORTED'));
+        const onAbort = () => finish(signal?.reason instanceof Error ? signal.reason : new Error('SESSION_ABORTED'));
         const onWake = () => finish();
         this.waiters.push(onWake);
         signal?.addEventListener('abort', onAbort, { once: true });
@@ -255,6 +280,7 @@ class RecipientInbox {
   private wake?: () => void;
   private readAbort?: AbortController;
   private started = false;
+  private error?: Error;
   constructor(
     private readonly relay: RelayTransport,
     private readonly did: string,
@@ -269,6 +295,7 @@ class RecipientInbox {
     return true;
   }
   attach(taskId: string): TaskMailbox {
+    if (this.error) throw this.error;
     const existing = this.mailboxes.get(taskId);
     if (existing) return existing;
     const mailbox = new TaskMailbox();
@@ -318,8 +345,13 @@ class RecipientInbox {
           if (forwardToWorkerListener(this.did, envelope)) continue;
         }
         this.mailboxes.get(envelope.payload.taskId)?.push(envelope);
-      } catch {
-        // The last mailbox closed, or the transport aborted this read.
+      } catch (error) {
+        if (controller.signal.aborted) continue;
+        this.error = relayDiagnostic(error);
+        controller.abort(this.error);
+        for (const mailbox of this.mailboxes.values()) mailbox.close(this.error);
+        unregisterRequesterInbox(this.did, this);
+        return;
       }
     }
   }
@@ -346,7 +378,7 @@ function recipientInbox(
   }
   return inbox;
 }
-export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
+export interface WorkerNodeOptions extends WorkerAcceptancePolicy, SessionTimeoutOptions {
   /** Shared host state, independent of requester and worker identity. */
   dailyLimit?: { path: string; maxTasks: number };
   /** Explicit admission policy. Defaults to invite-only. */
@@ -367,10 +399,10 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   inboxPath?: string;
   /** Best-effort notification after a successful inbox append; never awaited. */
   onInboxRecord?: (record: string) => void | Promise<void>;
-  timeoutMs?: number;
   tools?: Record<string, ToolDefinition>;
   toolBackend?: ToolBackend;
   revocation?: RevocationList;
+  onStatus?: (status: RelayConnectionStatus, error?: Error) => void;
   onEvent?: (event: string, taskId: string, error?: ErrorDiagnostic) => void;
   /** Opt in to loopback and RFC1918 relays. Network invites stay blocked by default. */
   allowPrivateRelay?: boolean;
@@ -386,6 +418,8 @@ interface Proposal {
   input: Json;
   capabilityChains: CapabilityToken[][];
   inviteToken?: string;
+  /** Optional liveness requirement, independent of the contractual execution budget. */
+  peerIdleTimeoutMs?: number;
 }
 /** Checks every backing list. Inbox notices and an owner-supplied registry both apply. */
 class CompositeRevocation implements RevocationList {
@@ -446,6 +480,7 @@ export class WorkerNode {
   /** Inbox registry composed with options.revocation when the caller passed one. */
   readonly revocation: RevocationList;
   constructor(readonly options: WorkerNodeOptions) {
+    validateSessionTimeouts(options);
     const persistencePath = options.inboxPath ?? options.auditPath;
     if (persistencePath) this.taskJournal = new TaskJournal(persistencePath + '.tasks.jsonl', options.owner);
     if (options.dailyLimit && (!options.dailyLimit.path || !Number.isSafeInteger(options.dailyLimit.maxTasks) || options.dailyLimit.maxTasks < 1))
@@ -463,6 +498,7 @@ export class WorkerNode {
       transport(options.relay, options.owner, {
         allowPrivateRelay: options.allowPrivateRelay,
         lookup: options.lookup,
+        requestTimeoutMs: options.connectTimeoutMs,
       }),
     );
     this.approvalProvider =
@@ -492,6 +528,7 @@ export class WorkerNode {
   }
   stop(): void {
     this.controller.abort('WORKER_STOPPED');
+    this.listenerStatus('stopped');
   }
   /** Public registration is opt-in, including for PolicyAutoApprovalProvider. */
   private publishes(): boolean {
@@ -552,6 +589,17 @@ export class WorkerNode {
       return undefined;
     }
   }
+  private status?: RelayConnectionStatus;
+  private listenerStatus(status: RelayConnectionStatus, error?: Error): void {
+    if (this.status === status && !error) return;
+    this.status = status;
+    this.options.onStatus?.(status, error);
+  }
+  private listen(signal: AbortSignal): Promise<SignedEnvelope> {
+    return receiveRelay(this.relay, this.options.owner.did, signal, { role: 'worker' },
+      (status) => this.listenerStatus(status === 'connected' ? this.relay.connectionStatus ?? status : status))
+      .catch((error: unknown) => { if (signal.aborted) throw error; throw relayDiagnostic(error); });
+  }
   async start(
     options: { once?: boolean; signal?: AbortSignal } = {},
   ): Promise<SessionResult | undefined> {
@@ -571,9 +619,7 @@ export class WorkerNode {
     try {
       while (!idleSignal.aborted) {
         // revocationAwareRelay ingests a leading REVOKE before this read returns.
-        const envelope = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
-          role: 'worker',
-        });
+        const envelope = await this.listen(idleSignal);
         if (await this.recoverProposal(envelope)) {
           if (options.once) return this.lastResult;
           continue;
@@ -589,8 +635,18 @@ export class WorkerNode {
         }
       }
     } catch (error) {
-      if (!idleSignal.aborted) throw error;
+      if (!idleSignal.aborted) {
+        // A rejected one-shot task may be followed by another start on this node.
+        // Only a terminal listener failure shuts down the worker and all of its tasks.
+        if (error instanceof Error && 'code' in error && error.code === 'RELAY_TERMINAL') {
+          this.listenerStatus('unavailable', error);
+          for (const mailbox of this.mailboxes.values()) mailbox.close(error);
+          this.controller.abort(error);
+        }
+        throw error;
+      }
     } finally {
+      if (this.status !== 'unavailable') this.listenerStatus('stopped');
       unregister();
       await Promise.allSettled([...jobs]);
     }
@@ -768,12 +824,7 @@ export class WorkerNode {
     );
     try {
       while (!idleSignal.aborted && failure === undefined) {
-        const incoming = receiveRelay(
-          this.relay,
-          this.options.owner.did,
-          AbortSignal.any([idleSignal, wait.signal]),
-          { role: 'worker' },
-        ).then(
+        const incoming = this.listen(AbortSignal.any([idleSignal, wait.signal])).then(
           (envelope) => envelope,
           (error: unknown) => {
             if (!idleSignal.aborted && !wait.signal.aborted) failure = error;
@@ -888,10 +939,8 @@ export class WorkerNode {
       }
       throw e;
     }
-    const activeSignal = sessionSignal(
-      Math.min(this.options.timeoutMs ?? 120000, Date.parse(m.deadline) - Date.now()),
-      idleSignal,
-    );
+    const timeouts = new SessionTimeouts(this.options, m.deadline, idleSignal);
+    const activeSignal = timeouts.signal;
     const wire = new SessionWire(
       relay,
       this.options.owner,
@@ -904,6 +953,15 @@ export class WorkerNode {
     );
     const cancelController = new AbortController();
     wire.earlyCancel = () => cancelController.abort('CANCELLED');
+    let heartbeat: ReturnType<typeof setTimeout> | undefined;
+    let heartbeatStopped = false;
+    const sendHeartbeat = async () => {
+      try { await wire.heartbeat(); } catch { /* The supervised reader reports relay availability. */ }
+      if (!heartbeatStopped && !activeSignal.aborted) {
+        heartbeat = setTimeout(() => void sendHeartbeat(), this.options.heartbeatIntervalMs ?? 15_000);
+        heartbeat.unref();
+      }
+    };
     let gateway: OwnerGateway | undefined, workspace: string | undefined;
     let preserveWorkspace = false;
     let trackedTaskId: string | undefined;
@@ -946,8 +1004,22 @@ export class WorkerNode {
       if (reason) throw new ProposalRejectedError(reason);
       validateManifest(m);
       if (!validateOutput(m.io.inputSchema, data.input)) throw new Error('INVALID_PROPOSAL');
+      if (this.options.executionTimeoutMs !== undefined && m.budget.maxWallClockSeconds * 1000 > this.options.executionTimeoutMs)
+        throw diagnosticError('INCOMPATIBLE_TIMEOUTS', 'budget.maxWallClockSeconds',
+          this.options.executionTimeoutMs / 1000, m.budget.maxWallClockSeconds,
+          'Reduce the execution budget or raise the worker execution timeout before accepting.');
+      if (this.options.taskTimeoutMs !== undefined && m.budget.maxWallClockSeconds * 1000 > this.options.taskTimeoutMs)
+        throw diagnosticError('INCOMPATIBLE_TIMEOUTS', 'budget.maxWallClockSeconds',
+          this.options.taskTimeoutMs / 1000, m.budget.maxWallClockSeconds,
+          'Reduce the execution budget or raise the worker overall task timeout before accepting.');
+      if (data.peerIdleTimeoutMs !== undefined &&
+          (!Number.isSafeInteger(data.peerIdleTimeoutMs) || data.peerIdleTimeoutMs < 1 ||
+            (this.options.heartbeatIntervalMs ?? 15_000) >= data.peerIdleTimeoutMs))
+        throw diagnosticError('INCOMPATIBLE_TIMEOUTS', 'peerIdleTimeoutMs',
+          { greaterThan: this.options.heartbeatIntervalMs ?? 15_000 }, data.peerIdleTimeoutMs,
+          'Raise the requester idle timeout or shorten the worker heartbeat interval before accepting.');
       const contract = createContract(m, data.proposal, this.options.owner);
-      const approval = await this.approvalProvider.approve({
+      const approval = await abortable(this.approvalProvider.approve({
         taskId: m.taskId,
         gate: 'contract_acceptance',
         target: contract.contractDigest,
@@ -957,7 +1029,7 @@ export class WorkerNode {
           from: first.payload.senderDid,
         },
         signal: activeSignal,
-      });
+      }), activeSignal);
       gateway = new OwnerGateway(this.options.owner, contract, policy, this.revocation);
       const accepted = gateway.accept(approval);
       saveCheckpoint({ phase: 'accepted' });
@@ -999,6 +1071,9 @@ export class WorkerNode {
       await wire.sendEvent('ACCEPT', { contract, transition: accepted, approval });
       this.options.onEvent?.('ACCEPT', m.taskId);
       await wire.sendEvent('START', gateway.transition('START'));
+      heartbeat = setTimeout(() => void sendHeartbeat(), this.options.heartbeatIntervalMs ?? 15_000);
+      heartbeat.unref();
+      timeouts.running();
       this.options.onEvent?.('IN_PROGRESS', m.taskId);
       const extra = this.options.adapter as AgentAdapter & {
         tools?: Record<string, ToolDefinition>;
@@ -1206,6 +1281,7 @@ export class WorkerNode {
       saveCheckpoint({ phase: 'delivered' });
       await wire.sendEvent('DELIVER', { ...delivery, transition });
       this.options.onEvent?.('DELIVER', m.taskId);
+      timeouts.wait();
       const verification = await wire.receiveEvent(['VERIFY_ACCEPT', 'VERIFY_REJECT']);
       gateway.machine.apply(verification.payload.payload as unknown as Signed<Transition>);
       if (verification.payload.eventType === 'VERIFY_REJECT')
@@ -1266,6 +1342,10 @@ export class WorkerNode {
         throw progressFailure;
       throw e;
     } finally {
+      heartbeatStopped = true;
+      clearTimeout(heartbeat);
+      timeouts.close();
+      wire.close();
       if (trackedTaskId) this.liveChains.delete(trackedTaskId);
       gateway?.close();
       if (idleSignal.aborted && checkpoint?.phase !== 'terminal') preserveWorkspace = true;
@@ -1294,10 +1374,7 @@ export class WorkerNode {
           return forwarded;
         }
         const envelope = await relay.receive(
-          recipientDid,
-          waitMs,
-          signal,
-          filter ?? { role: 'worker' },
+          recipientDid, waitMs, signal, filter ?? { role: 'worker' },
         );
         if (!envelope) {
           const afterWait = this.forwardedQueue.shift();
@@ -1317,6 +1394,7 @@ export class WorkerNode {
       }
     };
     return {
+      get connectionStatus() { return relay.connectionStatus; },
       send: (envelope) => relay.send(envelope),
       ...(relay.acknowledgeDelivery ? { acknowledgeDelivery: (did: string, id: string) => relay.acknowledgeDelivery!(did, id) } : {}),
       receive,
@@ -1579,7 +1657,7 @@ function rejectionBody(error: unknown): ErrorDiagnostic & { reason?: string } {
 }
 function safeError(e: unknown): string {
   const s = String(e);
-  for (const code of ['CLAIM_LOST', 'DAILY_LIMIT_REACHED', 'DAILY_TASK_REPLAY', 'DAILY_LIMIT_CLOCK_ROLLBACK', 'DAILY_LIMIT_BUSY', 'DAILY_LIMIT_INVALID', 'UNENCRYPTED_ENVELOPE_REJECTED', 'INVITE_REQUIRED', 'INVITE_EXPIRED', 'INVITE_WORKER_MISMATCH', 'TASK_SCOPE_REJECTED'])
+  for (const code of ['INCOMPATIBLE_TIMEOUTS', 'CLAIM_LOST', 'DAILY_LIMIT_REACHED', 'DAILY_TASK_REPLAY', 'DAILY_LIMIT_CLOCK_ROLLBACK', 'DAILY_LIMIT_BUSY', 'DAILY_LIMIT_INVALID', 'UNENCRYPTED_ENVELOPE_REJECTED', 'INVITE_REQUIRED', 'INVITE_EXPIRED', 'INVITE_WORKER_MISMATCH', 'TASK_SCOPE_REJECTED'])
     if (s === 'Error: ' + code || s.startsWith('Error: ' + code + ':')) return code;
   if (s.includes('TOKEN_REVOKED')) return 'TOKEN_REVOKED';
   return (
@@ -1606,13 +1684,12 @@ async function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T
     signal.removeEventListener('abort', listener);
   }
 }
-export interface RequesterClientOptions {
+export interface RequesterClientOptions extends SessionTimeoutOptions {
   owner: KeyPair;
   relay?: RelayTransport | string;
   approvalProvider?: ApprovalProvider;
   verificationEngine?: VerificationEngine;
   auditPath?: string;
-  timeoutMs?: number;
   allowPrivateRelay?: boolean;
   /** DNS resolver used before a string relay URL is dialed. */
   lookup?: RelayClientSecurityOptions['lookup'];
@@ -1622,7 +1699,7 @@ export interface RequesterClientOptions {
    */
   allowUnencryptedEnvelopes?: boolean;
 }
-export interface DelegateOptions {
+export interface DelegateOptions extends SessionTimeoutOptions {
   to: string;
   discover?: { skillId?: string; taskType?: string };
   relay?: RelayTransport | string;
@@ -1669,7 +1746,7 @@ export interface DelegateMultiResult {
   receipts: DelegateReceipt[];
   cancelled: string[];
 }
-export interface DelegateMultiOptions {
+export interface DelegateMultiOptions extends SessionTimeoutOptions {
   workers: DelegateWorkerTarget[];
   mode: 'race' | 'quorum';
   quorumSize?: number;
@@ -1745,6 +1822,7 @@ export async function deliverRevocation(
 export class RequesterClient {
   readonly approvalProvider: ApprovalProvider;
   constructor(readonly options: RequesterClientOptions) {
+    validateSessionTimeouts(options);
     this.approvalProvider =
       options.approvalProvider ?? new InteractiveCliApprovalProvider(options.owner);
   }
@@ -1795,6 +1873,10 @@ export class RequesterClient {
     options: DelegateOptions,
     hooks?: { onProgress?: DelegateOptions['onProgress'] },
   ): Promise<SessionResult> {
+    const timeoutOptions = resolveSessionTimeouts(this.options, options);
+    validateSessionTimeouts(timeoutOptions);
+    if (timeoutOptions.executionTimeoutMs !== undefined && timeoutOptions.executionTimeoutMs < 1000)
+      throw new Error('INVALID_TIMEOUT: executionTimeoutMs must be at least 1000 (whole-second contract budget)');
     const onProgress = hooks?.onProgress ?? options.onProgress;
     const invite = options.to.startsWith('acp')
       ? parseAndVerifyInviteToken(options.to, Date.now(), {
@@ -1812,6 +1894,7 @@ export class RequesterClient {
     const relay = transport(relayOption, this.options.owner, {
         allowPrivateRelay: this.options.allowPrivateRelay,
         lookup: this.options.lookup,
+        requestTimeoutMs: timeoutOptions.connectTimeoutMs,
       }),
       owner = this.options.owner,
       inbox =
@@ -1831,6 +1914,9 @@ export class RequesterClient {
       options.manifest ??
       buildTaskManifest({
         ...options,
+        taskTimeoutMs: timeoutOptions.taskTimeoutMs ?? timeoutOptions.timeoutMs,
+        budget: { ...options.budget, ...(timeoutOptions.executionTimeoutMs !== undefined
+          ? { maxWallClockSeconds: options.budget?.maxWallClockSeconds ?? Math.floor(timeoutOptions.executionTimeoutMs / 1000) } : {}) },
         ownerDid: owner.did,
         workerDid: peer,
         agentDid: invite?.agentDid ?? card?.payload.agentDid ?? peer,
@@ -1846,6 +1932,12 @@ export class RequesterClient {
           manifest.budget[field] = Math.min(manifest.budget[field], limit);
       }
     }
+    if (options.manifest && timeoutOptions.executionTimeoutMs !== undefined &&
+        manifest.budget.maxWallClockSeconds * 1000 > timeoutOptions.executionTimeoutMs)
+      throw new Error('INCOMPATIBLE_TIMEOUTS: manifest budget exceeds executionTimeoutMs');
+    if (options.budget?.maxWallClockSeconds !== undefined && timeoutOptions.executionTimeoutMs !== undefined &&
+        options.budget.maxWallClockSeconds * 1000 > timeoutOptions.executionTimeoutMs)
+      throw new Error('INCOMPATIBLE_TIMEOUTS: requested budget exceeds executionTimeoutMs');
     validateManifest(manifest);
     if (
       manifest.requester.ownerDid !== owner.did ||
@@ -1865,11 +1957,9 @@ export class RequesterClient {
     const auditPath = options.auditPath ?? this.options.auditPath;
     freshAudit(auditPath);
     const bridge = new AbortController();
-    const signal = sessionSignal(
-      Math.min(this.options.timeoutMs ?? 120000, Date.parse(manifest.deadline) - Date.now()),
-      bridge.signal,
-    );
     const mailbox = inbox.attach(manifest.taskId);
+    const timeouts = new SessionTimeouts(timeoutOptions, manifest.deadline, bridge.signal);
+    const signal = timeouts.signal;
     const wire = new SessionWire(
       mailboxRelay(relay, mailbox),
       owner,
@@ -1948,6 +2038,7 @@ export class RequesterClient {
         proposal: signPayload(manifest, owner),
         input: options.input,
         capabilityChains,
+        peerIdleTimeoutMs: timeoutOptions.transportIdleTimeoutMs ?? 90_000,
         ...(invite ? { inviteToken: options.to } : {}),
       });
       const accept = (await wire.receiveEvent('ACCEPT')).payload.payload as unknown as {
@@ -1973,8 +2064,12 @@ export class RequesterClient {
         (await wire.receiveEvent('START')).payload.payload as unknown as Signed<Transition>,
       );
       if (options.signal?.aborted || deferredCancel) startCancel();
+      timeouts.executing(timeoutOptions.executionTimeoutMs ?? manifest.budget.maxWallClockSeconds * 1000);
+      wire.onActivity = () => timeouts.activity();
       const envelope = await wire.receiveEvent('DELIVER'),
         data = envelope.payload.payload as unknown as Delivery & { transition: Signed<Transition> };
+      wire.onActivity = undefined;
+      timeouts.wait();
       gateway.machine.apply(data.transition);
       const approval = () =>
         this.approvalProvider.approve({
@@ -1984,12 +2079,12 @@ export class RequesterClient {
           details: { manifest, deliverableDigest: data.artifact.payload.digest },
           signal,
         });
-      const { result, verification, settlement } = await gateway.verifyAndSettle(
+      const { result, verification, settlement } = await abortable(gateway.verifyAndSettle(
         wire.sealed(envelope),
         this.options.verificationEngine ?? new VerificationEngine(),
         approval,
         { allowUnencryptedEnvelopes: this.options.allowUnencryptedEnvelopes === true },
-      );
+      ), signal);
       if (!result.accepted || !settlement) {
         await wire.sendEvent('VERIFY_REJECT', verification);
         throw new Error('VERIFICATION_REJECTED: ' + result.reason);
@@ -2029,6 +2124,9 @@ export class RequesterClient {
           return cached;
         }
       }
+      // A closed recipient inbox is terminal for every attached task. Do not wait
+      // for another relay send (or cancellation handshake) on the failed connection.
+      if (e instanceof Error && 'code' in e && e.code === 'RELAY_TERMINAL') throw e;
       if (cancelStarted) {
         try {
           await wire.cancelSession();
@@ -2043,6 +2141,8 @@ export class RequesterClient {
       await wire.rawSend('ERROR', { code: safeError(e) }).catch(() => {});
       throw e;
     } finally {
+      timeouts.close();
+      wire.close();
       options.signal?.removeEventListener('abort', onUserAbort);
       inbox.detach(manifest.taskId);
       gateway?.close();
@@ -2096,6 +2196,13 @@ export class RequesterClient {
           description: options.description,
           input: options.input,
           outputSchema: options.outputSchema,
+          executionTimeoutMs: options.executionTimeoutMs,
+          timeoutMs: options.timeoutMs,
+          taskTimeoutMs: options.taskTimeoutMs,
+          waitTimeoutMs: options.waitTimeoutMs,
+          connectTimeoutMs: options.connectTimeoutMs,
+          transportIdleTimeoutMs: options.transportIdleTimeoutMs,
+          heartbeatIntervalMs: options.heartbeatIntervalMs,
           budget: options.budget,
           capabilities: options.capabilities,
           minimumIsolationLevel: options.minimumIsolationLevel,
@@ -2286,10 +2393,11 @@ export function buildTaskManifest(options: {
   description: string;
   outputSchema?: Schema;
   budget?: Partial<BudgetSpec>;
+  taskTimeoutMs?: number;
   capabilities?: TaskManifest['permissions']['grantedCapabilities'];
 }): TaskManifest {
   const createdAt = new Date().toISOString(),
-    deadline = new Date(Date.now() + 600000).toISOString();
+    deadline = new Date(Date.now() + (options.taskTimeoutMs ?? 600000)).toISOString();
   return {
     protocolVersion: '0.1.0',
     taskId: 'task_' + randomUUID().replaceAll('-', ''),
