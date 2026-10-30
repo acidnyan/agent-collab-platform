@@ -20,6 +20,7 @@ import {
   OpenAICompatibleAdapter,
   SandboxAgentAdapter,
 } from '@acp/adapters';
+import { createWakeHook } from './wake-hook.js';
 import { createReceiveHook } from './receive-hook.js';
 import { contactsPath, loadContacts, contactsApproval, addContact } from './contacts.js';
 const REPEATABLE = new Set(['--allow-requester', '--open-allow-task-type']);
@@ -132,8 +133,18 @@ function assertLlmAutoAccept(
   );
 }
 export async function networkCommand(command: string, args: string[]): Promise<void> {
-  if (args.includes('--help') && ['delegate', 'worker'].includes(command)) {
-    console.log(TIMEOUT_HELP);
+  if (args.includes('--help') && ['delegate', 'worker', 'relay'].includes(command)) {
+    console.log(command === 'relay' ? `Relay notification options:
+  --wake-command <command>       Opt-in wake hook, signed routing JSON on stdin (default: off).
+  --wake-relay <url>             Advertised relay URL; required with --wake-command.
+  --wake-max-attempts <n>        Maximum wake attempts (default: 5).
+  --wake-retry-base-ms <n>       Exponential retry base, capped at 60000ms (default: 1000).
+  --wake-timeout-ms <n>          Per-attempt timeout (default: 5000).
+  --notification-key <file>      Persistent signing key (default: ephemeral local identity).
+  --notification-ttl-ms <n>      Wake registration/dedup and expiry notice retention (default: 3600000).
+  --envelope-ttl-ms <n>          Undelivered envelope TTL (default: 600000).` : TIMEOUT_HELP + `
+  --wake-channel <name>          Worker: register an operator channel on startup (default: off).
+                                 The local relay CLI provides channel "default".`);
     return;
   }
   const sub = ['relay', 'worker', 'invite'].includes(command) ? args.shift() : undefined;
@@ -154,7 +165,16 @@ export async function networkCommand(command: string, args: string[]): Promise<v
   if (command === 'relay') {
     const port = Number(text(f, 'port', '8787'));
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('INVALID_PORT');
-    const relay = await startLocalRelay({ port, host: text(f, 'host', '127.0.0.1') });
+    const relay = await startLocalRelay({ port, host: text(f, 'host', '127.0.0.1'), relayOptions: {
+      envelopeTtlMs: optionalCount(f, 'envelope-ttl-ms'),
+      notificationTtlMs: optionalCount(f, 'notification-ttl-ms'),
+      notificationKey: f.has('--notification-key') ? JSON.parse(readFileSync(text(f, 'notification-key'), 'utf8')) as KeyPair : undefined,
+      ...(f.has('--wake-command') ? { wake: {
+        relay: text(f, 'wake-relay'), channels: { default: createWakeHook(text(f, 'wake-command')) },
+        maxAttempts: optionalCount(f, 'wake-max-attempts'),
+        retryBaseMs: optionalCount(f, 'wake-retry-base-ms'), timeoutMs: optionalCount(f, 'wake-timeout-ms'),
+      } } : {}),
+    } });
     console.log(JSON.stringify({ relay: relay.url }));
     await new Promise<void>((resolve) => {
       const stop = () => resolve();
@@ -270,6 +290,8 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     }
     if (allowedTaskTypes)
       adapter.skills = adapter.skills.map((skill) => ({ ...skill, taskTypes: allowedTaskTypes }));
+    const workerRelay = new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay,
+      requestTimeoutMs: optionalCount(f, 'connect-timeout-ms') });
     const worker = new WorkerNode({
       ...(f.has('--max-tasks-per-day') ? { dailyLimit: {
         path: join(dirname(contactsPath()), 'daily-tasks.json'),
@@ -279,7 +301,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       ...(Object.keys(openPolicy).length ? { openPolicy } : {}),
       ...sessionTimeouts(f),
       owner: key,
-      relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay, requestTimeoutMs: optionalCount(f, 'connect-timeout-ms') }),
+      relay: workerRelay,
       relayUrl: text(f, 'relay'),
       adapter,
       name: text(f, 'name', adapter.name),
@@ -297,6 +319,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
         optionalCount(f, 'max-tasks-per-day'), automatic), null, 2));
       return;
     }
+    if (f.has('--wake-channel')) await workerRelay.registerWake(key.did, text(f, 'wake-channel'));
     if (acceptance.publishToRegistry) await worker.register();
     if (accessMode === 'open' && automatic && !acceptance.allowedRequesterDids?.length)
       console.error(`[Sealbridge WARNING] Worker started in --open mode with ${f.has('--yes') ? '--yes' : 'automatic approval'} and no requester allowlist. Any requester can submit tasks for automatic acceptance within configured limits.`);

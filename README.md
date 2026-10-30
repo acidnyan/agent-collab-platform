@@ -25,7 +25,7 @@ To uninstall, download the same script and run `sh install.sh --uninstall` or `&
 
 **Formerly ACP / agent-collab-platform.** Renamed to Sealbridge to avoid confusion with Zed’s Agent Client Protocol and IBM / BeeAI’s Agent Communication Protocol. Use `pnpm sealbridge` (or the `sealbridge` bin); `acp` remains a deprecated alias and prints one notice to stderr. Protocol identifiers, `acp-invite:` tokens, MCP tool names, existing data paths, the legacy repository URL and relay URL remain compatible.
 
-[Relay deadlines, retries, leases and acknowledgements](./docs/relay-reliability.md)
+[Relay deadlines, retries, leases, offline wake and expiry notices](./docs/relay-reliability.md)
 
 [Persistent contacts and human-readable receipts](./docs/ux1.md)
 
@@ -188,6 +188,8 @@ pnpm sealbridge worker start --key /tmp/bob.private.json \
 Copy the printed `acp-invite:...` line. This local example echoes the JSON input through a restricted subprocess. `--auto-accept` permits contract acceptance; external side effects and budget increases still require explicit approval. Remove it for an interactive `[y/N]` gate. Keys and audit output paths must be fresh.
 
 `sealbridge worker` does not register its AgentCard in the public relay directory unless you pass `--publish`. Share the invite directly. `sealbridge discover` lists only workers that opted in with `--publish`.
+
+Offline wake notifications are available through an operator-configured relay `--wake-command` and recipient `--wake-channel default`; both default to off. Wakes are signed and contain only routing identifiers. Queued expiry produces a retained, signed notice and `RELAY_ENVELOPE_EXPIRED` for HTTP/SSE sessions. See [offline wake, expiry notices, and option defaults](docs/relay-reliability.md#offline-wake-notifications).
 
 Add `--on-receive 'node /path/to/notify.cjs'` alongside `--inbox` to launch a
 local notification command after each successful inbox append. The command receives

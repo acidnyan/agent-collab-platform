@@ -13,7 +13,7 @@ import {
 import type { AckReceipt, Json, KeyPair, Signed, SignedEnvelope, Transition } from '@acp/core';
 import { JsonlStore, verifyAudit } from '@acp/ledger';
 import type { AuditBody, AuditBundle, AuditEntry, Checkpoint } from '@acp/ledger';
-import { isTransientRelayError, relayRetryDelay, waitForRelayRetry, relayDeadline } from '@acp/relay';
+import { RelayEnvelopeExpiredError, isTransientRelayError, relayRetryDelay, waitForRelayRetry, relayDeadline } from '@acp/relay';
 import type { RelayConnectionStatus } from '@acp/relay';
 import type { RelayReceiveFilter, RelayTransport } from '@acp/relay';
 import type { ProgressPayload } from './adapter.js';
@@ -282,22 +282,37 @@ export class SessionWire {
         void this.dispatch();
     }
   }
+  private async watchDelivery(envelope: SignedEnvelope): Promise<void> {
+    const signal = this.readController.signal;
+    let attempt = 0;
+    try {
+      while (!signal.aborted && !this.stopped) {
+        await waitForRelayRetry(attempt ? relayRetryDelay(attempt - 1) : 1000, signal);
+        try {
+          const notice = await this.relay.deliveryStatus!(envelope, signal);
+          attempt = 0;
+          if (!notice || notice.payload.state === 'unknown') return;
+          if (notice.payload.state === 'expired') throw new RelayEnvelopeExpiredError(notice);
+        } catch (error) {
+          if (!isTransientRelayError(error)) throw error;
+          attempt++;
+        }
+      }
+    } catch (error) {
+      if (signal.aborted || this.stopped) return;
+      this.pumpError = error instanceof Error ? error : new Error('RELAY_STATUS_FAILED');
+      this.readController.abort(this.pumpError);
+      this.rejectWaiters(this.pumpError);
+      for (const wake of this.inboxWaiters.splice(0)) wake();
+    }
+  }
   async rawSend(eventType: string, payload: unknown): Promise<void> {
     const signal = this.detached ? this.readController.signal : this.signal;
     signal.throwIfAborted();
-    await relayDeadline(Promise.resolve(this.relay.send(
-      signEnvelope(
-        {
-          taskId: this.taskId,
-          recipientDid: this.peerDid,
-          seq: this.outgoing++,
-          eventType,
-          payload: asJson(payload),
-        },
-        this.owner,
-        { encrypt: true },
-      ),
-    )), 2_147_483_647, signal);
+    const envelope = signEnvelope({ taskId: this.taskId, recipientDid: this.peerDid,
+      seq: this.outgoing++, eventType, payload: asJson(payload) }, this.owner, { encrypt: true });
+    await relayDeadline(Promise.resolve(this.relay.send(envelope)), 2_147_483_647, signal);
+    if (this.relay.deliveryStatus) void this.watchDelivery(envelope);
   }
   /** Ciphertext that still matches the outer signature, when `view` was opened for the session. */
   sealed(view: SignedEnvelope): SignedEnvelope {
