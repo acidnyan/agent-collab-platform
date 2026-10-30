@@ -55,7 +55,7 @@ import type {
   Invite,
   SignedRevocationNotice,
 } from '@acp/core';
-import { parseJsonl, verifyAudit, type AuditBundle } from '@acp/ledger';
+import { parseJsonl, verifyAudit, type AuditBundle, type AuditEntry } from '@acp/ledger';
 import type { SandboxBoundaryMetadata } from '@acp/sandbox';
 import { HttpRelayClient, waitForRelayRetry, relayDiagnostic, relayDeadline } from '@acp/relay';
 import type { RelayClientSecurityOptions, RelayTransport, RelayConnectionStatus } from '@acp/relay';
@@ -82,6 +82,11 @@ import type { SessionTimeoutOptions } from './session-timeouts.js';
 export type { SessionTimeoutOptions } from './session-timeouts.js';
 import { TaskJournal } from './task-journal.js';
 import type { TaskCheckpoint, TaskOutcome } from './task-journal.js';
+export interface WorkspaceCleanupFailure {
+  taskId: string;
+  workspaceDir: string;
+  code: string;
+}
 export interface SessionResult {
   taskId: string;
   state: 'SETTLED' | 'CANCELLED';
@@ -405,6 +410,8 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy, SessionTimeou
   tools?: Record<string, ToolDefinition>;
   toolBackend?: ToolBackend;
   revocation?: RevocationList;
+  /** Residual workspace after bounded cleanup retries. Defaults to a console warning. */
+  onWorkspaceCleanupError?: (failure: WorkspaceCleanupFailure) => void | Promise<void>;
   onStatus?: (status: RelayConnectionStatus, error?: Error) => void;
   onEvent?: (event: string, taskId: string, error?: ErrorDiagnostic) => void;
   /** Opt in to loopback and RFC1918 relays. Network invites stay blocked by default. */
@@ -1352,7 +1359,20 @@ export class WorkerNode {
       if (trackedTaskId) this.liveChains.delete(trackedTaskId);
       gateway?.close();
       if (idleSignal.aborted && checkpoint?.phase !== 'terminal') preserveWorkspace = true;
-      if (workspace && !preserveWorkspace) await rm(workspace, { recursive: true, force: true });
+      if (workspace && !preserveWorkspace) {
+        try {
+          await rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code ?? 'WORKSPACE_CLEANUP_FAILED';
+          // Reporting residual files must not replace settlement or the execution error.
+          try {
+            if (this.options.onWorkspaceCleanupError)
+              void Promise.resolve(this.options.onWorkspaceCleanupError({ taskId: m.taskId, workspaceDir: workspace, code }))
+                .catch(() => {});
+            else console.warn('Workspace cleanup incomplete (' + code + '): ' + workspace);
+          } catch {}
+        }
+      }
     }
   }
   /**
@@ -1757,6 +1777,29 @@ export interface DelegateReceipt {
   bundle: AuditBundle;
   accepted: boolean;
 }
+/** Locally verified delivery whose bilateral checkpoint did not finish. Never an audit bundle. */
+export interface IncompleteDelegateReceipt extends Omit<DelegateReceipt, 'bundle'> {
+  checkpointComplete: false;
+  delivery: SignedEnvelope;
+  verification: VerificationResult;
+  entries: AuditEntry[];
+  completionError: string;
+}
+/** Completion failure preserves local verification without claiming a sealed checkpoint. */
+export class IncompleteSettlementError extends Error {
+  readonly code?: string;
+  readonly detail?: ErrorDetail;
+  readonly recovery?: PeerRejectedError['recovery'];
+  constructor(readonly incompleteReceipt: IncompleteDelegateReceipt, cause: unknown) {
+    super(incompleteReceipt.completionError, { cause });
+    this.name = 'IncompleteSettlementError';
+    if (cause instanceof Error && 'code' in cause && typeof cause.code === 'string') this.code = cause.code;
+    if (cause instanceof PeerRejectedError) {
+      this.detail = cause.detail;
+      this.recovery = cause.recovery;
+    }
+  }
+}
 export interface DelegateMultiResult {
   mode: 'race' | 'quorum';
   status: 'SETTLED';
@@ -1765,12 +1808,15 @@ export interface DelegateMultiResult {
   taskIds: string[];
   winners: Array<{ workerDid: string; taskId: string; outputDigest: string }>;
   receipts: DelegateReceipt[];
+  incompleteReceipts: IncompleteDelegateReceipt[];
   cancelled: string[];
 }
 export interface DelegateMultiOptions extends SessionTimeoutOptions {
   workers: DelegateWorkerTarget[];
   mode: 'race' | 'quorum';
   quorumSize?: number;
+  /** Completion grace for delivered sessions after a winner is selected. Default 45000 ms. */
+  completionTimeoutMs?: number;
   title: string;
   description: string;
   input: Json;
@@ -1892,7 +1938,11 @@ export class RequesterClient {
   }
   async delegate(
     options: DelegateOptions,
-    hooks?: { onProgress?: DelegateOptions['onProgress'] },
+    hooks?: {
+      onProgress?: DelegateOptions['onProgress'];
+      /** @internal Multi-delegation stops cancelling execution once DELIVER is recorded. */
+      onDelivered?: () => void;
+    },
   ): Promise<SessionResult> {
     const timeoutOptions = resolveSessionTimeouts(this.options, options);
     validateSessionTimeouts(timeoutOptions);
@@ -2003,6 +2053,7 @@ export class RequesterClient {
         });
       };
     }
+    let verifiedReceipt: Omit<IncompleteDelegateReceipt, 'entries' | 'completionError'> | undefined;
     let gateway: OwnerGateway | undefined;
     let deferredCancel = false;
     let cancelStarted = false;
@@ -2092,6 +2143,7 @@ export class RequesterClient {
       wire.onActivity = undefined;
       timeouts.wait();
       gateway.machine.apply(data.transition);
+      hooks?.onDelivered?.();
       const approval = () =>
         this.approvalProvider.approve({
           taskId: manifest.taskId,
@@ -2110,6 +2162,16 @@ export class RequesterClient {
         await wire.sendEvent('VERIFY_REJECT', verification);
         throw new Error('VERIFICATION_REJECTED: ' + result.reason);
       }
+      verifiedReceipt = {
+        workerDid: manifest.worker!.agentDid,
+        taskId: manifest.taskId,
+        outputDigest: digest(data.artifact.payload.data),
+        deliverable: data.artifact.payload.data,
+        accepted: true,
+        checkpointComplete: false,
+        delivery: wire.sealed(envelope),
+        verification: result,
+      };
       await wire.sendEvent('VERIFY_ACCEPT', verification);
       await wire.sendEvent('SETTLED', settlement);
       return {
@@ -2120,47 +2182,58 @@ export class RequesterClient {
         verification: result,
       };
     } catch (e) {
-      if (e instanceof PeerRejectedError && e.recovery) {
-        if (e.recovery.proposalDigest !== digest({ manifest, input: options.input }))
-          throw new Error('INVALID_RECOVERY_OUTCOME');
-        const cached = e.recovery.result;
-        if (cached) {
-          const proposed = cached.bundle?.entries?.find((entry) => entry.body.eventType === 'PROPOSE')
-            ?.body.payload as unknown as Proposal | undefined;
-          const accepted = cached.bundle?.entries?.find((entry) => entry.body.eventType === 'ACCEPT')
-            ?.body.payload as unknown as { contract: TaskContract } | undefined;
-          const delivered = cached.bundle?.entries?.find((entry) => entry.body.eventType === 'DELIVER')
-            ?.body.payload as unknown as Delivery | undefined;
-          if (cached.taskId !== manifest.taskId || !['SETTLED', 'CANCELLED'].includes(cached.state) ||
-              !verifyAudit(cached.bundle, { taskId: manifest.taskId, actors: [owner.did, peer] }).valid ||
-              !proposed || digest({ manifest: proposed.proposal.payload, input: proposed.input }) !== e.recovery.proposalDigest ||
-              !accepted || !verifyContract(accepted.contract) || digest(accepted.contract.manifest) !== digest(manifest) ||
-              (cached.state === 'CANCELLED' && (e.code !== 'TASK_CANCELLED' || cached.deliverable !== null ||
-                cached.bundle.entries.at(-1)?.body.eventType !== 'CANCEL')) ||
-              (cached.state === 'SETTLED' && (!delivered ||
-                e.code !== 'TASK_SETTLED' ||
-                digest(delivered.artifact.payload.data) !== digest(cached.deliverable) ||
-                cached.bundle.entries.at(-1)?.body.eventType !== 'SETTLED')))
+      try {
+        if (e instanceof PeerRejectedError && e.recovery) {
+          if (e.recovery.proposalDigest !== digest({ manifest, input: options.input }))
             throw new Error('INVALID_RECOVERY_OUTCOME');
-          return cached;
+          const cached = e.recovery.result;
+          if (cached) {
+            const proposed = cached.bundle?.entries?.find((entry) => entry.body.eventType === 'PROPOSE')
+              ?.body.payload as unknown as Proposal | undefined;
+            const accepted = cached.bundle?.entries?.find((entry) => entry.body.eventType === 'ACCEPT')
+              ?.body.payload as unknown as { contract: TaskContract } | undefined;
+            const delivered = cached.bundle?.entries?.find((entry) => entry.body.eventType === 'DELIVER')
+              ?.body.payload as unknown as Delivery | undefined;
+            if (cached.taskId !== manifest.taskId || !['SETTLED', 'CANCELLED'].includes(cached.state) ||
+                !verifyAudit(cached.bundle, { taskId: manifest.taskId, actors: [owner.did, peer] }).valid ||
+                !proposed || digest({ manifest: proposed.proposal.payload, input: proposed.input }) !== e.recovery.proposalDigest ||
+                !accepted || !verifyContract(accepted.contract) || digest(accepted.contract.manifest) !== digest(manifest) ||
+                (cached.state === 'CANCELLED' && (e.code !== 'TASK_CANCELLED' || cached.deliverable !== null ||
+                  cached.bundle.entries.at(-1)?.body.eventType !== 'CANCEL')) ||
+                (cached.state === 'SETTLED' && (!delivered ||
+                  e.code !== 'TASK_SETTLED' ||
+                  digest(delivered.artifact.payload.data) !== digest(cached.deliverable) ||
+                  cached.bundle.entries.at(-1)?.body.eventType !== 'SETTLED')))
+              throw new Error('INVALID_RECOVERY_OUTCOME');
+            if (cached.state === 'SETTLED') hooks?.onDelivered?.();
+            return cached;
+          }
         }
-      }
-      // A closed recipient inbox is terminal for every attached task. Do not wait
-      // for another relay send (or cancellation handshake) on the failed connection.
-      if (e instanceof Error && 'code' in e && ['RELAY_TERMINAL', 'RELAY_ENVELOPE_EXPIRED'].includes(String(e.code))) throw e;
-      if (cancelStarted) {
-        try {
-          await wire.cancelSession();
-          const bundle = await wire.finishRequester();
-          throw Object.assign(new Error('CANCELLED'), { bundle });
-        } catch (inner) {
-          if (inner instanceof Error && inner.message === 'CANCELLED') throw inner;
-          await wire.rawSend('ERROR', { code: safeError(inner) }).catch(() => {});
-          throw inner;
+        if (verifiedReceipt) throw e;
+        // A closed recipient inbox is terminal for every attached task. Do not wait
+        // for another relay send (or cancellation handshake) on the failed connection.
+        if (e instanceof Error && 'code' in e && ['RELAY_TERMINAL', 'RELAY_ENVELOPE_EXPIRED'].includes(String(e.code))) throw e;
+        if (cancelStarted) {
+          try {
+            await wire.cancelSession();
+            const bundle = await wire.finishRequester();
+            throw Object.assign(new Error('CANCELLED'), { bundle });
+          } catch (inner) {
+            if (inner instanceof Error && inner.message === 'CANCELLED') throw inner;
+            await wire.rawSend('ERROR', { code: safeError(inner) }).catch(() => {});
+            throw inner;
+          }
         }
+        await wire.rawSend('ERROR', { code: safeError(e) }).catch(() => {});
+        throw e;
+      } catch (error) {
+        if (!verifiedReceipt) throw error;
+        throw new IncompleteSettlementError({
+          ...verifiedReceipt,
+          entries: wire.entries.slice(),
+          completionError: error instanceof Error ? error.message : String(error),
+        }, error);
       }
-      await wire.rawSend('ERROR', { code: safeError(e) }).catch(() => {});
-      throw e;
     } finally {
       timeouts.close();
       wire.close();
@@ -2174,6 +2247,9 @@ export class RequesterClient {
       throw new Error('WORKERS_REQUIRED');
     if (options.mode !== 'race' && options.mode !== 'quorum')
       throw new Error('INVALID_DELEGATION_MODE');
+    const completionTimeoutMs = options.completionTimeoutMs ?? 45_000;
+    assertPositive('COMPLETION_TIMEOUT', completionTimeoutMs);
+    if (completionTimeoutMs > 2_147_483_647) throw new Error('INVALID_COMPLETION_TIMEOUT');
     const count = options.workers.length;
     const quorumSize = options.quorumSize ?? Math.floor(count / 2) + 1;
     if (
@@ -2197,12 +2273,22 @@ export class RequesterClient {
     }
     const controllers = options.workers.map(() => new AbortController());
     const finished = options.workers.map(() => false);
+    const delivered = options.workers.map(() => false);
+    const completionTimers: Array<ReturnType<typeof setTimeout> | undefined> = [];
     const receipts: DelegateReceipt[] = [];
+    const incompleteReceipts: IncompleteDelegateReceipt[] = [];
     let failures = 0;
     let winnerDigest: string | undefined;
     const abortUnfinished = (reason: string) => {
       controllers.forEach((controller, index) => {
-        if (!finished[index]) controller.abort(reason);
+        if (finished[index]) return;
+        if (!delivered[index]) controller.abort(reason);
+        else if (!completionTimers[index]) {
+          // DELIVER has left execution: preserve verification and bilateral checkpointing.
+          completionTimers[index] = setTimeout(() => controller.abort(new Error('COMPLETION_TIMEOUT')),
+            completionTimeoutMs);
+          completionTimers[index]!.unref();
+        }
       });
     };
     const jobs = resolved.map(async (worker, index) => {
@@ -2232,7 +2318,7 @@ export class RequesterClient {
           auditPath: options.auditPath
             ? options.auditPath.replace(/(\.jsonl)?$/, '.' + index + '.jsonl')
             : undefined,
-        });
+        }, { onDelivered: () => { delivered[index] = true; } });
         finished[index] = true;
         // SETTLED always carries a verified deliverable, including JSON null.
         if (result.state !== 'SETTLED') throw new Error('VERIFICATION_REJECTED');
@@ -2259,11 +2345,15 @@ export class RequesterClient {
         }
         return { index, result, outputDigest, workerDid };
       } catch (error) {
+        if (error instanceof IncompleteSettlementError)
+          incompleteReceipts.push(error.incompleteReceipt);
         finished[index] = true;
         failures += 1;
         if (options.mode === 'quorum' && !winnerDigest && failures > count - quorumSize)
           abortUnfinished('QUORUM_UNREACHABLE');
         throw error;
+      } finally {
+        clearTimeout(completionTimers[index]);
       }
     });
     if (options.mode === 'race') {
@@ -2271,7 +2361,7 @@ export class RequesterClient {
       try {
         winner = await Promise.any(jobs);
       } catch {
-        throw new Error('RACE_FAILED');
+        throw Object.assign(new Error('RACE_FAILED'), { receipts, incompleteReceipts });
       }
       abortUnfinished('RACE_LOST');
       await Promise.allSettled(jobs);
@@ -2290,13 +2380,14 @@ export class RequesterClient {
           },
         ],
         receipts,
+        incompleteReceipts,
         cancelled: resolved
-          .filter((_, index) => index !== winner.index && controllers[index].signal.aborted)
+          .filter((_, index) => index !== winner.index && controllers[index].signal.aborted && !delivered[index])
           .map((worker) => worker.workerDid),
       };
     }
     await Promise.allSettled(jobs);
-    if (!winnerDigest) throw Object.assign(new Error('QUORUM_NOT_REACHED'), { receipts });
+    if (!winnerDigest) throw Object.assign(new Error('QUORUM_NOT_REACHED'), { receipts, incompleteReceipts });
     const seenWinners = new Set<string>();
     const winners = receipts.filter((receipt) => {
       if (receipt.outputDigest !== winnerDigest || seenWinners.has(receipt.workerDid)) return false;
@@ -2315,8 +2406,9 @@ export class RequesterClient {
         outputDigest: receipt.outputDigest,
       })),
       receipts,
+      incompleteReceipts,
       cancelled: resolved
-        .filter((_, index) => controllers[index].signal.aborted)
+        .filter((_, index) => controllers[index].signal.aborted && !delivered[index])
         .map((worker) => worker.workerDid),
     };
   }
