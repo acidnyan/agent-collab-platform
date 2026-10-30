@@ -30,7 +30,7 @@ function spell(token: string, spelling: Spelling): string {
   return 'acp://invite?token=' + Buffer.from(serialized).toString('base64url');
 }
 
-function fixture(relayUrl?: string) {
+function fixture(relayUrl?: string, expiresInSeconds?: number) {
   const owner = generateKeyPair();
   const relay = new InMemoryRelay();
   const registry = new RevocationRegistry();
@@ -54,7 +54,7 @@ function fixture(relayUrl?: string) {
     onEvent: (event) => events.push(event),
     timeoutMs: 10000,
   });
-  const token = worker.invite();
+  const token = worker.invite(expiresInSeconds);
   const noticeFor = (targetId: string, issuer = owner) =>
     createRevocationNotice({ targetType: 'invite', targetId, reason: 'rotation' }, issuer);
   return { owner, relay, registry, calls, events, worker, token, noticeFor };
@@ -127,7 +127,7 @@ describe('invite revocation normalization', () => {
   it.each([3600001, 2 * 24 * 60 * 60 * 1000])(
     'normalizes historical invites after %i milliseconds',
     (elapsed) => {
-      const { registry, token, noticeFor } = fixture();
+      const { registry, token, noticeFor } = fixture(undefined, 3600);
       const targetId = inviteRevocationId(token);
       const now = Date.now();
       const clock = vi.spyOn(Date, 'now').mockReturnValue(now + elapsed);
