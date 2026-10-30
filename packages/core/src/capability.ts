@@ -157,6 +157,9 @@ type NoticeSource = RevocationList & {
   noticesFor?(targetType: 'invite' | 'capability', targetId: string): SignedRevocationNotice[];
   unexplainedRevocation?(targetType: 'invite' | 'capability', targetId: string): boolean;
 };
+function capabilityIdentity(token: CapabilityToken): string {
+  return digest({ issuer: token.payload.issuer, id: token.payload.id });
+}
 export class CapabilityGuard {
   private counts = new Map<string, number>();
   private revoked = new Set<string>();
@@ -179,6 +182,8 @@ export class CapabilityGuard {
     if (this.registry) {
       for (let index = 0; index < chain.length; index++) {
         const token = chain[index]!;
+        // The signed id is stable across representations. Digest targets remain
+        // supported after verification has required canonical signature encoding.
         if (
           this.capabilityTargetRevoked(chain, index, token.payload.id) ||
           this.capabilityTargetRevoked(chain, index, digest(token))
@@ -195,9 +200,10 @@ export class CapabilityGuard {
     // Reserve synchronously before any asynchronous tool side effect. Parent IDs
     // share counters across siblings; a caller must reuse this owner-side guard.
     for (const t of chain)
-      if ((this.counts.get(digest(t)) ?? 0) >= t.payload.maxCalls) violation('maxCalls exhausted');
+      if ((this.counts.get(capabilityIdentity(t)) ?? 0) >= t.payload.maxCalls)
+        violation('maxCalls exhausted');
     for (const t of chain) {
-      const id = digest(t);
+      const id = capabilityIdentity(t);
       this.counts.set(id, (this.counts.get(id) ?? 0) + 1);
     }
   }

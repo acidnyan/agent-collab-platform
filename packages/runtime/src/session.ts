@@ -28,7 +28,6 @@ import {
   schemaNarrows,
   digest,
   openEnvelope,
-  inviteRevocationId,
   resolveDid,
   createRevocationNotice,
   verifyRevocationNotice,
@@ -1501,26 +1500,8 @@ export class WorkerNode {
         invite.agentDid !== this.agentCard.payload.agentDid ||
         invite.relayUrl !== this.agentCard.payload.relayEndpoint)
       throw new Error('INVITE_WORKER_MISMATCH');
+    this.revocation.assertNotRevoked('invite', digest(invite));
     this.revocation.assertNotRevoked('invite', token);
-    const targetId = this.inviteDigest(token);
-    if (targetId) this.revocation.assertNotRevoked('invite', targetId);
-  }
-  /**
-   * Digest of an invite the worker already holds. Parsing does not dial the relay.
-   * A loopback invite is hashed even when this worker did not opt into dialing it,
-   * so a digest revocation still matches. An unparseable token is not a revocation.
-   */
-  private inviteDigest(token: string): string | undefined {
-    try {
-      return inviteRevocationId(token, { allowPrivateRelay: this.options.allowPrivateRelay });
-    } catch (error) {
-      if (!(error instanceof Error) || error.message !== 'SSRF_BLOCKED_RELAY_URL') return undefined;
-      try {
-        return inviteRevocationId(token, { allowPrivateRelay: true });
-      } catch {
-        return undefined;
-      }
-    }
   }
   /**
    * Before ACCEPT, every verified capability chain is checked against revocation
