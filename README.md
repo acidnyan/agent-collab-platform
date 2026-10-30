@@ -271,6 +271,43 @@ pnpm sealbridge discover --relay http://127.0.0.1:8787 --allow-private-relay
 
 Expected: `SETTLED`, a JSON deliverable, and `"valid":true` with `"status":"VALID"` on both owners. Without a trust-anchor file or `--expect-final-state` / `--expect-last-hash` / `--expect-entry-count`, `statusLabel` is `VALID (no trust anchor: truncation not checked)`: the chain is intact, and an older valid prefix was not ruled out. Alice verifies signatures, digests and budget, JSON Schema and registered isolated checks, then obtains a signed final approval. `--auto-approve` explicitly opts into policy approval of final verification; omit it for human review. `acp://invite?token=...` is also accepted. Alternatively, use `--to <Bob DID> --relay <URL>`. Bob can verify his own `/tmp/bob-audit.jsonl` locally.
 
+**Ask another person’s AI to review a diff**
+
+The reviewer starts `sealbridge worker start --adapter claude` (or `codex`) with
+`--key` and `--relay` as above. Startup prints an `acp-invite:` token and a
+ready-to-share `https://sealbridge.app/i#acp-invite:...` link. Send that link
+through a trusted channel. Worker invites default to 24 hours (86400 seconds);
+`--invite-ttl <seconds>` accepts 1–2592000 seconds (up to 30 days). The worker’s
+signed card uses the configured lifetime too. The runtime equivalent is
+`WorkerNodeOptions.inviteTtlSeconds` (default 86400); `worker.invite()` also defaults
+to 24 hours. Standalone `invite create --expires-in` keeps its 3600-second default.
+
+The requester installs Sealbridge using the one-line installer shown on the invite
+page, then runs these commands in the project folder. Create the requester key
+only once and reuse it on later requests. Keep private keys and secrets out of
+Git and out of the diff. Replace the example link with the complete received link.
+
+```sh
+sealbridge keygen requester.private.json
+git diff > code.diff
+sealbridge delegate --key requester.private.json --to "https://sealbridge.app/i#acp-invite:..." --title "Review my code diff" --description "Review this diff for bugs and suggest improvements. Return a JSON review." --input-file code.diff --out review.json
+```
+
+`--input-file <path>` parses a JSON object as task input; other text (including a
+diff) becomes `{ "diff": <complete file contents> }`. Invalid `.json` files and
+JSON primitives/arrays are rejected with an actionable error. Use exactly one of
+`--input-file` and the existing `--input '<json>'`. Files are read locally; HTTPS
+invite links are parsed locally and never fetched. Both `acp-invite:` and
+`acp://invite?token=...` remain supported. Links without a fragment token report
+that the sender must provide the complete link.
+
+Keep both terminals open. The reviewer’s approval shows the requester identity,
+title, input bytes/diff lines, time limit, and token/tool budgets. The requester’s
+final approval shows the review body. Answer `y` only after reviewing the displayed
+request or result. `--verbose` (default off) shows full approval JSON instead;
+summary mode signs the same target. Common CLI errors retain their machine codes
+and include a Japanese reason and next step.
+
 **Choose an adapter**
 
 | Adapter           | CLI / programmatic entry                              | Behavior                                                                              |
@@ -282,7 +319,7 @@ Expected: `SETTLED`, a JSON deliverable, and `"valid":true` with `"status":"VALI
 | MCP               | `McpClientAdapter` from `@acp/adapters`               | Official SDK client, stdio or in-memory transport; CapGuard + quota + approval proxy  |
 | Restricted JS     | `--adapter sandbox [--cmd 'return input;']`           | `subprocess_restricted` (no kernel network isolation), or `oci_container` when `isolationLevel` requires it |
 
-Claude/Codex binaries must already be installed. Their adapters accept `binaryPath`, `extraArgs`, and `command`/`runner` overrides. When a provider key is configured in the host (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), a task-scoped loopback broker injects it upstream; the CLI receives only a temporary local broker credential. Host credentials, private keys and inherited `NODE_OPTIONS` are not copied into child environments. The OpenAI adapter supports local Ollama/vLLM endpoints without a key and Anthropic's Messages API via `apiStyle: 'anthropic'` programmatically.
+Claude/Codex binaries must already be installed. `worker start --adapter claude|codex` checks authentication before connecting: configure `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the worker host environment. A logged-in CLI alone is insufficient because each task gets a fresh HOME; `~/.claude` and `~/.codex` are not exposed. Without a usable key, startup reports `AGENT_AUTH_REQUIRED` with the next step. Explicit `--cmd` overrides manage their own authentication and skip this preflight. Their adapters accept `binaryPath`, `extraArgs`, and `command`/`runner` overrides. When a provider key is configured in the host (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), a task-scoped loopback broker injects it upstream; the CLI receives only a temporary local broker credential. Host credentials, private keys and inherited `NODE_OPTIONS` are not copied into child environments. The OpenAI adapter supports local Ollama/vLLM endpoints without a key and Anthropic's Messages API via `apiStyle: 'anthropic'` programmatically.
 
 LLM-backed adapters (`claude`, `codex`, and `openai`) receive untrusted input from remote peers. The `claude` and `codex` adapters default to read-only tool flags. Claude Code starts as `claude -p --output-format json --tools Read,Glob,Grep --disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch --permission-mode dontAsk`, which disables shell execution, file writes, and web tools. Codex starts as `codex exec --json --skip-git-repo-check --sandbox read-only`. `ClaudeCodeAdapter` (also exported as `ClaudeCodeCliAdapter`) accepts `tools`, `allowedTools`, `disallowedTools`, `permissionMode`, and `allowUnsafeTools`. `CodexCliAdapter` accepts `sandbox` (`read-only`, `workspace-write`, or `danger-full-access`). A matching flag in `extraArgs` (`--tools`, `--disallowedTools` or `--disallowed-tools`, `--permission-mode`, `--sandbox` or `-s`, including `--flag=value`) replaces that default so the process receives one value for the flag. `allowUnsafeTools: true` omits the Claude read-only defaults. An explicit `command` replaces the whole argument list. `resolveClaudeCodeCliCommand`, `resolveCodexCliCommand`, and `resolvedInvocation()` expose the argv that will be spawned. Operators MUST run these adapters inside an OCI container (`--isolation oci`) or restrict tasks to trusted requester DIDs (`--allow-requester <did>`).
 

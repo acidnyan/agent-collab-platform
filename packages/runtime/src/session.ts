@@ -13,6 +13,7 @@ import {
   createSignedAgentCard,
   createInviteToken,
   parseAndVerifyInviteToken,
+  isInviteTarget,
   validateRelayEndpointUrl,
   signPayload,
   verifySigned,
@@ -387,6 +388,8 @@ function recipientInbox(
   return inbox;
 }
 export interface WorkerNodeOptions extends WorkerAcceptancePolicy, SessionTimeoutOptions {
+  /** Startup invite and signed card lifetime in seconds. Default 86400 (24 hours). */
+  inviteTtlSeconds?: number;
   /** Shared host state, independent of requester and worker identity. */
   dailyLimit?: { path: string; maxTasks: number };
   /** Explicit admission policy. Defaults to invite-only. */
@@ -491,6 +494,9 @@ export class WorkerNode {
   readonly revocation: RevocationList;
   constructor(readonly options: WorkerNodeOptions) {
     validateSessionTimeouts(options);
+    if (options.inviteTtlSeconds !== undefined && (!Number.isSafeInteger(options.inviteTtlSeconds) ||
+        options.inviteTtlSeconds < 1 || options.inviteTtlSeconds > 2592000))
+      throw new Error('INVALID_INVITE_TTL');
     const persistencePath = options.inboxPath ?? options.auditPath;
     if (persistencePath) this.taskJournal = new TaskJournal(persistencePath + '.tasks.jsonl', options.owner);
     if (options.dailyLimit && (!options.dailyLimit.path || !Number.isSafeInteger(options.dailyLimit.maxTasks) || options.dailyLimit.maxTasks < 1))
@@ -523,6 +529,9 @@ export class WorkerNode {
             ? options.relay
             : (options.relayUrl ?? 'http://in-memory.invalid'),
         skills: options.adapter.skills,
+        ...(options.inviteTtlSeconds !== undefined ? {
+          expiresAt: new Date(Date.now() + options.inviteTtlSeconds * 1000).toISOString(),
+        } : {}),
         ...(options.accessMode ? { accessMode: options.accessMode } : {}),
         ...(options.openPolicy !== undefined ? { openPolicy: options.openPolicy } : {}),
       },
@@ -530,7 +539,7 @@ export class WorkerNode {
       agentDid === options.owner.did ? undefined : options.agentKey,
     );
   }
-  invite(expiresInSeconds = 3600): string {
+  invite(expiresInSeconds = this.options.inviteTtlSeconds ?? 86400): string {
     return createInviteToken({ agentCard: this.agentCard, expiresInSeconds }, this.options.owner);
   }
   async register(): Promise<void> {
@@ -1035,6 +1044,7 @@ export class WorkerNode {
         target: contract.contractDigest,
         details: {
           manifest: m,
+          input: data.input,
           capabilities: data.capabilityChains,
           from: first.payload.senderDid,
         },
@@ -1907,7 +1917,7 @@ export class RequesterClient {
     taskId?: string;
     encrypt?: boolean;
   }): Promise<SignedEnvelope> {
-    const invite = options.to.startsWith('acp')
+    const invite = isInviteTarget(options.to)
       ? parseAndVerifyInviteToken(options.to, Date.now(), {
           allowPrivateRelay: this.options.allowPrivateRelay,
         })
@@ -1949,7 +1959,7 @@ export class RequesterClient {
     if (timeoutOptions.executionTimeoutMs !== undefined && timeoutOptions.executionTimeoutMs < 1000)
       throw new Error('INVALID_TIMEOUT: executionTimeoutMs must be at least 1000 (whole-second contract budget)');
     const onProgress = hooks?.onProgress ?? options.onProgress;
-    const invite = options.to.startsWith('acp')
+    const invite = isInviteTarget(options.to)
       ? parseAndVerifyInviteToken(options.to, Date.now(), {
           allowPrivateRelay: this.options.allowPrivateRelay,
         })

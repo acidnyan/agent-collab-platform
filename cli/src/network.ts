@@ -19,10 +19,14 @@ import {
   CodexCliAdapter,
   OpenAICompatibleAdapter,
   SandboxAgentAdapter,
+  assertCliAuthentication,
 } from '@acp/adapters';
 import { createWakeHook } from './wake-hook.js';
 import { createReceiveHook } from './receive-hook.js';
 import { contactsPath, loadContacts, contactsApproval, addContact } from './contacts.js';
+import { readTaskInputFile } from './task-input.js';
+import { approvalSummary } from './approval-summary.js';
+import { japaneseErrorReason } from './error-messages.js';
 const REPEATABLE = new Set(['--allow-requester', '--open-allow-task-type']);
 const LLM_ADAPTERS = new Set(['claude', 'codex', 'openai']);
 function flags(args: string[]): Map<string, string | true> {
@@ -53,10 +57,12 @@ function approval(
   key: KeyPair,
   automatic: boolean,
   acceptance?: WorkerAcceptancePolicy,
+  verbose = false,
 ): ApprovalProvider {
   return automatic
     ? new PolicyAutoApprovalProvider(key, undefined, { acceptance })
-    : new InteractiveCliApprovalProvider(key);
+    : new InteractiveCliApprovalProvider(key, { output: process.stderr,
+      ...(verbose ? {} : { formatRequest: approvalSummary }) });
 }
 function optionalCount(parsed: Map<string, string | true>, name: string): number | undefined {
   if (!parsed.has('--' + name)) return undefined;
@@ -86,6 +92,15 @@ const TIMEOUT_HELP = `Timeout options (positive integer milliseconds):
   --transport-idle-timeout-ms <n>  Authenticated peer idle watchdog during execution (default: 90000).
   --heartbeat-interval-ms <n>      Worker liveness interval (default: 15000).
 Worker execution limit defaults to the agreed budget. Heartbeats do not renew task or execution deadlines.`;
+const REVIEW_HELP = `
+  --input-file <path>            Delegate: JSON object, or text/diff wrapped as { "diff": contents }.
+                                 Use exactly one of --input <json> and --input-file.
+  --to <invite|link|did>          Delegate: accepts https://sealbridge.app/i#acp-invite:... links.
+  --invite-ttl <seconds>          Worker invite lifetime (default: 86400 / 24h; range: 1–2592000).
+                                 Startup prints both the token and a ready-to-share HTTPS link.
+  --verbose                     Full approval JSON instead of concise summaries (default: off).
+Claude/Codex workers require a host ANTHROPIC_API_KEY / OPENAI_API_KEY.
+Task HOME is fresh: host CLI login directories are not exposed. --cmd overrides manage their own authentication.`;
 function allowRequesterDids(parsed: Map<string, string | true>): string[] {
   const raw = parsed.get('--allow-requester');
   if (raw === undefined) return [];
@@ -142,7 +157,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
   --wake-timeout-ms <n>          Per-attempt timeout (default: 5000).
   --notification-key <file>      Persistent signing key (default: ephemeral local identity).
   --notification-ttl-ms <n>      Wake registration/dedup and expiry notice retention (default: 3600000).
-  --envelope-ttl-ms <n>          Undelivered envelope TTL (default: 600000).` : TIMEOUT_HELP + `
+  --envelope-ttl-ms <n>          Undelivered envelope TTL (default: 600000).` : TIMEOUT_HELP + REVIEW_HELP + `
   --wake-channel <name>          Worker: register an operator channel on startup (default: off).
                                  The local relay CLI provides channel "default".`);
     return;
@@ -221,6 +236,8 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       ? createReceiveHook(text(f, 'on-receive')) : undefined;
     if (onInboxRecord && !f.has('--inbox')) throw new Error('--on-receive requires --inbox');
     const adapterName = text(f, 'adapter', 'sandbox');
+    const inviteTtl = optionalCount(f, 'invite-ttl') ?? 86400;
+    if (inviteTtl > 2592000) throw new Error('INVALID_INVITE_TTL: expected 1–2592000 seconds');
     const acceptance = workerAcceptance(f);
     const contactFile = f.has('--contacts') ? text(f, 'contacts') : contactsPath();
     const explicitAcceptance = { ...acceptance };
@@ -259,6 +276,8 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       if (general !== undefined) openPolicy[field] = Math.min(openPolicy[field] ?? general, general);
     }
     assertLlmAutoAccept(adapterName, automatic, acceptance);
+    if (adapterName === 'claude' || adapterName === 'codex')
+      assertCliAuthentication(adapterName, f.has('--cmd') ? { command: text(f, 'cmd') } : {});
     let adapter: AgentAdapter;
     switch (adapterName) {
       case 'command':
@@ -302,15 +321,17 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       ...sessionTimeouts(f),
       owner: key,
       relay: workerRelay,
+      inviteTtlSeconds: inviteTtl,
       relayUrl: text(f, 'relay'),
       adapter,
       name: text(f, 'name', adapter.name),
-      approvalProvider: contactsApproval(contactFile, key, automatic, explicitAcceptance, approval(key, false)),
+      approvalProvider: contactsApproval(contactFile, key, automatic, explicitAcceptance, approval(key, false, undefined, f.has('--verbose'))),
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
       inboxPath: f.has('--inbox') ? text(f, 'inbox') : undefined,
       onInboxRecord,
-      onStatus: (status, error) => console.error(JSON.stringify({ status, ...(error ? { error: error.message } : {}) })),
-      onEvent: (event, taskId, error) => console.error(JSON.stringify({ event, taskId, ...error })),
+      onStatus: (status, error) => console.error(JSON.stringify({ status, ...(error ? { error: error.message, reasonJa: japaneseErrorReason(error.message) } : {}) })),
+      onEvent: (event, taskId, error) => console.error(JSON.stringify({ event, taskId, ...error,
+        ...(error ? { reasonJa: japaneseErrorReason(error.code) } : {}) })),
       ...acceptance,
       allowPrivateRelay,
     });
@@ -323,7 +344,9 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     if (acceptance.publishToRegistry) await worker.register();
     if (accessMode === 'open' && automatic && !acceptance.allowedRequesterDids?.length)
       console.error(`[Sealbridge WARNING] Worker started in --open mode with ${f.has('--yes') ? '--yes' : 'automatic approval'} and no requester allowlist. Any requester can submit tasks for automatic acceptance within configured limits.`);
-    console.log(worker.invite());
+    const token = worker.invite(inviteTtl);
+    console.log(token);
+    console.log('https://sealbridge.app/i#' + token);
     const stop = () => worker.stop();
     process.once('SIGINT', stop);
     process.once('SIGTERM', stop);
@@ -336,6 +359,10 @@ export async function networkCommand(command: string, args: string[]): Promise<v
     return;
   }
   if (command === 'delegate') {
+    if (f.has('--input') && f.has('--input-file'))
+      throw new Error('INVALID_INPUT_OPTIONS: use exactly one of --input and --input-file');
+    const input = f.has('--input-file')
+      ? readTaskInputFile(text(f, 'input-file')) : JSON.parse(text(f, 'input'));
     if (f.has('--save-contact')) addContact(
       f.has('--contacts') ? text(f, 'contacts') : contactsPath(), key, text(f, 'to'),
       text(f, 'save-contact'), allowPrivateRelay,
@@ -353,7 +380,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       ...(f.has('--relay')
         ? { relay: new HttpRelayClient(text(f, 'relay'), key, { allowPrivateRelay, requestTimeoutMs: optionalCount(f, 'connect-timeout-ms') }) }
         : {}),
-      approvalProvider: approval(key, automatic),
+      approvalProvider: approval(key, automatic, undefined, f.has('--verbose')),
       auditPath: f.has('--audit') ? text(f, 'audit') : undefined,
       allowPrivateRelay,
     });
@@ -366,7 +393,7 @@ export async function networkCommand(command: string, args: string[]): Promise<v
       } } : {}),
       title: text(f, 'title'),
       description: text(f, 'description'),
-      input: JSON.parse(text(f, 'input')),
+      input,
       outputSchema,
     });
     if (f.has('--out'))

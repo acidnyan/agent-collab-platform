@@ -64,10 +64,13 @@ third-party fonts, or other fragment-reading integrations on either host.
 Verification proves possession of signing keys, not a real-world identity.
 The offline page cannot check revocation or current availability. Those checks
 belong to the connection workflow. No contact is saved or job approved in the
-browser. Users copy the link to `received-link.txt` locally, then run
-`pnpm sealbridge invite open --file received-link.txt` inside their checkout.
-The existing CLI rechecks it, creates an identity only if absent, and saves the
-contact plus a reciprocal invite file without automatically approving work.
+browser. After signature verification, the page guides the requester through the
+one-line installer, creating a requester key once, and saving a local `code.diff`.
+Its `sealbridge delegate --to "https://sealbridge.app/i#..." --input-file code.diff`
+example targets the verified reviewer directly. The CLI rechecks the invite and
+sends the diff encrypted through the relay. The reviewer approves the request;
+the requester reads the result before final approval. Opening the page sends no
+task and grants no approval.
 
 ## Tests
 

@@ -12,6 +12,7 @@ import { contactsCommand } from './contacts.js';
 import { receiptCommand } from './receipt.js';
 import { doctorCommand } from './doctor.js';
 import { boardCommand } from './board.js';
+import { formatCliError } from './error-messages.js';
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as unknown;
 const AUDIT_VERIFY_USAGE =
   'Usage: sealbridge audit-verify <audit.jsonl|bundle.json> [trust-anchor.json] ' +
@@ -196,6 +197,6 @@ async function main(args: string[]) {
   }
 }
 main(process.argv.slice(2)).catch((error) => {
-  console.error(String(error));
+  console.error(formatCliError(error));
   process.exitCode = 1;
 });

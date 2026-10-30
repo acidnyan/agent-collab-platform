@@ -4,16 +4,12 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline/promises';
 import QRCode from 'qrcode';
-import { createInviteToken, createSignedAgentCard, generateKeyPair, parseAndVerifyInviteToken, signPayload, verifySigned } from '@acp/core';
+import { createInviteToken, createSignedAgentCard, generateKeyPair, inviteTokenFromUri, parseAndVerifyInviteToken, signPayload, verifySigned } from '@acp/core';
 import type { Invite, KeyPair, Signed } from '@acp/core';
 import { addContact, contactsPath } from './contacts.js';
 
 export function inviteToken(value: string): string {
-  if (value.startsWith('acp-invite:')) return value;
-  const u = new URL(value);
-  if (u.protocol !== 'https:' || u.username || u.password || u.search ||
-      !/^#acp-invite:[A-Za-z0-9_-]+$/.test(u.hash)) throw new Error('INVALID_INVITE_LINK');
-  return u.hash.slice(1);
+  return inviteTokenFromUri(value);
 }
 export function openInvite(value: string, now = Date.now()): Invite {
   return parseAndVerifyInviteToken(inviteToken(value), now);
