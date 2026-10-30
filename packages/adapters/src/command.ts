@@ -194,6 +194,17 @@ export interface CliOptions {
    */
   maxRequests?: number;
 }
+/** Default CLI invocations use a fresh HOME, so host CLI logins are unavailable. */
+export function assertCliAuthentication(adapter: 'claude' | 'codex', options: CliOptions = {}): void {
+  // Owner-supplied commands/runners manage their own authentication.
+  if (options.command || options.runner) return;
+  const variable = options.apiKeyEnv ?? (adapter === 'claude' ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY');
+  if (options.apiKey ?? process.env[variable]) return;
+  throw new Error('AGENT_AUTH_REQUIRED: ' + adapter +
+    ' runs with a fresh task HOME; local CLI logins (~/.claude or ~/.codex) are unavailable. ' +
+    'Configure ' + variable + ' in the worker host environment before starting. ' +
+    'Never put credentials in task input or invitations.');
+}
 const CLAUDE_PERMISSION_MODES = [
   'acceptEdits',
   'auto',

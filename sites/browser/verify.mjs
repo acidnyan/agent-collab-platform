@@ -6,6 +6,7 @@ export function verifyFragment(hash, now = Date.now()) {
     throw new Error('INVALID_OR_EXPIRED_INVITE');
   const token = hash.slice(1);
   const invite = parseAndVerifyInviteToken(token, now);
-  return { token, invite, link: `https://sealbridge.app/i#${token}`,
-    command: 'pnpm sealbridge invite open --file received-link.txt' };
+  const link = `https://sealbridge.app/i#${token}`;
+  return { token, invite, link,
+    command: `sealbridge delegate --key requester.private.json --to "${link}" --title "Review my code diff" --description "Review this diff for bugs and suggest improvements. Return a JSON review." --input-file code.diff --out review.json` };
 }

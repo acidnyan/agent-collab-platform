@@ -18,6 +18,7 @@ import { networkCommand } from '../cli/src/network.js';
 const cleanup: (() => Promise<unknown>)[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const fn of cleanup.splice(0).reverse()) await fn();
 });
 
@@ -331,6 +332,9 @@ describe('acp worker CLI acceptance guard', () => {
   it.each(['claude', 'codex', 'openai'])(
     'starts --adapter %s --auto-accept when --allow-requester is set',
     async (adapter) => {
+      // This startup-only test configures authentication without executing a task.
+      if (adapter === 'claude') vi.stubEnv('ANTHROPIC_API_KEY', 'local-startup-fixture');
+      if (adapter === 'codex') vi.stubEnv('OPENAI_API_KEY', 'local-startup-fixture');
       const bob = await keyFile('bob.private.json');
       const alice = generateKeyPair();
       const server = await relay();
