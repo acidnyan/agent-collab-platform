@@ -16,15 +16,22 @@ import type { AuditBody, AuditBundle, AuditEntry, Checkpoint } from '@acp/ledger
 import { isTransientRelayError, relayRetryDelay, waitForRelayRetry } from '@acp/relay';
 import type { RelayReceiveFilter, RelayTransport } from '@acp/relay';
 import type { ProgressPayload } from './adapter.js';
-import type { ErrorDetail } from './session.js';
+import type { ErrorDetail, SessionResult } from './session.js';
 /** The peer's signed ERROR, retaining optional diagnostics for programmatic callers. */
 export class PeerRejectedError extends Error {
   readonly code?: string;
   readonly detail?: ErrorDetail;
+  readonly recovery?: { proposalDigest: string; result?: SessionResult;
+    part?: { index: number; count: number; data: string; resultDigest: string } };
   constructor(body: Json) {
-    super('PEER_REJECTED: ' + JSON.stringify(body));
+    super('PEER_REJECTED: ' + JSON.stringify(body && typeof body === 'object' && !Array.isArray(body) && body.recovery
+      ? { code: body.code, recovery: true } : body));
     if (body && typeof body === 'object' && !Array.isArray(body)) {
       if (typeof body.code === 'string') this.code = body.code;
+      const recovery = body.recovery;
+      if (recovery && typeof recovery === 'object' && !Array.isArray(recovery) &&
+          typeof recovery.proposalDigest === 'string')
+        this.recovery = recovery as unknown as NonNullable<PeerRejectedError['recovery']>;
       const detail = body.detail;
       if (detail && typeof detail === 'object' && !Array.isArray(detail) &&
           typeof detail.field === 'string' && typeof detail.hint === 'string' &&
@@ -90,6 +97,7 @@ export interface CancelBody {
 export class SessionWire {
   private outgoing = 0;
   private incoming = 0;
+  private readonly recoveryParts = new Map<string, Map<number, Buffer>>();
   /** Opened session views keep the ciphertext envelope so delivery verification can check it. */
   private readonly sealedByView = new WeakMap<SignedEnvelope, SignedEnvelope>();
   private readonly inbox: SignedEnvelope[] = [];
@@ -206,6 +214,10 @@ export class SessionWire {
       for (;;) {
         const envelope = await this.nextEnvelope();
         const type = envelope.payload.eventType;
+        if (type === 'RECOVERY_PART') {
+          await acknowledgeRelay(this.relay, this.sealed(envelope));
+          continue;
+        }
         const index = this.waiters.findIndex((waiter) => waiter.allowed.includes(type));
         if (index >= 0) {
           this.waiters.splice(index, 1)[0].resolve(envelope);
@@ -267,7 +279,7 @@ export class SessionWire {
       !verifyEnvelope(e, this.owner.did) ||
       e.payload.senderDid !== this.peerDid ||
       e.payload.taskId !== this.taskId ||
-      e.payload.seq !== this.incoming++
+      (e.payload.eventType !== 'ERROR' && e.payload.seq !== this.incoming)
     )
       throw new Error('INVALID_OR_REPLAYED_SESSION_ENVELOPE');
     // The signature covers ciphertext. Open a copy so later session code reads plaintext.
@@ -278,8 +290,35 @@ export class SessionWire {
       }),
     );
     this.sealedByView.set(view, e);
-    if (view.payload.eventType === 'ERROR')
-      throw new PeerRejectedError(view.payload.payload);
+    if (view.payload.eventType === 'ERROR') {
+      const error = new PeerRejectedError(view.payload.payload);
+      // Restart notifications are independent of the lost session's wire counters.
+      // Sender, recipient, task, signature and encryption were checked above.
+      if (error.recovery) {
+        const part = error.recovery.part;
+        if (part) {
+          if (!Number.isSafeInteger(part.index) || !Number.isSafeInteger(part.count) ||
+              part.index < 0 || part.index >= part.count || typeof part.data !== 'string' ||
+              typeof part.resultDigest !== 'string') throw new Error('INVALID_RECOVERY_OUTCOME');
+          const key = digest({ proposalDigest: error.recovery.proposalDigest, code: error.code,
+            count: part.count, resultDigest: part.resultDigest });
+          const parts = this.recoveryParts.get(key) ?? new Map<number, Buffer>();
+          parts.set(part.index, Buffer.from(part.data, 'base64'));
+          this.recoveryParts.set(key, parts);
+          if (parts.size !== part.count) {
+            view.payload.eventType = 'RECOVERY_PART';
+            return view;
+          }
+          const result = JSON.parse(Buffer.concat(Array.from({ length: part.count }, (_, index) => parts.get(index)!)).toString('utf8')) as SessionResult;
+          if (digest(result) !== part.resultDigest) throw new Error('INVALID_RECOVERY_OUTCOME');
+          error.recovery.result = result;
+          this.recoveryParts.delete(key);
+        }
+        throw error;
+      }
+    }
+    if (e.payload.seq !== this.incoming++) throw new Error('INVALID_OR_REPLAYED_SESSION_ENVELOPE');
+    if (view.payload.eventType === 'ERROR') throw new PeerRejectedError(view.payload.payload);
     return view;
   }
   private acceptInitial(expected: string | string[], initial: SignedEnvelope): SignedEnvelope {
@@ -427,13 +466,14 @@ export class SessionWire {
     >;
     return this.seal({ actor, receiver });
   }
-  async finishWorker(): Promise<AuditBundle> {
+  async finishWorker(onSealed?: (bundle: AuditBundle) => void): Promise<AuditBundle> {
     const actor = (await this.rawReceive('CHECKPOINT')).payload
       .payload as unknown as Signed<Checkpoint>;
     if (!verifySigned(actor, this.peerDid) || digest(actor.payload) !== digest(this.checkpoint()))
       throw new Error('INVALID_AUDIT_CHECKPOINT');
     const receiver = signPayload(actor, this.owner),
       bundle = this.seal({ actor, receiver });
+    onSealed?.(bundle);
     await this.rawSend('CHECKPOINT_ACK', receiver);
     return bundle;
   }

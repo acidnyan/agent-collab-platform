@@ -54,9 +54,9 @@ import type {
   Invite,
   SignedRevocationNotice,
 } from '@acp/core';
-import { verifyAudit, type AuditBundle } from '@acp/ledger';
+import { parseJsonl, verifyAudit, type AuditBundle } from '@acp/ledger';
 import type { SandboxBoundaryMetadata } from '@acp/sandbox';
-import { HttpRelayClient } from '@acp/relay';
+import { HttpRelayClient, waitForRelayRetry } from '@acp/relay';
 import type { RelayClientSecurityOptions, RelayTransport } from '@acp/relay';
 import type {
   AgentAdapter,
@@ -75,7 +75,9 @@ import { MCPProxy } from './mcp.js';
 import type { ToolBackend, ToolDefinition } from './mcp.js';
 import { VerificationEngine, createDelivery } from './verifier.js';
 import type { Delivery, VerificationResult } from './verifier.js';
-import { asJson, receiveRelay, acknowledgeRelay, SessionWire } from './session-audit.js';
+import { asJson, receiveRelay, acknowledgeRelay, PeerRejectedError, SessionWire } from './session-audit.js';
+import { TaskJournal } from './task-journal.js';
+import type { TaskCheckpoint, TaskOutcome } from './task-journal.js';
 export interface SessionResult {
   taskId: string;
   state: 'SETTLED' | 'CANCELLED';
@@ -359,8 +361,9 @@ export interface WorkerNodeOptions extends WorkerAcceptancePolicy {
   /** Controls agentDid when it is not owner.did. Required to sign the delegation. */
   agentKey?: KeyPair;
   approvalProvider?: ApprovalProvider;
+  /** Bilateral audit path; enables adjacent task checkpoints when inboxPath is absent. */
   auditPath?: string;
-  /** Append accepted, decrypted task messages as private JSONL before execution. */
+  /** Append accepted messages as private JSONL; also enables adjacent task checkpoints. */
   inboxPath?: string;
   /** Best-effort notification after a successful inbox append; never awaited. */
   onInboxRecord?: (record: string) => void | Promise<void>;
@@ -426,6 +429,8 @@ export class WorkerNode {
   readonly acceptance: WorkerAcceptancePolicy;
   private completed = 0;
   private activeTasks = 0;
+  private readonly taskJournal?: TaskJournal;
+  private reconciled = false;
   private readonly proposalTimes = new Map<string, number[]>();
   private readonly mailboxes = new Map<string, TaskMailbox>();
   private readonly forwardedQueue: SignedEnvelope[] = [];
@@ -441,6 +446,8 @@ export class WorkerNode {
   /** Inbox registry composed with options.revocation when the caller passed one. */
   readonly revocation: RevocationList;
   constructor(readonly options: WorkerNodeOptions) {
+    const persistencePath = options.inboxPath ?? options.auditPath;
+    if (persistencePath) this.taskJournal = new TaskJournal(persistencePath + '.tasks.jsonl', options.owner);
     if (options.dailyLimit && (!options.dailyLimit.path || !Number.isSafeInteger(options.dailyLimit.maxTasks) || options.dailyLimit.maxTasks < 1))
       throw new Error('INVALID_DAILY_LIMIT');
     if (options.accessMode !== undefined && !['invite-only', 'open'].includes(options.accessMode))
@@ -548,7 +555,9 @@ export class WorkerNode {
   async start(
     options: { once?: boolean; signal?: AbortSignal } = {},
   ): Promise<SessionResult | undefined> {
+    // Register first so immediate discovery can resolve owner and agent aliases.
     if (this.publishes()) await this.register();
+    await this.reconcileTasks();
     const idleSignal = AbortSignal.any([
       this.controller.signal,
       ...(options.signal ? [options.signal] : []),
@@ -565,7 +574,10 @@ export class WorkerNode {
         const envelope = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
           role: 'worker',
         });
-        if (await this.alreadyPersisted(envelope)) continue;
+        if (await this.recoverProposal(envelope)) {
+          if (options.once) return this.lastResult;
+          continue;
+        }
         if (this.deliver(envelope)) continue;
         const job = this.beginTask(envelope, idleSignal, options.once === true);
         if (!job) continue;
@@ -584,22 +596,101 @@ export class WorkerNode {
     }
     return this.lastResult;
   }
-  private persistedEnvelopeIds?: Set<string>;
-  private async alreadyPersisted(envelope: SignedEnvelope): Promise<boolean> {
-    if (!this.options.inboxPath || envelope.payload.eventType !== 'PROPOSE' ||
+  private async notifyOutcome(record: TaskCheckpoint, outcome = record.outcome!): Promise<void> {
+    const send = (recovery: unknown) => this.relay.send(signEnvelope({ taskId: record.taskId,
+      recipientDid: record.requesterDid, seq: 0, eventType: 'ERROR',
+      payload: asJson({ code: outcome.code, recovery }),
+    }, this.options.owner, { encrypt: true }));
+    const bytes = outcome.result ? Buffer.from(JSON.stringify(outcome.result)) : undefined;
+    // Cached audits can exceed a single relay envelope even when every original event fitted.
+    if (bytes && bytes.length > 48 * 1024) {
+      const size = 24 * 1024, count = Math.ceil(bytes.length / size), resultDigest = digest(outcome.result);
+      for (let index = 0; index < count; index++) {
+        await send({ proposalDigest: record.proposalDigest, part: { index, count, resultDigest,
+          data: bytes.subarray(index * size, (index + 1) * size).toString('base64') } });
+        // Yield to inbox readers so a cached audit does not fill the bounded relay queue.
+        if (index + 1 < count) await waitForRelayRetry(10, this.controller.signal);
+      }
+    } else {
+      await send({ proposalDigest: record.proposalDigest, ...(outcome.result ? { result: outcome.result } : {}) });
+    }
+  }
+  private async reconcileTasks(): Promise<void> {
+    if (this.reconciled || !this.taskJournal) return;
+    this.taskJournal.load();
+    for (const saved of this.taskJournal.tasks.values()) {
+      let record = saved;
+      if (record.phase !== 'terminal') {
+        const result = this.sealedTaskResult(record);
+        // Adapters expose executeTask only. Unknown execution/tool results cannot be retried safely.
+        record = { ...record, phase: 'terminal', outcome: result
+          ? { code: result.state === 'SETTLED' ? 'TASK_SETTLED' : 'TASK_CANCELLED', result }
+          : { code: 'TASK_INTERRUPTED' }, notificationPending: true };
+        this.taskJournal.save(record);
+        if (!result) this.options.onEvent?.('INTERRUPTED', record.taskId, { code: 'TASK_INTERRUPTED' });
+      }
+      if (record.notificationPending) {
+        await this.notifyOutcome(record);
+        this.taskJournal.save({ ...record, notificationPending: false });
+      }
+    }
+    this.reconciled = true;
+  }
+  private sealedTaskResult(record: TaskCheckpoint): SessionResult | undefined {
+    if (!record.auditPath) return;
+    try {
+      const bundle = parseJsonl(readFileSync(record.auditPath, 'utf8'));
+      if (!verifyAudit(bundle, { taskId: record.taskId, actors: [record.requesterDid, this.options.owner.did] }).valid)
+        return;
+      const proposal = bundle.entries.find((entry) => entry.body.eventType === 'PROPOSE')?.body.payload as unknown as Proposal;
+      if (!proposal || digest({ manifest: proposal.proposal.payload, input: proposal.input }) !== record.proposalDigest) return;
+      const last = bundle.entries.at(-1)?.body.eventType;
+      if (last === 'CANCEL') return { taskId: record.taskId, state: 'CANCELLED', deliverable: null, bundle };
+      const delivery = bundle.entries.find((entry) => entry.body.eventType === 'DELIVER')?.body.payload as unknown as Delivery;
+      if (last === 'SETTLED' && delivery)
+        return { taskId: record.taskId, state: 'SETTLED', deliverable: delivery.artifact.payload.data, bundle };
+    } catch { /* An unsealed or partial audit is evidence to preserve, not authorization to rerun. */ }
+    return undefined;
+  }
+  private async recoverProposal(envelope: SignedEnvelope): Promise<boolean> {
+    if (!this.taskJournal || envelope.payload.eventType !== 'PROPOSE' || envelope.payload.seq !== 0 ||
         !verifyEnvelope(envelope, this.options.owner.did)) return false;
-    if (!this.persistedEnvelopeIds) {
-      this.persistedEnvelopeIds = new Set();
-      if (existsSync(this.options.inboxPath)) {
-        for (const line of readFileSync(this.options.inboxPath, 'utf8').split('\n')) {
-          try {
-            const record = JSON.parse(line) as { envelopeId?: string };
-            if (typeof record.envelopeId === 'string') this.persistedEnvelopeIds.add(record.envelopeId);
-          } catch { /* A partial final write is not proof of persistence. */ }
+    let data: Proposal;
+    try {
+      data = openEnvelope(envelope, this.options.owner,
+        sessionDecryptOptions(this.options.allowUnencryptedEnvelopes)) as unknown as Proposal;
+    } catch { return false; }
+    const manifest = data?.proposal?.payload;
+    if (!manifest || !verifySigned(data.proposal, envelope.payload.senderDid) ||
+        manifest.taskId !== envelope.payload.taskId || manifest.requester?.ownerDid !== envelope.payload.senderDid)
+      return false;
+    const proposalDigest = digest({ manifest, input: data.input });
+    let record = this.taskJournal.tasks.get(manifest.taskId);
+    // Older inboxes have intake evidence but no execution checkpoint. Never execute those tasks again.
+    if (!record && this.options.inboxPath && existsSync(this.options.inboxPath)) {
+      for (const line of readFileSync(this.options.inboxPath, 'utf8').split('\n')) {
+        let old: { taskId?: string; requesterOwnerDid?: string };
+        try { old = JSON.parse(line); } catch { continue; }
+        if (old?.taskId === manifest.taskId && old.requesterOwnerDid === envelope.payload.senderDid) {
+          record = { version: 1, taskId: manifest.taskId, requesterDid: envelope.payload.senderDid,
+            envelopeId: envelope.payload.envelopeId, proposalDigest, phase: 'terminal', invocations: [],
+            outcome: { code: 'TASK_INTERRUPTED' } };
+          this.taskJournal.save(record);
+          break;
         }
       }
     }
-    if (!this.persistedEnvelopeIds.has(envelope.payload.envelopeId)) return false;
+    if (!record) return false;
+    this.lastResult = undefined;
+    if (record.requesterDid !== envelope.payload.senderDid || record.proposalDigest !== proposalDigest) {
+      await this.notifyOutcome({ ...record, requesterDid: envelope.payload.senderDid, proposalDigest }, { code: 'TASK_ID_CONFLICT' });
+    } else if (record.outcome) {
+      await this.notifyOutcome(record);
+      this.lastResult = record.outcome.result;
+    } else if (!this.mailboxes.has(record.taskId)) {
+      throw new Error('TASK_RECOVERY_REQUIRED');
+    }
+    // The outcome must be sent successfully before a retried intake is removed.
     await acknowledgeRelay(this.relay, envelope);
     return true;
   }
@@ -694,6 +785,7 @@ export class WorkerNode {
         // A REVOKE queued behind the proposal is ingested inside receive and is
         // not delivered here. The next session envelope is what remains.
         if (!envelope) return;
+        if (await this.recoverProposal(envelope)) continue;
         if (!this.deliver(envelope) && verifyEnvelope(envelope, this.options.owner.did))
           this.options.onEvent?.('REJECTED', envelope.payload.taskId, { code: 'INVALID_SESSION_ENVELOPE' });
       }
@@ -703,12 +795,16 @@ export class WorkerNode {
     if (failure !== undefined) throw failure;
   }
   async runOnce(signal?: AbortSignal): Promise<SessionResult> {
+    await this.reconcileTasks();
     const idleSignal = AbortSignal.any([this.controller.signal, ...(signal ? [signal] : [])]);
     // One or more leading REVOKE envelopes are consumed before the task PROPOSE.
-    let first: SignedEnvelope;
-    do { first = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
+    const first = await receiveRelay(this.relay, this.options.owner.did, idleSignal, {
       role: 'worker',
-    }); } while (await this.alreadyPersisted(first));
+    });
+    if (await this.recoverProposal(first)) {
+      if (this.lastResult?.taskId === first.payload.taskId) return this.lastResult;
+      throw new Error(this.taskJournal?.tasks.get(first.payload.taskId)?.outcome?.code ?? 'TASK_INTERRUPTED');
+    }
     return this.executeTask(first, idleSignal, this.relay);
   }
   private async executeTask(
@@ -728,6 +824,15 @@ export class WorkerNode {
     let data!: Proposal;
     let m!: TaskManifest;
     let auditPath: string | undefined;
+    let checkpoint: TaskCheckpoint | undefined;
+    const saveCheckpoint = (patch: Partial<TaskCheckpoint>): void => {
+      if (!checkpoint || !this.taskJournal) return;
+      checkpoint = { ...checkpoint, ...patch };
+      this.taskJournal.save(checkpoint);
+    };
+    const saveOutcome = (outcome: TaskOutcome): void => {
+      saveCheckpoint({ phase: 'terminal', outcome, notificationPending: true });
+    };
     try {
       data = openEnvelope(
         first,
@@ -756,6 +861,12 @@ export class WorkerNode {
           : this.options.auditPath.replace(/(?:\.jsonl)?$/, '.' + m.taskId + '.jsonl')
         : undefined;
       freshAudit(auditPath);
+      if (this.taskJournal) {
+        checkpoint = { version: 1, taskId: m.taskId, requesterDid: m.requester.ownerDid,
+          envelopeId: first.payload.envelopeId, proposalDigest: digest({ manifest: m, input: data.input }),
+          phase: 'received', auditPath, invocations: [] };
+        this.taskJournal.save(checkpoint);
+      }
     } catch (e) {
       this.reportRejection(first.payload.taskId, e);
       try {
@@ -794,6 +905,7 @@ export class WorkerNode {
     const cancelController = new AbortController();
     wire.earlyCancel = () => cancelController.abort('CANCELLED');
     let gateway: OwnerGateway | undefined, workspace: string | undefined;
+    let preserveWorkspace = false;
     let trackedTaskId: string | undefined;
     // Progress metrics are applied synchronously. The tail only serializes wire frames.
     let progressTail: Promise<void> = Promise.resolve();
@@ -848,6 +960,7 @@ export class WorkerNode {
       });
       gateway = new OwnerGateway(this.options.owner, contract, policy, this.revocation);
       const accepted = gateway.accept(approval);
+      saveCheckpoint({ phase: 'accepted' });
       if (this.options.dailyLimit)
         consumeDailyTask(this.options.dailyLimit.path, this.options.dailyLimit.maxTasks, m.taskId);
       if (this.options.inboxPath) {
@@ -875,7 +988,6 @@ export class WorkerNode {
         } finally {
           closeSync(fd);
         }
-        this.persistedEnvelopeIds?.add(first.payload.envelopeId);
         await acknowledgeRelay(relay, first);
         // Notification errors must not fail a persisted task.
         try {
@@ -944,6 +1056,8 @@ export class WorkerNode {
         });
       });
       workspace = await mkdtemp(join(tmpdir(), 'acp-adapter-'));
+      saveCheckpoint({ phase: 'running', workspace });
+      let invocationCount = 0;
       const executionSignal = AbortSignal.any([
         activeSignal,
         gateway.quota.controller.signal,
@@ -1055,7 +1169,16 @@ export class WorkerNode {
                   signal: executionSignal,
                 })
               : undefined;
-          return asJson(await proxies[index].callTool(tool, args, approval));
+          executionSignal.throwIfAborted();
+          const invocation = { id: m.taskId + ':' + invocationCount++, tool,
+            argsDigest: digest(args), completed: false };
+          saveCheckpoint({ invocations: [...(checkpoint?.invocations ?? []), invocation] });
+          const result = asJson(await proxies[index].callTool(tool, args, approval));
+          // A backend may finish after cancellation. Leave its uncertain result for inspection.
+          if (!executionSignal.aborted)
+            saveCheckpoint({ invocations: (checkpoint?.invocations ?? []).map((call) =>
+              call.id === invocation.id ? { ...call, completed: true } : call) });
+          return result;
         },
       };
       const output = await abortable(this.options.adapter.executeTask(context), executionSignal);
@@ -1080,6 +1203,7 @@ export class WorkerNode {
         },
       );
       const transition = gateway.transition('DELIVER');
+      saveCheckpoint({ phase: 'delivered' });
       await wire.sendEvent('DELIVER', { ...delivery, transition });
       this.options.onEvent?.('DELIVER', m.taskId);
       const verification = await wire.receiveEvent(['VERIFY_ACCEPT', 'VERIFY_REJECT']);
@@ -1088,10 +1212,18 @@ export class WorkerNode {
         throw new Error('VERIFICATION_REJECTED');
       const settled = await wire.receiveEvent('SETTLED');
       gateway.machine.apply(settled.payload.payload as unknown as Signed<Transition>);
-      const bundle = await wire.finishWorker();
+      const bundle = await wire.finishWorker((sealed) => {
+        saveOutcome({ code: 'TASK_SETTLED', result: { taskId: m.taskId, state: 'SETTLED', deliverable: output, bundle: sealed } });
+      });
+      saveCheckpoint({ notificationPending: false });
       this.options.onEvent?.('SETTLED', m.taskId);
       return { taskId: m.taskId, state: 'SETTLED', deliverable: output, bundle };
     } catch (e) {
+      if (checkpoint?.outcome?.result) {
+        // The bilateral checkpoint is already durable even if its final relay send failed.
+        await this.notifyOutcome(checkpoint).then(() => saveCheckpoint({ notificationPending: false })).catch(() => {});
+        return checkpoint.outcome.result;
+      }
       if (
         gateway &&
         (wire.cancelHandled || cancelController.signal.aborted) &&
@@ -1103,7 +1235,10 @@ export class WorkerNode {
           if (!body || body.cancelledBy !== m.requester.ownerDid || !body.transition)
             throw new Error('INVALID_CANCEL');
           if (gateway.machine.state !== 'CANCELLED') gateway.machine.apply(body.transition);
-          const bundle = await wire.finishWorker();
+          const bundle = await wire.finishWorker((sealed) => {
+            saveOutcome({ code: 'TASK_CANCELLED', result: { taskId: m.taskId, state: 'CANCELLED', deliverable: null, bundle: sealed } });
+          });
+          saveCheckpoint({ notificationPending: false });
           this.options.onEvent?.('CANCELLED', m.taskId);
           return { taskId: m.taskId, state: 'CANCELLED', deliverable: null, bundle };
         } catch (inner) {
@@ -1112,10 +1247,15 @@ export class WorkerNode {
         }
       }
       await progressTail;
+      preserveWorkspace = activeSignal.aborted || idleSignal.aborted;
+      if (idleSignal.aborted) throw e;
+      const diagnostic = preserveWorkspace ? { code: 'TASK_INTERRUPTED' } : rejectionBody(progressFailure ?? e);
+      saveOutcome(diagnostic);
       this.reportRejection(m.taskId, progressFailure ?? e);
       if (!wireFailureSent) {
         wireFailureSent = true;
-        await wire.rawSend('ERROR', rejectionBody(progressFailure ?? e)).catch(() => {});
+        await wire.rawSend('ERROR', diagnostic)
+          .then(() => saveCheckpoint({ notificationPending: false })).catch(() => {});
       }
       // A quota abort already surfaces as EXECUTION_ABORTED. Keep that error.
       // A caught INVALID_PROGRESS still fails the session with the sticky error.
@@ -1128,7 +1268,8 @@ export class WorkerNode {
     } finally {
       if (trackedTaskId) this.liveChains.delete(trackedTaskId);
       gateway?.close();
-      if (workspace) await rm(workspace, { recursive: true, force: true });
+      if (idleSignal.aborted && checkpoint?.phase !== 'terminal') preserveWorkspace = true;
+      if (workspace && !preserveWorkspace) await rm(workspace, { recursive: true, force: true });
     }
   }
   /**
@@ -1863,6 +2004,31 @@ export class RequesterClient {
         verification: result,
       };
     } catch (e) {
+      if (e instanceof PeerRejectedError && e.recovery) {
+        if (e.recovery.proposalDigest !== digest({ manifest, input: options.input }))
+          throw new Error('INVALID_RECOVERY_OUTCOME');
+        const cached = e.recovery.result;
+        if (cached) {
+          const proposed = cached.bundle?.entries?.find((entry) => entry.body.eventType === 'PROPOSE')
+            ?.body.payload as unknown as Proposal | undefined;
+          const accepted = cached.bundle?.entries?.find((entry) => entry.body.eventType === 'ACCEPT')
+            ?.body.payload as unknown as { contract: TaskContract } | undefined;
+          const delivered = cached.bundle?.entries?.find((entry) => entry.body.eventType === 'DELIVER')
+            ?.body.payload as unknown as Delivery | undefined;
+          if (cached.taskId !== manifest.taskId || !['SETTLED', 'CANCELLED'].includes(cached.state) ||
+              !verifyAudit(cached.bundle, { taskId: manifest.taskId, actors: [owner.did, peer] }).valid ||
+              !proposed || digest({ manifest: proposed.proposal.payload, input: proposed.input }) !== e.recovery.proposalDigest ||
+              !accepted || !verifyContract(accepted.contract) || digest(accepted.contract.manifest) !== digest(manifest) ||
+              (cached.state === 'CANCELLED' && (e.code !== 'TASK_CANCELLED' || cached.deliverable !== null ||
+                cached.bundle.entries.at(-1)?.body.eventType !== 'CANCEL')) ||
+              (cached.state === 'SETTLED' && (!delivered ||
+                e.code !== 'TASK_SETTLED' ||
+                digest(delivered.artifact.payload.data) !== digest(cached.deliverable) ||
+                cached.bundle.entries.at(-1)?.body.eventType !== 'SETTLED')))
+            throw new Error('INVALID_RECOVERY_OUTCOME');
+          return cached;
+        }
+      }
       if (cancelStarted) {
         try {
           await wire.cancelSession();
