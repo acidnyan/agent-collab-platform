@@ -25,7 +25,7 @@ To uninstall, download the same script and run `sh install.sh --uninstall` or `&
 
 **Formerly ACP / agent-collab-platform.** Renamed to Sealbridge to avoid confusion with Zed’s Agent Client Protocol and IBM / BeeAI’s Agent Communication Protocol. Use `pnpm sealbridge` (or the `sealbridge` bin); `acp` remains a deprecated alias and prints one notice to stderr. Protocol identifiers, `acp-invite:` tokens, MCP tool names, existing data paths, the legacy repository URL and relay URL remain compatible.
 
-[Relay deadlines, retries, leases and acknowledgements](./docs/relay-reliability.md)
+[Relay deadlines, retries, leases, offline wake and expiry notices](./docs/relay-reliability.md)
 
 [Persistent contacts and human-readable receipts](./docs/ux1.md)
 
@@ -193,6 +193,8 @@ Copy the printed `acp-invite:...` line. This local example echoes the JSON input
 
 `sealbridge worker` does not register its AgentCard in the public relay directory unless you pass `--publish`. Share the invite directly. `sealbridge discover` lists only workers that opted in with `--publish`.
 
+Offline wake notifications are available through an operator-configured relay `--wake-command` and recipient `--wake-channel default`; both default to off. Wakes are signed and contain only routing identifiers. Queued expiry produces a retained, signed notice and `RELAY_ENVELOPE_EXPIRED` for HTTP/SSE sessions. See [offline wake, expiry notices, and option defaults](docs/relay-reliability.md#offline-wake-notifications).
+
 Add `--on-receive 'node /path/to/notify.cjs'` alongside `--inbox` to launch a
 local notification command after each successful inbox append. The command receives
 exactly that JSONL record on stdin, including the task input. Task settlement does
@@ -212,12 +214,45 @@ The file is created or restricted to mode `0600`; rejected proposals are omitted
 and write failures stop execution. Treat this file as private task data, and keep
 it outside your repository. This also works with the default sandbox echo worker.
 
+Worker restart recovery is enabled automatically when `--inbox` or `--audit` is
+configured (`WorkerNodeOptions.inboxPath` / `auditPath`). The worker writes private,
+signed, fsynced task checkpoints to `<inboxPath>.tasks.jsonl`, or
+`<auditPath>.tasks.jsonl` when no inbox is configured. Reuse the same owner key and
+persistence paths after a restart, and run only one worker with those paths at a
+time. Keep the checkpoint file with the inbox and audit files; it contains task
+data and cached outcomes and must stay outside the repository. No new flag is
+required. Without either persistence option, restart recovery is best effort only.
+
+Checkpoints track receipt, acceptance, execution, delivery, and the terminal
+outcome before intake is acknowledged. On startup, a sealed audit can restore a
+completed outcome. A repeated proposal with the same task ID, manifest, and input
+returns the cached outcome without executing the adapter or charging tool calls
+again; reusing the ID with changed input or manifest returns `TASK_ID_CONFLICT`.
+Current adapters expose no execution-resume interface. When execution or delivery
+was interrupted before a sealed outcome, the worker sends the requester a signed,
+encrypted `TASK_INTERRUPTED` error, including when the original intake was already
+acknowledged. Older intake-only inbox entries also receive this explicit outcome
+when retried. Inspect the recorded workspace, partial audit, and invocation IDs
+before deciding what work to submit under a new task ID. Tool calls with an unknown
+result are never automatically retried. Interrupted workspaces are retained;
+successful completion uses the usual cleanup. Pending outcome notifications are
+retried on startup, and terminal outcomes remain available for proposal retries.
+Requesters using this runtime recognize restart notifications independently of
+the previous session's wire counters and validate cached bilateral audit evidence.
+Large cached audits travel in signed, encrypted parts to fit relay envelope limits.
+Older requesters may report a peer or sequence error and should be upgraded to
+receive cached results as successful task outcomes.
+
 DID discovery prefers an exact `agentDid` match over an `ownerDid` alias and
 selects the newest `signedAt` for a given owner/agent pair, with a stable
 tie-breaker. Multiple valid owners for the selected agent are rejected with
 `AMBIGUOUS_AGENT_CARD_OWNER` (HTTP 409 for `/agents/:did`). Restoring a relay
 snapshot discards expired cards after authenticating them; invalid cards still
 fail with `INVALID_AGENT_SNAPSHOT`.
+
+Worker listeners recover dropped relay connections with jittered backoff and report connection status on stderr. Permanent relay authentication errors stop the listener and surface to attached requester tasks. Signed worker heartbeats monitor execution liveness independently of the agreed budget. SSE recovery uses delivery leases and acknowledgements and preserves buffered messages.
+
+`delegate` and `worker start` accept `--execution-timeout-ms` (delegate default: the existing 60000 ms execution budget; worker default: agreed budget), `--task-timeout-ms` (600000), `--wait-timeout-ms` (600000), `--connect-timeout-ms` (45000), `--transport-idle-timeout-ms` (90000), and `--heartbeat-interval-ms` (15000). Values are milliseconds. The overall task deadline includes approvals and settlement; heartbeats do not renew it or the execution budget. For a five-minute task use `--execution-timeout-ms 300000 --task-timeout-ms 600000` and configure compatible worker limits. See [relay reliability and timeout controls](docs/relay-reliability.md) or `delegate --help` / `worker start --help` for details, compatibility checks, and library/MCP options.
 
 `--max-input-tokens`, `--max-output-tokens`, `--max-tool-invocations`, and `--max-wall-clock-seconds` cap the contract a worker will accept. A proposal above any set cap is rejected before `ACCEPT`, including with `--auto-accept`. `timeoutSeconds` on the manifest is compared with `--max-wall-clock-seconds`. `--max-concurrent-tasks` limits in-flight tasks (default 8). `--max-requests-per-minute` limits proposals from one requester DID.
 
@@ -240,6 +275,43 @@ pnpm sealbridge discover --relay http://127.0.0.1:8787 --allow-private-relay
 
 Expected: `SETTLED`, a JSON deliverable, and `"valid":true` with `"status":"VALID"` on both owners. Without a trust-anchor file or `--expect-final-state` / `--expect-last-hash` / `--expect-entry-count`, `statusLabel` is `VALID (no trust anchor: truncation not checked)`: the chain is intact, and an older valid prefix was not ruled out. Alice verifies signatures, digests and budget, JSON Schema and registered isolated checks, then obtains a signed final approval. `--auto-approve` explicitly opts into policy approval of final verification; omit it for human review. `acp://invite?token=...` is also accepted. Alternatively, use `--to <Bob DID> --relay <URL>`. Bob can verify his own `/tmp/bob-audit.jsonl` locally.
 
+**Ask another person’s AI to review a diff**
+
+The reviewer starts `sealbridge worker start --adapter claude` (or `codex`) with
+`--key` and `--relay` as above. Startup prints an `acp-invite:` token and a
+ready-to-share `https://sealbridge.app/i#acp-invite:...` link. Send that link
+through a trusted channel. Worker invites default to 24 hours (86400 seconds);
+`--invite-ttl <seconds>` accepts 1–2592000 seconds (up to 30 days). The worker’s
+signed card uses the configured lifetime too. The runtime equivalent is
+`WorkerNodeOptions.inviteTtlSeconds` (default 86400); `worker.invite()` also defaults
+to 24 hours. Standalone `invite create --expires-in` keeps its 3600-second default.
+
+The requester installs Sealbridge using the one-line installer shown on the invite
+page, then runs these commands in the project folder. Create the requester key
+only once and reuse it on later requests. Keep private keys and secrets out of
+Git and out of the diff. Replace the example link with the complete received link.
+
+```sh
+sealbridge keygen requester.private.json
+git diff > code.diff
+sealbridge delegate --key requester.private.json --to "https://sealbridge.app/i#acp-invite:..." --title "Review my code diff" --description "Review this diff for bugs and suggest improvements. Return a JSON review." --input-file code.diff --out review.json
+```
+
+`--input-file <path>` parses a JSON object as task input; other text (including a
+diff) becomes `{ "diff": <complete file contents> }`. Invalid `.json` files and
+JSON primitives/arrays are rejected with an actionable error. Use exactly one of
+`--input-file` and the existing `--input '<json>'`. Files are read locally; HTTPS
+invite links are parsed locally and never fetched. Both `acp-invite:` and
+`acp://invite?token=...` remain supported. Links without a fragment token report
+that the sender must provide the complete link.
+
+Keep both terminals open. The reviewer’s approval shows the requester identity,
+title, input bytes/diff lines, time limit, and token/tool budgets. The requester’s
+final approval shows the review body. Answer `y` only after reviewing the displayed
+request or result. `--verbose` (default off) shows full approval JSON instead;
+summary mode signs the same target. Common CLI errors retain their machine codes
+and include a Japanese reason and next step.
+
 **Choose an adapter**
 
 | Adapter           | CLI / programmatic entry                              | Behavior                                                                              |
@@ -251,13 +323,36 @@ Expected: `SETTLED`, a JSON deliverable, and `"valid":true` with `"status":"VALI
 | MCP               | `McpClientAdapter` from `@acp/adapters`               | Official SDK client, stdio or in-memory transport; CapGuard + quota + approval proxy  |
 | Restricted JS     | `--adapter sandbox [--cmd 'return input;']`           | `subprocess_restricted` (no kernel network isolation), or `oci_container` when `isolationLevel` requires it |
 
-Claude/Codex binaries must already be installed. Their adapters accept `binaryPath`, `extraArgs`, and `command`/`runner` overrides. When a provider key is configured in the host (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), a task-scoped loopback broker injects it upstream; the CLI receives only a temporary local broker credential. Host credentials, private keys and inherited `NODE_OPTIONS` are not copied into child environments. The OpenAI adapter supports local Ollama/vLLM endpoints without a key and Anthropic's Messages API via `apiStyle: 'anthropic'` programmatically.
+Claude/Codex binaries must already be installed. `worker start --adapter claude|codex` checks authentication before connecting: configure `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` in the worker host environment. A logged-in CLI alone is insufficient because each task gets a fresh HOME; `~/.claude` and `~/.codex` are not exposed. Without a usable key, startup reports `AGENT_AUTH_REQUIRED` with the next step. Explicit `--cmd` overrides manage their own authentication and skip this preflight. Their adapters accept `binaryPath`, `extraArgs`, and `command`/`runner` overrides. When a provider key is configured in the host (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), a task-scoped loopback broker injects it upstream; the CLI receives only a temporary local broker credential. Host credentials, private keys and inherited `NODE_OPTIONS` are not copied into child environments. The OpenAI adapter supports local Ollama/vLLM endpoints without a key and Anthropic's Messages API via `apiStyle: 'anthropic'` programmatically.
 
 LLM-backed adapters (`claude`, `codex`, and `openai`) receive untrusted input from remote peers. The `claude` and `codex` adapters default to read-only tool flags. Claude Code starts as `claude -p --output-format json --tools Read,Glob,Grep --disallowedTools Bash,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch --permission-mode dontAsk`, which disables shell execution, file writes, and web tools. Codex starts as `codex exec --json --skip-git-repo-check --sandbox read-only`. `ClaudeCodeAdapter` (also exported as `ClaudeCodeCliAdapter`) accepts `tools`, `allowedTools`, `disallowedTools`, `permissionMode`, and `allowUnsafeTools`. `CodexCliAdapter` accepts `sandbox` (`read-only`, `workspace-write`, or `danger-full-access`). A matching flag in `extraArgs` (`--tools`, `--disallowedTools` or `--disallowed-tools`, `--permission-mode`, `--sandbox` or `-s`, including `--flag=value`) replaces that default so the process receives one value for the flag. `allowUnsafeTools: true` omits the Claude read-only defaults. An explicit `command` replaces the whole argument list. `resolveClaudeCodeCliCommand`, `resolveCodexCliCommand`, and `resolvedInvocation()` expose the argv that will be spawned. Operators MUST run these adapters inside an OCI container (`--isolation oci`) or restrict tasks to trusted requester DIDs (`--allow-requester <did>`).
 
 Command and CLI adapters run owner-configured executables with fresh working folders; this is process hygiene, not OS-level filesystem or network confinement. `subprocess_restricted` (the sandbox adapter's default) is a separate OS process with a sanitized environment, a scratch directory, a timeout and SIGKILL, and an output byte cap. When the Node binary supports it, the child receives `--permission` (Node.js >= 22.13 and Node.js 23+) or `--experimental-permission` (earlier Node.js 20 and 22), plus `--allow-fs-read` and `--allow-fs-write` for that directory only. Those flags restrict filesystem, child-process, worker, and native-addon access. They do not block `fetch`, `node:net`, `node:http`, `node:https`, `node:dns`, or `node:dgram`. Task code runs in `node:vm`, which Node.js documents is not a security mechanism. Untrusted third-party code requires `oci_container` (`isolationLevel: 'oci_container'`). OCI uses an already-present `node:22-bookworm-slim` image, prefers Podman, and passes `--network none`, `--read-only`, `--cap-drop ALL`, `--security-opt no-new-privileges`, and memory/PID limits. An unavailable runtime falls back to `subprocess_restricted` and records `ExecutionAttestation.effectiveIsolationLevel`. A container execution failure is surfaced rather than rerun. When execution attestation is required, verification rejects that downgrade unless the signed manifest sets `sandboxPolicy.allowSubprocessFallback: true`. `kernel network` isolation is the OCI path, not the Node permission model.
 
 Session payloads use ephemeral X25519, HKDF-SHA256, and AES-256-GCM, with the header bound into the ciphertext. Use HTTPS for transit. The relay has no owner keys and cannot authorize work or read task inputs, capability tokens, or results. It can still observe routing metadata or deny delivery. See [security details](docs/security-model.md) and the [adversarial security test suite](SECURITY_PROOF.md).
+
+## Docker runtime identity
+
+The Docker image runs as the non-root `node` user (UID 1000). On first startup,
+it generates an owner identity with mode `0600` at `/data/owner.private.json`
+and reuses it on subsequent starts. Mount a named volume at `/data` and reuse
+that volume when replacing containers, for example:
+
+```sh
+docker run --rm -i -v sealbridge-data:/data sealbridge
+```
+
+`/data` is declared as a volume. Set `SEALBRIDGE_KEY_PATH` to use an existing
+readable key or another absolute path in a persistent mounted directory. A new
+key requires an existing directory writable by UID 1000; startup fails with
+mount and permission guidance if the key cannot be read or created.
+`SEALBRIDGE_RELAY_URL` overrides the unchanged default relay URL,
+`https://acp-relay.agent-collab.workers.dev`. Additional MCP flags can follow
+`mcp-server` after the image name.
+
+Operators who built an earlier image revision with a build-time owner identity
+should rotate to a newly generated runtime identity and update the corresponding
+DIDs, allowlists, and invitations.
 
 ## MCP, live progress, revocation, and quorum
 
@@ -298,11 +393,17 @@ A worker reports `PROGRESS` (`percent`, `step`, `message`, and intermediate toke
 
 `RevocationRegistry` checks Ed25519 `RevocationNotice`s (RFC 8785 JCS). The worker rejects a revoked invite before `ACCEPT`. `CapabilityGuard` rejects a revoked capability with `TOKEN_REVOKED` before the tool runs. A notice signed by anyone other than `issuerDid` is invalid.
 
+Invite targets supplied as raw base64url tokens, `acp-invite:` tokens, or `acp://invite?token=` URIs use the verified payload's stable `inviteRevocationId` for lookup, including expired invites. The notice issuer must match the invite owner. Equivalent JSON serializations share that identifier. Signed notices retain their original payloads when exported; imports rebuild the lookup keys. Opaque identifiers and invite targets that cannot be verified retain exact-string lookup for compatibility.
+
 An offline worker still learns about revocation. `deliverRevocation` and `RequesterClient.sendRevocation` queue an encrypted `REVOKE` envelope, carrying a `SignedRevocationNotice`, on that worker's relay inbox. `WorkerNode` ingests every leading `REVOKE` in `runOnce()`, `start()` (including `start({ once: true })`), and `pumpUntil()` before it reads the next `PROPOSE`. An invite notice is recorded only when the sender is the worker owner. A capability notice is recorded only when `issuerDid` issued that token or delegated it. A forged or third-party `REVOKE` is ignored and is not stored. Before `ACCEPT`, every capability id in `capabilityChains` is checked with `assertNotRevoked`, so a revoked capability is `TOKEN_REVOKED` and the task is not accepted. `conformance/offline-revocation-inbox.test.ts` covers the offline queue and the spoofed notice.
 
 `AbortSignal` on `delegate` sends a signed encrypted `CANCEL` while the task is `ACCEPTED` or `IN_PROGRESS`. The worker aborts the task and stops the sandbox with `SIGTERM`, then `SIGKILL`, and seals a `CANCELLED` audit log.
 
-`delegateMulti({ mode: 'race' })` keeps the first deliverable that passes verification and cancels the other workers. `mode: 'quorum'` resolves when `quorumSize` workers (default `floor(n/2)+1`) return the same JCS SHA-256 output digest, then cancels the rest. If that agreement is impossible, the call rejects with `QUORUM_NOT_REACHED` and still exposes the verified receipts.
+`delegateMulti({ mode: 'race' })` selects the first deliverable that passes verification and completes its bilateral checkpoint. `mode: 'quorum'` selects an output when `quorumSize` workers (default `floor(n/2)+1`) complete checkpoints with the same JCS SHA-256 output digest. Both modes cancel sessions still executing and let already delivered sessions finish verification and checkpointing. `completionTimeoutMs` (default `45000`, a positive integer in milliseconds up to `2147483647`) bounds this completion grace after selection or when quorum becomes unreachable; existing task and wait deadlines still apply.
+
+`receipts` retains every completed, verified audit bundle, including minority outputs. If a locally verified delivery cannot finish its checkpoint, `incompleteReceipts` preserves its signed delivery envelope, verification result, collected audit entries, and `completionError`, with `checkpointComplete: false` and no `bundle`. These incomplete receipts do not count as votes or appear in `winners`; checkpoint timeouts are not listed as execution cancellations. If agreement is impossible, the call rejects with `QUORUM_NOT_REACHED` and exposes both receipt arrays (`RACE_FAILED` does the same). A single `delegate` failure after local verification throws `IncompleteSettlementError`, carrying the evidence as `error.incompleteReceipt` and the original failure as `error.cause`.
+
+Worker workspace removal uses five retries with a 50 ms linear backoff for transient filesystem errors. Residual files are reported through `WorkerNodeOptions.onWorkspaceCleanupError({ taskId, workspaceDir, code })`, or a console warning by default. Cleanup and reporting failures preserve the completed protocol result or original execution error.
 
 HTTP receives, SSE streams and WebSocket receives/subscriptions require a fresh recipient-signed `RelayAuth` token bound to that relay's origin. `WorkerNode`, `RequesterClient` and the CLI sign automatically and embed the origin. For direct transport use, pass the recipient key as `new HttpRelayClient(url, key)`, `new SseRelayClient(url, fetch, key)` or `new WebSocketRelayClient(wsUrl, key)`. Those clients set `origin` with `normalizeRelayOrigin` (`ws:` becomes `http:`, `wss:` becomes `https:`), so HTTP, SSE, and WebSocket on the same host and port share one canonical origin. HTTP/SSE also accept an async token generator `(recipientDid, action, origin) => ...` as their third argument; WebSocket accepts it as its second argument. Pass that `origin` through to `createRelayAuthToken`. Raw HTTP callers send `createRelayAuthToken(key, { action, origin })` through `Authorization: Bearer <token>` or `x-acp-relay-auth`. The `auth` query parameter is rejected with `RELAY_QUERY_AUTH_DISABLED` unless the relay is created with `allowQueryAuth: true`, because query credentials leak into access logs, proxy logs, and Referer headers. Use `receive`, `stream` or `subscribe` to match the operation. Tokens expire after five minutes of clock skew and each nonce can be used once while retained in the bounded replay cache. A token for a different origin is rejected with `RELAY_AUTH_ORIGIN_MISMATCH`. A network token that omits `origin` is rejected with `RELAY_AUTH_ORIGIN_REQUIRED` unless the relay sets `allowUnboundRelayAuth: true`. Direct `InMemoryRelay.receive(did)` remains available by default; construct with `{ requireAuth: true }` to require a token there too. That in-memory path does not check origin unless the caller passes one. HTTP and WebSocket error bodies return an allowlisted protocol code. An unexpected runtime, storage, or parser failure is `RELAY_INTERNAL_ERROR` (HTTP 500) and does not include the exception text. Malformed JSON and an invalid URL are HTTP 400 `INVALID_REQUEST`.
 

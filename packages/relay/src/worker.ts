@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { resolveDid } from '@acp/core/edge';
-import type { SignedEnvelope } from '@acp/core/edge';
+import { resolveDid, generateKeyPair } from '@acp/core/edge';
+import type { SignedEnvelope, KeyPair } from '@acp/core/edge';
 import {
   beginDurableLongPoll,
   canonicalRelayPath,
@@ -12,6 +12,8 @@ import {
   relayHttpHeaders,
   relayLimitsFromEnv,
 } from './fetch.js';
+import { relayWakeFromEnv } from './notifications.js';
+import type { RelayWakeOptions } from './notifications.js';
 import type { DurableLongPoll, RelaySnapshot } from './fetch.js';
 import {
   emptyCursor,
@@ -19,7 +21,7 @@ import {
   loadRelayState,
   planJournal,
 } from './journal.js';
-import type { JournalCursor, JournalPlan } from './journal.js';
+import type { RelayMeta, JournalCursor, JournalPlan } from './journal.js';
 
 interface DurableStorage {
   get<T>(key: string): Promise<T | undefined>;
@@ -30,6 +32,7 @@ interface DurableStorage {
 }
 interface DurableState {
   storage: DurableStorage;
+  waitUntil?(promise: Promise<unknown>): void;
   blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T>;
 }
 /**
@@ -44,28 +47,41 @@ export class RelayDurableObject {
   /** Serializes handler mutation, snapshot write, and rollback for every request. */
   private turn: Promise<unknown> = Promise.resolve();
   private persistedVersion = 0;
+  private notifications?: Promise<void>;
+  private notificationKey!: KeyPair;
+  private configuredNotificationKey?: KeyPair;
   private committedSnapshot: RelaySnapshot;
   private cursor: JournalCursor;
   constructor(
     private state: DurableState,
     env?: Record<string, unknown>,
   ) {
-    this.relay = new InMemoryRelay(relayLimitsFromEnv(env));
-    this.handler = createRelayFetchHandler({ relay: this.relay });
+    this.configuredNotificationKey = typeof env?.ACP_NOTIFICATION_KEY === 'string'
+      ? JSON.parse(env.ACP_NOTIFICATION_KEY) as KeyPair : undefined;
+    this.relay = new InMemoryRelay({ ...relayLimitsFromEnv(env),
+      // Channels are supplied by the embedding operator, never by an HTTP request.
+      wake: (env?.ACP_WAKE as RelayWakeOptions | undefined) ?? relayWakeFromEnv(env),
+    });
+    this.handler = createRelayFetchHandler({ relay: this.relay, deferNotifications: true });
     this.cursor = emptyCursor(this.relay.maxSeenEntries, this.relay.maxAuthSeenEntries);
     this.committedSnapshot = emptyRelaySnapshot();
     this.ready = state.blockConcurrencyWhile(() => this.bootstrap());
   }
   private async bootstrap(): Promise<void> {
+    const meta = await this.state.storage.get<RelayMeta>('meta');
+    const key = this.configuredNotificationKey ?? meta?.notificationKey ?? generateKeyPair();
+    this.notificationKey = key;
+    this.relay.setNotificationKey(key);
     const loaded = await loadRelayState(this.state.storage, Date.now(), {
       seenMod: this.relay.maxSeenEntries,
       authMod: this.relay.maxAuthSeenEntries,
     });
     this.cursor = loaded.cursor;
     if (loaded.snapshot) this.relay.restore(loaded.snapshot);
-    this.persistedVersion = this.relay.mutationVersion;
-    this.committedSnapshot = this.relay.snapshot();
+    this.committedSnapshot = loaded.snapshot ?? emptyRelaySnapshot();
+    this.persistedVersion = -1;
     if (loaded.legacy) await this.migrateLegacy(loaded.legacy);
+    await this.writeSnapshot();
   }
   /** Rewrite a pre-sharding blob into per-key records once, then drop the blob. */
   private async migrateLegacy(legacy: { generation: string; count: number }): Promise<void> {
@@ -118,7 +134,7 @@ export class RelayDurableObject {
       // Item keys first, then meta. A crash before meta leaves unreachable
       // orphans; the previous meta still describes the last committed inbox.
       for (const put of plan.puts) await this.state.storage.put(put.key, put.value);
-      await this.state.storage.put('meta', plan.meta);
+      await this.state.storage.put('meta', { ...plan.meta, notificationKey: this.notificationKey });
       this.cursor = plan.cursor;
       this.persistedVersion = version;
       this.committedSnapshot = next;
@@ -134,7 +150,7 @@ export class RelayDurableObject {
   }
   private async commitPlan(plan: JournalPlan, next: RelaySnapshot, version: number): Promise<void> {
     for (const put of plan.puts) await this.state.storage.put(put.key, put.value);
-    await this.state.storage.put('meta', plan.meta);
+    await this.state.storage.put('meta', { ...plan.meta, notificationKey: this.notificationKey });
     this.cursor = plan.cursor;
     this.persistedVersion = version;
     this.committedSnapshot = next;
@@ -159,9 +175,37 @@ export class RelayDurableObject {
   private persist(): Promise<void> {
     return this.enqueue(() => this.writeSnapshot());
   }
+  /** Claims and completions are serialized; external notification delivery never holds the inbox turn. */
+  private runNotifications(): Promise<void> {
+    if (this.notifications) return this.notifications;
+    this.notifications = (async () => {
+      for (;;) {
+        const attempt = await this.enqueue(async () => {
+          this.relay.evictExpired();
+          const next = this.relay.claimWakeNotification();
+          await this.writeSnapshot();
+          return next;
+        });
+        if (!attempt) return;
+        const delivered = await this.relay.deliverWakeNotification(attempt);
+        await this.enqueue(async () => {
+          this.relay.completeWakeNotification(attempt, delivered);
+          await this.writeSnapshot();
+        });
+      }
+    })().finally(() => { this.notifications = undefined; });
+    return this.notifications;
+  }
+  private scheduleNotifications(): void {
+    const work = this.runNotifications();
+    this.state.waitUntil?.(work);
+    // A failed storage turn is retried on the next request/alarm, without failing an admitted POST.
+    void work.catch(() => {});
+  }
   async alarm(): Promise<void> {
     await this.ready;
     await this.enqueue(() => this.writeSnapshot());
+    await this.runNotifications();
   }
   async fetch(request: Request): Promise<Response> {
     await this.ready;
@@ -255,6 +299,7 @@ export class RelayDurableObject {
       this.persistedVersion !== this.relay.mutationVersion
     )
       await this.writeSnapshot();
+    this.scheduleNotifications();
     return response;
   }
 }
@@ -303,6 +348,7 @@ export function clientIp(request: Request): string {
 }
 
 function rateBucket(method: string, path: string): string | undefined {
+  if (path === '/wake' || path === '/delivery-status') return 'notifications';
   if (method === 'POST' && path === '/envelopes') return 'post-envelope';
   if (method === 'GET' && (path === '/envelopes' || path.startsWith('/inbox/')))
     return 'get-envelope';
@@ -407,6 +453,7 @@ function forward(request: Request, body?: string): Request {
 }
 
 function inboxRoutes(method: string, path: string): boolean {
+  if (path === '/wake' || path === '/delivery-status') return true;
   if (method === 'POST' && path === '/envelopes') return true;
   if (
     method === 'GET' &&
@@ -437,7 +484,7 @@ export async function handleRelayEdge(
       return env.RELAY.get(env.RELAY.idFromName('registry')).fetch(forward(request));
     let body: string | undefined;
     let recipient = '';
-    if (request.method === 'POST') {
+    if (request.method === 'POST' && path === '/envelopes') {
       body = await readBody(
         request,
         envInt(env, 'ACP_MAX_ENVELOPE_BYTES', DEFAULT_MAX_ENVELOPE_BYTES),

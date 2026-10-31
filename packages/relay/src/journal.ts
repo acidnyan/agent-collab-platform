@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { verifySignedAgentCard } from '@acp/core/edge';
-import type { SignedAgentCard, SignedEnvelope } from '@acp/core/edge';
+import type { KeyPair, SignedAgentCard, SignedEnvelope } from '@acp/core/edge';
 import { agentRegistryKey } from './fetch.js';
+import type { RelayOperation } from './notifications.js';
 import type { RelaySnapshot } from './fetch.js';
 
 /**
@@ -16,6 +17,9 @@ import type { RelaySnapshot } from './fetch.js';
  */
 export interface RelayMeta {
   v: 2;
+  notificationKey?: KeyPair;
+  operationHead?: number;
+  operationTail?: number;
   head: number;
   tail: number;
   seenTail: number;
@@ -27,6 +31,9 @@ export interface RelayMeta {
 }
 
 export interface JournalCursor {
+  operationHead: number;
+  operationTail: number;
+  operationSeq: Map<string, number>;
   head: number;
   tail: number;
   seqById: Map<string, number>;
@@ -79,6 +86,7 @@ export interface RelayKeyValueStorage {
 
 export function emptyCursor(seenMod: number, authMod: number): JournalCursor {
   return {
+    operationHead: 0, operationTail: 0, operationSeq: new Map(),
     head: 0,
     tail: 0,
     seqById: new Map(),
@@ -117,6 +125,7 @@ function registryKey(card: SignedAgentCard): string {
 
 function cloneCursor(cursor: JournalCursor): JournalCursor {
   return {
+    operationHead: cursor.operationHead, operationTail: cursor.operationTail, operationSeq: new Map(cursor.operationSeq),
     head: cursor.head,
     tail: cursor.tail,
     seqById: new Map(cursor.seqById),
@@ -147,6 +156,23 @@ export function planJournal(
   const seenExpiry = pairMap(next.seenExpiry);
   const authExpiry = pairMap(next.authExpiry);
   const nextIds = new Set<string>();
+  const prevOps = new Map(prev.operations ?? []);
+  const nextOps = new Map(next.operations ?? []);
+  for (const [id, seq] of cursor.operationSeq) {
+    if (!nextOps.has(id) || JSON.stringify(prevOps.get(id)) !== JSON.stringify(nextOps.get(id))) {
+      deletes.push('operation:' + seq);
+      nextCursor.operationSeq.delete(id);
+    }
+  }
+  for (const [id, operation] of nextOps) {
+    if (nextCursor.operationSeq.has(id)) continue;
+    const seq = nextCursor.operationTail++;
+    nextCursor.operationSeq.set(id, seq);
+    puts.push({ key: 'operation:' + seq, value: { id, operation } });
+  }
+  nextCursor.operationHead = nextCursor.operationTail;
+  for (const seq of nextCursor.operationSeq.values())
+    nextCursor.operationHead = Math.min(nextCursor.operationHead, seq);
 
   for (const [, queue] of next.queues) {
     for (const envelope of queue) {
@@ -249,6 +275,7 @@ export function planJournal(
     deletes,
     meta: {
       v: 2,
+      ...(nextCursor.operationTail ? { operationHead: nextCursor.operationHead, operationTail: nextCursor.operationTail } : {}),
       head: nextCursor.head,
       tail: nextCursor.tail,
       seenTail: nextCursor.seenTail,
@@ -312,6 +339,15 @@ async function loadMeta(
   limits: { seenMod: number; authMod: number },
 ): Promise<LoadedRelay> {
   const cursor = emptyCursor(meta.seenMod || limits.seenMod, meta.authMod || limits.authMod);
+  cursor.operationHead = meta.operationHead ?? 0;
+  cursor.operationTail = meta.operationTail ?? 0;
+  const operations: [string, RelayOperation][] = [];
+  for (let seq = cursor.operationHead; seq < cursor.operationTail; seq++) {
+    const row = await storage.get<{ id: string; operation: RelayOperation }>('operation:' + seq);
+    if (!row) continue;
+    cursor.operationSeq.set(row.id, seq);
+    operations.push([row.id, row.operation]);
+  }
   cursor.head = meta.head;
   cursor.tail = meta.tail;
   cursor.seenTail = meta.seenTail;
@@ -326,10 +362,8 @@ async function loadMeta(
       cursor.orphanSeqs.push(seq);
       continue;
     }
-    if (row.expiresAt <= now) {
-      cursor.orphanSeqs.push(seq);
-      continue;
-    }
+    // Restore expired envelopes too: the relay converts them into signed tombstones.
+
     const id = row.envelope.payload.envelopeId;
     cursor.seqById.set(id, seq);
     const did = row.envelope.payload.recipientDid;
@@ -376,6 +410,7 @@ async function loadMeta(
   return {
     cursor,
     snapshot: {
+      operations,
       queues: [...queues],
       seen: cursor.liveSeen,
       authSeen: cursor.liveAuth,

@@ -518,24 +518,36 @@ export function createInviteToken(
   ).toString('base64url');
   return options.format === 'acp' ? 'acp://invite?token=' + token : 'acp-invite:' + token;
 }
+/** Extract invitation material locally; HTTPS links are never fetched. */
+export function inviteTokenFromUri(uri: string): string {
+  if (uri.startsWith('acp-invite:')) return uri;
+  let url: URL;
+  try { url = new URL(uri); } catch { throw new Error('INVALID_OR_EXPIRED_INVITE'); }
+  if (url.protocol === 'https:') {
+    if (!url.hash.startsWith('#acp-invite:') || url.hash === '#acp-invite:')
+      throw new Error('INVITE_LINK_TOKEN_REQUIRED: ask the sender for the complete link including #acp-invite:...');
+    if (url.username || url.password || url.search || !/^#acp-invite:[A-Za-z0-9_-]+$/.test(url.hash))
+      throw new Error('INVALID_INVITE_LINK');
+    return url.hash.slice(1);
+  }
+  if (url.protocol === 'acp:' && url.hostname === 'invite' && url.searchParams.getAll('token').length === 1)
+    return 'acp-invite:' + url.searchParams.get('token');
+  throw new Error('INVALID_OR_EXPIRED_INVITE');
+}
+export function isInviteTarget(value: string): boolean {
+  return value.startsWith('acp') || value.startsWith('https:');
+}
 export function parseAndVerifyInviteToken(
   uri: string,
   now = Date.now(),
-  options: { allowPrivateRelay?: boolean } = {},
+  options: {
+    allowPrivateRelay?: boolean;
+    /** Verify historical invites for revocation lookup without requiring current validity. */
+    allowExpired?: boolean;
+  } = {},
 ): Invite {
   try {
-    let token: string;
-    if (uri.startsWith('acp-invite:')) token = uri.slice(11);
-    else {
-      const u = new URL(uri);
-      if (
-        u.protocol !== 'acp:' ||
-        u.hostname !== 'invite' ||
-        u.searchParams.getAll('token').length !== 1
-      )
-        throw new Error();
-      token = u.searchParams.get('token')!;
-    }
+    const token = inviteTokenFromUri(uri).slice(11);
     if (!/^[\w-]+$/.test(token) || token.length > 65536) throw new Error();
     const signed = JSON.parse(Buffer.from(token, 'base64url').toString()) as Signed<Invite>,
       p = signed.payload;
@@ -552,12 +564,13 @@ export function parseAndVerifyInviteToken(
       Date.parse(p.expiresAt) <= Date.parse(p.issuedAt)
     )
       throw new Error();
-    if (Date.parse(p.expiresAt) <= now || Date.parse(p.agentCard.payload.expiresAt) <= now)
+    if (!options.allowExpired &&
+        (Date.parse(p.expiresAt) <= now || Date.parse(p.agentCard.payload.expiresAt) <= now))
       throw new Error('INVITE_EXPIRED');
     validateRelayEndpointUrl(p.relayUrl, options);
     return p;
   } catch (error) {
-    if (error instanceof Error && ['SSRF_BLOCKED_RELAY_URL', 'INVITE_EXPIRED'].includes(error.message)) throw error;
+    if (error instanceof Error && (['SSRF_BLOCKED_RELAY_URL', 'INVITE_EXPIRED', 'INVALID_INVITE_LINK'].includes(error.message) || error.message.startsWith('INVITE_LINK_TOKEN_REQUIRED:'))) throw error;
     throw new Error('INVALID_OR_EXPIRED_INVITE');
   }
 }

@@ -13,18 +13,26 @@ import {
 import type { AckReceipt, Json, KeyPair, Signed, SignedEnvelope, Transition } from '@acp/core';
 import { JsonlStore, verifyAudit } from '@acp/ledger';
 import type { AuditBody, AuditBundle, AuditEntry, Checkpoint } from '@acp/ledger';
-import { isTransientRelayError, relayRetryDelay, waitForRelayRetry } from '@acp/relay';
+import { RelayEnvelopeExpiredError, isTransientRelayError, relayRetryDelay, waitForRelayRetry, relayDeadline } from '@acp/relay';
+import type { RelayConnectionStatus } from '@acp/relay';
 import type { RelayReceiveFilter, RelayTransport } from '@acp/relay';
 import type { ProgressPayload } from './adapter.js';
-import type { ErrorDetail } from './session.js';
+import type { ErrorDetail, SessionResult } from './session.js';
 /** The peer's signed ERROR, retaining optional diagnostics for programmatic callers. */
 export class PeerRejectedError extends Error {
   readonly code?: string;
   readonly detail?: ErrorDetail;
+  readonly recovery?: { proposalDigest: string; result?: SessionResult;
+    part?: { index: number; count: number; data: string; resultDigest: string } };
   constructor(body: Json) {
-    super('PEER_REJECTED: ' + JSON.stringify(body));
+    super('PEER_REJECTED: ' + JSON.stringify(body && typeof body === 'object' && !Array.isArray(body) && body.recovery
+      ? { code: body.code, recovery: true } : body));
     if (body && typeof body === 'object' && !Array.isArray(body)) {
       if (typeof body.code === 'string') this.code = body.code;
+      const recovery = body.recovery;
+      if (recovery && typeof recovery === 'object' && !Array.isArray(recovery) &&
+          typeof recovery.proposalDigest === 'string')
+        this.recovery = recovery as unknown as NonNullable<PeerRejectedError['recovery']>;
       const detail = body.detail;
       if (detail && typeof detail === 'object' && !Array.isArray(detail) &&
           typeof detail.field === 'string' && typeof detail.hint === 'string' &&
@@ -39,7 +47,7 @@ const pause = (signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
     const abort = () => {
       clearTimeout(timer);
-      reject(new Error('SESSION_ABORTED'));
+      reject(signal?.reason ?? new Error('SESSION_ABORTED'));
     };
     const timer = setTimeout(() => {
       signal?.removeEventListener('abort', abort);
@@ -53,17 +61,20 @@ export async function receiveRelay(
   did: string,
   signal?: AbortSignal,
   filter?: RelayReceiveFilter,
+  onStatus?: (status: RelayConnectionStatus) => void,
 ): Promise<SignedEnvelope> {
   let attempt = 0;
   while (true) {
     signal?.throwIfAborted();
     try {
       const e = await relay.receive(did, 1000, signal, { ...filter, lease: relay.acknowledgeDelivery !== undefined });
+      onStatus?.('connected');
       attempt = 0;
       if (e) return e;
     } catch (error) {
-      if (signal?.aborted) throw new Error('SESSION_ABORTED');
-      if (!isTransientRelayError(error)) throw error;
+      if (signal?.aborted) throw signal.reason ?? new Error('SESSION_ABORTED');
+      if (!isTransientRelayError(error)) { onStatus?.('unavailable'); throw error; }
+      onStatus?.('reconnecting');
       console.warn('Relay poll retry ' + (attempt + 1));
       await waitForRelayRetry(relayRetryDelay(attempt++), signal);
       continue;
@@ -90,6 +101,7 @@ export interface CancelBody {
 export class SessionWire {
   private outgoing = 0;
   private incoming = 0;
+  private readonly recoveryParts = new Map<string, Map<number, Buffer>>();
   /** Opened session views keep the ciphertext envelope so delivery verification can check it. */
   private readonly sealedByView = new WeakMap<SignedEnvelope, SignedEnvelope>();
   private readonly inbox: SignedEnvelope[] = [];
@@ -103,11 +115,14 @@ export class SessionWire {
   private dispatching = false;
   private detached = false;
   private stopped = false;
+  private readonly readController = new AbortController();
+  private lastHeartbeat = 0;
   private cancellation?: Promise<void>;
   /** One bilateral send at a time so PROGRESS cannot overtake its own ACK. */
   private sendTail: Promise<void> = Promise.resolve();
   readonly entries: AuditEntry[] = [];
   onProgress?: (progress: ProgressPayload, envelope: SignedEnvelope) => void | Promise<void>;
+  onActivity?: () => void;
   /** Aborts the running task as soon as a CANCEL frame is queued. */
   earlyCancel?: () => void;
   lastCancel?: SignedEnvelope;
@@ -128,6 +143,19 @@ export class SessionWire {
   }
   get cancellationStarted(): boolean {
     return this.cancellation !== undefined;
+  }
+  close(): void {
+    this.stopped = true;
+    this.readController.abort(new Error('SESSION_CLOSED'));
+    this.pumpError ??= new Error('SESSION_CLOSED');
+    this.rejectWaiters(this.pumpError);
+    for (const wake of this.inboxWaiters.splice(0)) wake();
+    for (const wake of this.waiterAdded.splice(0)) wake();
+  }
+  /** Liveness is signed/encrypted but does not consume audit sequence numbers or extend quota. */
+  async heartbeat(): Promise<void> {
+    await this.relay.send(signEnvelope({ taskId: this.taskId, recipientDid: this.peerDid,
+      seq: 0, eventType: 'HEARTBEAT', payload: { sentAt: Date.now() } }, this.owner, { encrypt: true }));
   }
   /** Keep reading after the caller aborts the session signal, so CANCEL can still be sealed. */
   detachSignal(): void {
@@ -154,11 +182,11 @@ export class SessionWire {
   private async runPump(): Promise<void> {
     try {
       while (!this.stopped) {
-        if (!this.detached && this.signal.aborted) throw new Error('SESSION_ABORTED');
+        if (!this.detached && this.signal.aborted) throw this.signal.reason ?? new Error('SESSION_ABORTED');
         const envelope = await receiveRelay(
           this.relay,
           this.owner.did,
-          this.detached ? undefined : this.signal,
+          AbortSignal.any([this.readController.signal, ...(this.detached ? [] : [this.signal])]),
         );
         if (envelope.payload.eventType === 'CANCEL' && envelope.payload.senderDid === this.peerDid)
           this.earlyCancel?.();
@@ -166,15 +194,10 @@ export class SessionWire {
         this.inboxWaiters.shift()?.();
       }
     } catch (error) {
-      if (!this.detached)
-        this.pumpError = error instanceof Error ? error : new Error(String(error));
+      this.pumpError = error instanceof Error ? error : new Error(String(error));
     } finally {
       this.pumping = false;
       this.inboxWaiters.shift()?.();
-      if (this.detached && !this.stopped) {
-        this.pumpError = undefined;
-        this.startPump();
-      }
     }
   }
   private shift(): Promise<SignedEnvelope> {
@@ -206,6 +229,22 @@ export class SessionWire {
       for (;;) {
         const envelope = await this.nextEnvelope();
         const type = envelope.payload.eventType;
+        if (type === 'HEARTBEAT') {
+          const sentAt = (envelope.payload.payload as { sentAt?: number }).sentAt;
+          if (typeof sentAt !== 'number' || !Number.isSafeInteger(sentAt) || sentAt > Date.now() + 5000)
+            throw new Error('INVALID_HEARTBEAT');
+          if (sentAt > this.lastHeartbeat && Date.now() - sentAt <= 60_000) {
+            this.lastHeartbeat = sentAt;
+            this.onActivity?.();
+          }
+          await acknowledgeRelay(this.relay, this.sealed(envelope));
+          continue;
+        }
+        this.onActivity?.();
+        if (type === 'RECOVERY_PART') {
+          await acknowledgeRelay(this.relay, this.sealed(envelope));
+          continue;
+        }
         const index = this.waiters.findIndex((waiter) => waiter.allowed.includes(type));
         if (index >= 0) {
           this.waiters.splice(index, 1)[0].resolve(envelope);
@@ -243,20 +282,37 @@ export class SessionWire {
         void this.dispatch();
     }
   }
+  private async watchDelivery(envelope: SignedEnvelope): Promise<void> {
+    const signal = this.readController.signal;
+    let attempt = 0;
+    try {
+      while (!signal.aborted && !this.stopped) {
+        await waitForRelayRetry(attempt ? relayRetryDelay(attempt - 1) : 1000, signal);
+        try {
+          const notice = await this.relay.deliveryStatus!(envelope, signal);
+          attempt = 0;
+          if (!notice || notice.payload.state === 'unknown') return;
+          if (notice.payload.state === 'expired') throw new RelayEnvelopeExpiredError(notice);
+        } catch (error) {
+          if (!isTransientRelayError(error)) throw error;
+          attempt++;
+        }
+      }
+    } catch (error) {
+      if (signal.aborted || this.stopped) return;
+      this.pumpError = error instanceof Error ? error : new Error('RELAY_STATUS_FAILED');
+      this.readController.abort(this.pumpError);
+      this.rejectWaiters(this.pumpError);
+      for (const wake of this.inboxWaiters.splice(0)) wake();
+    }
+  }
   async rawSend(eventType: string, payload: unknown): Promise<void> {
-    await this.relay.send(
-      signEnvelope(
-        {
-          taskId: this.taskId,
-          recipientDid: this.peerDid,
-          seq: this.outgoing++,
-          eventType,
-          payload: asJson(payload),
-        },
-        this.owner,
-        { encrypt: true },
-      ),
-    );
+    const signal = this.detached ? this.readController.signal : this.signal;
+    signal.throwIfAborted();
+    const envelope = signEnvelope({ taskId: this.taskId, recipientDid: this.peerDid,
+      seq: this.outgoing++, eventType, payload: asJson(payload) }, this.owner, { encrypt: true });
+    await relayDeadline(Promise.resolve(this.relay.send(envelope)), 2_147_483_647, signal);
+    if (this.relay.deliveryStatus) void this.watchDelivery(envelope);
   }
   /** Ciphertext that still matches the outer signature, when `view` was opened for the session. */
   sealed(view: SignedEnvelope): SignedEnvelope {
@@ -267,7 +323,7 @@ export class SessionWire {
       !verifyEnvelope(e, this.owner.did) ||
       e.payload.senderDid !== this.peerDid ||
       e.payload.taskId !== this.taskId ||
-      e.payload.seq !== this.incoming++
+      (!['ERROR', 'HEARTBEAT'].includes(e.payload.eventType) && e.payload.seq !== this.incoming)
     )
       throw new Error('INVALID_OR_REPLAYED_SESSION_ENVELOPE');
     // The signature covers ciphertext. Open a copy so later session code reads plaintext.
@@ -278,8 +334,36 @@ export class SessionWire {
       }),
     );
     this.sealedByView.set(view, e);
-    if (view.payload.eventType === 'ERROR')
-      throw new PeerRejectedError(view.payload.payload);
+    if (view.payload.eventType === 'HEARTBEAT') return view;
+    if (view.payload.eventType === 'ERROR') {
+      const error = new PeerRejectedError(view.payload.payload);
+      // Restart notifications are independent of the lost session's wire counters.
+      // Sender, recipient, task, signature and encryption were checked above.
+      if (error.recovery) {
+        const part = error.recovery.part;
+        if (part) {
+          if (!Number.isSafeInteger(part.index) || !Number.isSafeInteger(part.count) ||
+              part.index < 0 || part.index >= part.count || typeof part.data !== 'string' ||
+              typeof part.resultDigest !== 'string') throw new Error('INVALID_RECOVERY_OUTCOME');
+          const key = digest({ proposalDigest: error.recovery.proposalDigest, code: error.code,
+            count: part.count, resultDigest: part.resultDigest });
+          const parts = this.recoveryParts.get(key) ?? new Map<number, Buffer>();
+          parts.set(part.index, Buffer.from(part.data, 'base64'));
+          this.recoveryParts.set(key, parts);
+          if (parts.size !== part.count) {
+            view.payload.eventType = 'RECOVERY_PART';
+            return view;
+          }
+          const result = JSON.parse(Buffer.concat(Array.from({ length: part.count }, (_, index) => parts.get(index)!)).toString('utf8')) as SessionResult;
+          if (digest(result) !== part.resultDigest) throw new Error('INVALID_RECOVERY_OUTCOME');
+          error.recovery.result = result;
+          this.recoveryParts.delete(key);
+        }
+        throw error;
+      }
+    }
+    if (e.payload.seq !== this.incoming++) throw new Error('INVALID_OR_REPLAYED_SESSION_ENVELOPE');
+    if (view.payload.eventType === 'ERROR') throw new PeerRejectedError(view.payload.payload);
     return view;
   }
   private acceptInitial(expected: string | string[], initial: SignedEnvelope): SignedEnvelope {
@@ -427,13 +511,14 @@ export class SessionWire {
     >;
     return this.seal({ actor, receiver });
   }
-  async finishWorker(): Promise<AuditBundle> {
+  async finishWorker(onSealed?: (bundle: AuditBundle) => void): Promise<AuditBundle> {
     const actor = (await this.rawReceive('CHECKPOINT')).payload
       .payload as unknown as Signed<Checkpoint>;
     if (!verifySigned(actor, this.peerDid) || digest(actor.payload) !== digest(this.checkpoint()))
       throw new Error('INVALID_AUDIT_CHECKPOINT');
     const receiver = signPayload(actor, this.owner),
       bundle = this.seal({ actor, receiver });
+    onSealed?.(bundle);
     await this.rawSend('CHECKPOINT_ACK', receiver);
     return bundle;
   }

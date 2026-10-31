@@ -6,6 +6,16 @@ verify signatures against contract parties and require explicit owner receipts a
 all five gates. The demo simulates owner approvals with ephemeral keys; it does
 not claim an interactive human clicked an approval screen.
 
+The Docker image contains no generated owner identity and runs as the non-root
+`node` user (UID 1000). First startup generates a mode `0600` key at
+`/data/owner.private.json`; subsequent starts reuse it. Keep `/data` on a mounted
+persistent volume and reuse that volume when replacing containers.
+`SEALBRIDGE_KEY_PATH` can select an existing readable key or an absolute path in
+another persistent mounted directory. Startup fails with actionable guidance
+when the key cannot be read or created. Operators who built an earlier image
+revision with a build-time identity should rotate to a new runtime identity and
+update the corresponding DIDs, allowlists, and invitations.
+
 `subprocess_restricted` (`runSandbox` in `packages/sandbox/src/index.ts`) is a
 separate OS process. The parent passes a sanitized environment (no inherited
 credentials, `NODE_OPTIONS`, or `PATH`), a temporary scratch directory removed

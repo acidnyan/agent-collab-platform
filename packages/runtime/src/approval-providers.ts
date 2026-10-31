@@ -131,12 +131,12 @@ export interface ApprovalProvider {
 export class InteractiveCliApprovalProvider implements ApprovalProvider {
   constructor(
     readonly owner: KeyPair,
-    readonly options: { input?: Readable; output?: Writable } = {},
+    readonly options: { input?: Readable; output?: Writable; formatRequest?: (request: ApprovalRequest) => string } = {},
   ) {}
   async approve(request: ApprovalRequest): Promise<ApprovalReceipt> {
     const output = this.options.output ?? process.stdout;
     output.write(
-      JSON.stringify(
+      (this.options.formatRequest?.(request) ?? JSON.stringify(
         {
           taskId: request.taskId,
           gate: request.gate,
@@ -146,7 +146,7 @@ export class InteractiveCliApprovalProvider implements ApprovalProvider {
         },
         null,
         2,
-      ) + '\nApprove [y/N]? ',
+      )) + '\nApprove [y/N]? ',
     );
     const rl = createInterface({ input: this.options.input ?? process.stdin, crlfDelay: Infinity });
     try {
