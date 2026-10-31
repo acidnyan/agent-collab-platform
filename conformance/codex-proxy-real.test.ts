@@ -57,6 +57,13 @@ it.skipIf(!binary)(binary ? 'routes real Codex HTTP Responses through the task p
   let proxyOrigin = '';
   let proxyToken = '';
   let home = '';
+  let authenticatedRequests = 0;
+  class ObservedCodexAdapter extends CodexCliAdapter {
+    protected override decode(stdout: string, context: AgentTaskContext) {
+      authenticatedRequests = this.activeProxy?.authenticatedRequests ?? 0;
+      return super.decode(stdout, context);
+    }
+  }
   const originalEmit = Server.prototype.emit;
   vi.spyOn(Server.prototype, 'emit').mockImplementation(function (this: Server, event: string | symbol, ...args: unknown[]) {
     if (event === 'request') {
@@ -87,7 +94,7 @@ it.skipIf(!binary)(binary ? 'routes real Codex HTTP Responses through the task p
   try {
     const upstreamUrl = await listen(upstream);
     const externalProxyUrl = await listen(externalProxy);
-    const adapter = new CodexCliAdapter({ binaryPath: binary, apiKey: upstreamKey,
+    const adapter = new ObservedCodexAdapter({ binaryPath: binary, apiKey: upstreamKey,
       baseUrl: upstreamUrl + '/v1',
       runner: async (request) => {
         home = request.env.CODEX_HOME!;
@@ -109,6 +116,7 @@ it.skipIf(!binary)(binary ? 'routes real Codex HTTP Responses through the task p
       input: {}, signal: new AbortController().signal, reportUsage: () => {},
       callTool: async () => { throw new Error('TOOL_DENIED'); } };
     expect(await adapter.executeTask(context)).toEqual({ ok: true });
+    expect(authenticatedRequests).toBeGreaterThanOrEqual(1);
     expect(proxyRequests).toEqual([{ path: '/v1/responses', authorization: 'Bearer ' + proxyToken }]);
     expect(proxyRequests[0].authorization).not.toContain(upstreamKey);
     expect(upstreamRequests).toHaveLength(1);

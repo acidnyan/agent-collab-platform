@@ -6,8 +6,21 @@ import { sanitizedCommandEnvironment } from '@acp/sandbox';
 import type { CommandRequest, CommandRunner, ResolvedCliCommand } from './command.js';
 import type { CredentialProxyHandle } from './credential-proxy.js';
 
-const SUPPORTED_VERSION = 'codex-cli 0.163.0';
+const VERIFIED_VERSION = '0.163.0';
 const TOKEN_ENV = 'SEALBRIDGE_CODEX_PROXY_TOKEN';
+
+function checkVersion(stdout: string, exitCode = 0): void {
+  const match = /^(?:codex(?:-cli)?\s+)?v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(stdout.trim());
+  const parts = match?.slice(1, 4).map((part) => BigInt(part));
+  const verified = [0n, 163n, 0n];
+  const different = parts?.findIndex((part, i) => part !== verified[i]) ?? -1;
+  const comparison = parts && different >= 0 ? (parts[different] > verified[different] ? 1 : -1) : 0;
+  if (exitCode !== 0 || !match || comparison < 0 || comparison === 0 && match[4])
+    throw new Error('CODEX_PROXY_UNSUPPORTED_VERSION: install @openai/codex ' + VERIFIED_VERSION + ' or newer');
+  if (comparison > 0)
+    console.warn('CODEX_PROXY_NEWER_VERSION: Codex CLI ' + match[0].replace(/^codex(?:-cli)?\s+/, '') +
+      ' is newer than verified version ' + VERIFIED_VERSION + '; continuing with proxy routing checks.');
+}
 
 /** Only inference and sandbox options may accompany the generated provider configuration. */
 function validateExtraArgs(args: readonly string[]): void {
@@ -16,6 +29,38 @@ function validateExtraArgs(args: readonly string[]): void {
       if (!args[++i] || args[i].startsWith('-')) throw new Error('CODEX_PROXY_INVALID_ARGUMENT');
     } else if (!/^(--model|--sandbox|--color)=.+$/.test(args[i])) {
       throw new Error('CODEX_PROXY_UNSUPPORTED_ARGUMENT: use model, sandbox or color options');
+    }
+  }
+}
+
+function validateInvocation(args: readonly string[]): void {
+  if (args[0] !== 'exec' || args[1] !== '--json' || args[2] !== '--skip-git-repo-check' || args.at(-1) !== '-')
+    throw new Error('CODEX_PROXY_UNSUPPORTED_ARGUMENT: expected the task exec invocation');
+  validateExtraArgs(args.slice(3, -1));
+}
+
+/** Verify the routing fields in the file and in the actual CLI overrides. */
+function verifyRouting(config: string, args: readonly string[], proxyUrl: string): void {
+  const expected: Record<string, unknown> = {
+    model_provider: 'sealbridge-proxy',
+    'model_providers.sealbridge-proxy.base_url': proxyUrl + '/v1',
+    'model_providers.sealbridge-proxy.wire_api': 'responses',
+    'model_providers.sealbridge-proxy.env_key': TOKEN_ENV,
+    'model_providers.sealbridge-proxy.requires_openai_auth': false,
+    'model_providers.sealbridge-proxy.supports_websockets': false,
+  };
+  let table = '';
+  const fileSettings: string[] = [];
+  for (const line of config.split('\n')) {
+    if (line.startsWith('[')) table = line.slice(1, -1) + '.';
+    else if (line) fileSettings.push(table + line);
+  }
+  const overrides = args.flatMap((arg, i) => arg === '-c' ? [args[i + 1]] : []);
+  for (const settings of [fileSettings, overrides]) {
+    for (const [key, value] of Object.entries(expected)) {
+      const matches = settings.filter((setting) => setting.slice(0, setting.indexOf('=')).trim() === key);
+      if (matches.length !== 1 || matches[0].slice(matches[0].indexOf('=') + 1).trim() !== JSON.stringify(value))
+        throw new Error('CODEX_PROXY_INVALID_CONFIG: expected the task loopback provider and matching overrides');
     }
   }
 }
@@ -81,6 +126,7 @@ export async function prepareCodexProxy(options: {
   runner: CommandRunner;
 }): Promise<CodexProxyInvocation> {
   validateExtraArgs(options.extraArgs);
+  validateInvocation(options.invocation.args);
   const config = proxyConfig(options.proxy);
   const home = await mkdtemp(join(tmpdir(), 'sealbridge-codex-'));
   const close = () => rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -105,12 +151,15 @@ export async function prepareCodexProxy(options: {
       env,
       input: '',
     });
-    if (version.exitCode && version.exitCode !== 0 || version.stdout.trim() !== SUPPORTED_VERSION)
-      throw new Error('CODEX_PROXY_UNSUPPORTED_VERSION: install @openai/codex@0.163.0');
+    checkVersion(version.stdout, version.exitCode);
     if (await readFile(configPath, 'utf8') !== config ||
         (await readdir(home)).some((name) => /^auth\./i.test(name)))
       throw new Error('CODEX_PROXY_INVALID_CONFIG: use a fresh CLI home');
-    // The CLI checks these fields against its schema as it loads the generated file.
+    // Codex 0.163.0 help (exec, debug, features, doctor) exposes no documented
+    // offline resolved-provider dump. Verify our file and exact argv instead;
+    // strict-config checks the schema and ignore-user-config omits user layers.
+    // The environment is generated from an allowlist, without owner provider,
+    // profile or config environment variables such as OPENAI_BASE_URL.
     const args = [...options.invocation.args];
     // CLI overrides also take precedence over any project configuration in the workspace.
     let table = '';
@@ -121,6 +170,7 @@ export async function prepareCodexProxy(options: {
       else overrides.push('-c', table + line);
     }
     args.splice(1, 0, '--strict-config', '--ignore-user-config', '--ephemeral', '--ignore-rules', ...overrides);
+    verifyRouting(await readFile(configPath, 'utf8'), args, options.proxy.url);
     return { invocation: { command: options.invocation.command, args }, env, close };
   } catch (error) {
     await close();

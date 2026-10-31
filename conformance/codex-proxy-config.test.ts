@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { prepareCodexProxy } from '../packages/adapters/src/codex-config.js';
-import { resolveCodexCliCommand, runCommand } from '../packages/adapters/src/command.js';
+import { CodexCliAdapter, resolveCodexCliCommand, runCommand } from '../packages/adapters/src/command.js';
+import { generateKeyPair } from '../packages/core/src/index.js';
+import { buildTaskManifest, type AgentTaskContext } from '../packages/runtime/src/index.js';
 import { japaneseErrorReason } from '../cli/src/error-messages.js';
 
 const directories: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await Promise.all(directories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 async function workspace() {
@@ -111,8 +115,9 @@ describe('Codex proxy configuration', () => {
     await expect(access(home)).rejects.toThrow();
   });
 
-  it.each(['codex-cli 0.162.0', 'codex-cli 0.164.0', 'codex-cli unknown', ''])
-    ('refuses an unverified CLI version: %s', async (version) => {
+  it.each(['codex-cli 0.162.0', 'codex-cli 0.162.99', 'codex-cli 0.100.0',
+    'codex-cli 0.163.0-alpha.1', 'codex-cli unknown', 'codex-cli 0.170', 'codex-cli 0.170.0 extra', ''])
+    ('refuses an older or unparseable CLI version: %s', async (version) => {
       const base = options(await workspace());
       let home = '';
       await expect(prepareCodexProxy({ ...base, runner: async (request) => {
@@ -125,8 +130,32 @@ describe('Codex proxy configuration', () => {
     });
 
   it.each([
+    ['codex-cli 0.163.0', 0], ['codex-cli 0.163.0+build.1', 0], ['codex-cli 0.166.0', 1],
+    ['codex-cli 0.170.0', 1], ['codex-cli 0.170.0-alpha.1', 1], ['codex-cli 1.0.0', 1], ['2.3.4', 1],
+  ])('accepts %s with %i warning lines', async (version, count) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const prepared = await prepareCodexProxy({ ...options(await workspace()),
+      runner: async () => ({ stdout: version }) });
+    try {
+      expect(warn).toHaveBeenCalledTimes(count);
+      if (count) {
+        expect(warn.mock.calls[0]).toHaveLength(1);
+        expect(warn.mock.calls[0][0]).toContain('newer than verified version 0.163.0');
+        expect(warn.mock.calls[0][0]).not.toMatch(/[\r\n]/);
+      }
+    } finally { await prepared.close(); }
+  });
+
+  it('refuses a failed version command even when it prints a supported version', async () => {
+    await expect(prepareCodexProxy({ ...options(await workspace()),
+      runner: async () => ({ stdout: 'codex-cli 0.170.0', exitCode: 1 }) }))
+      .rejects.toThrow('CODEX_PROXY_UNSUPPORTED_VERSION');
+  });
+
+  it.each([
     ['-c', 'model_provider="openai"'], ['--config=model_providers.sealbridge-proxy.base_url="https://example.com"'],
-    ['-cmodel_provider=openai'], ['--profile', 'other'], ['--oss'], ['--local-provider', 'ollama'],
+    ['-cmodel_provider=openai'], ['--config', 'other.toml'], ['--profile', 'other'], ['-p', 'other'],
+    ['--profile=other'], ['-pother'], ['--oss'], ['--local-provider', 'ollama'],
     ['--search'], ['--enable', 'apps'], ['--ignore-user-config'], ['resume'], ['--', 'prompt'],
   ])('refuses provider or configuration arguments: %j', async (...extraArgs) => {
     let called = false;
@@ -134,6 +163,26 @@ describe('Codex proxy configuration', () => {
       runner: async () => { called = true; return { stdout: '' }; },
     })).rejects.toThrow('CODEX_PROXY_UNSUPPORTED_ARGUMENT');
     expect(called).toBe(false);
+  });
+
+  it.each(['-c', '--profile', '-p', '--config', '--oss', '--local-provider'])
+    ('refuses a routing option in the actual invocation: %s', async (flag) => {
+      const base = options(await workspace());
+      base.invocation.args.splice(3, 0, flag, 'other');
+      await expect(prepareCodexProxy(base)).rejects.toThrow('CODEX_PROXY_UNSUPPORTED_ARGUMENT');
+    });
+
+  it('omits inherited provider, profile and config environment settings from the CLI', async () => {
+    const keys = ['OPENAI_BASE_URL', 'OPENAI_API_BASE', 'CODEX_HOME', 'CODEX_PROFILE', 'CODEX_CONFIG_FILE'];
+    for (const key of keys) vi.stubEnv(key, 'owner-setting');
+    const prepared = await prepareCodexProxy({ ...options(await workspace()),
+      runner: async (request) => {
+        for (const key of keys) expect(request.env[key]).not.toBe('owner-setting');
+        return { stdout: 'codex-cli 0.163.0' };
+      } });
+    try {
+      for (const key of keys) expect(prepared.env[key]).not.toBe('owner-setting');
+    } finally { await prepared.close(); }
   });
 
   it.each(['https://example.com', 'http://localhost:12345', 'http://127.0.0.1:12345/v1',
@@ -153,4 +202,45 @@ describe('Codex proxy configuration', () => {
       return { stdout: 'codex-cli 0.163.0' };
     } })).rejects.toThrow('CODEX_PROXY_INVALID_CONFIG');
   });
+});
+
+describe('Codex task proxy requests', () => {
+  it.each(['none', 'missing', 'wrong', 'correct'])
+    ('requires an authenticated request before returning a stub deliverable: %s', async (mode) => {
+      const cwd = await workspace();
+      const script = join(cwd, 'codex-stub.cjs');
+      await writeFile(script, `
+if (process.argv.includes('--version')) { console.log('codex-cli 0.170.0'); process.exit(0); }
+(async () => {
+  const mode = ${JSON.stringify(mode)};
+  if (mode !== 'none') {
+    const setting = process.argv.find(a => a.startsWith('model_providers.sealbridge-proxy.base_url = '));
+    const base = JSON.parse(setting.slice(setting.indexOf('=') + 1));
+    const headers = mode === 'missing' ? {} : { authorization: 'Bearer ' +
+      (mode === 'correct' ? process.env.SEALBRIDGE_CODEX_PROXY_TOKEN : 'wrong-token') };
+    const response = await fetch(base + '/responses', { method: 'POST', headers, body: '{}' });
+    await response.text();
+  }
+  console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'{"ok":true}'}}));
+  console.log(JSON.stringify({type:'turn.completed'}));
+})().catch(() => process.exit(1));
+`);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const upstream = vi.fn(async () => new Response('{}', { headers: { 'content-type': 'application/json' } }));
+      const adapter = new CodexCliAdapter({ binaryPath: script, apiKey: 'synthetic-upstream-key', fetch: upstream });
+      const manifest = buildTaskManifest({ ownerDid: generateKeyPair().did, workerDid: generateKeyPair().did,
+        title: 'Proxy routing fixture', description: 'Return JSON.' });
+      const context: AgentTaskContext = { manifest, taskId: manifest.taskId, workspaceDir: cwd, input: {},
+        signal: new AbortController().signal, reportUsage: () => {}, callTool: async () => null };
+      const run = adapter.executeTask(context);
+      if (mode === 'correct') {
+        await expect(run).resolves.toEqual({ ok: true });
+        expect(upstream).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(run).rejects.toThrow('ADAPTER_PROXY_NOT_USED');
+        expect(upstream).not.toHaveBeenCalled();
+      }
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(japaneseErrorReason('ADAPTER_PROXY_NOT_USED')).toContain('成果物を返せません');
+    });
 });

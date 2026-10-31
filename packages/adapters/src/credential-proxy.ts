@@ -36,6 +36,8 @@ export interface CredentialProxyOptions {
 export interface CredentialProxyHandle {
   url: string;
   token: string;
+  /** Requests to a provider route authenticated with this run's token. */
+  readonly authenticatedRequests: number;
   /** Provider responses whose usage was recorded for this proxy. */
   readonly responsesMetered: number;
   close: () => Promise<void>;
@@ -273,6 +275,7 @@ export async function startCredentialProxy(
   if (!['http:', 'https:'].includes(upstream.protocol)) throw new Error('INVALID_PROVIDER_URL');
   const maxRequests = resolveMaxRequests(options);
   let forwarded = 0;
+  let authenticatedRequests = 0;
   let responsesMetered = 0;
   let inputTokens = 0;
   let outputTokens = 0;
@@ -331,6 +334,7 @@ export async function startCredentialProxy(
         deny(request, response, 403);
         return;
       }
+      authenticatedRequests += 1;
       const blocked = rejection();
       if (blocked) {
         deny(request, response, 429, blocked);
@@ -392,6 +396,9 @@ export async function startCredentialProxy(
   return {
     url: 'http://127.0.0.1:' + address.port,
     token,
+    get authenticatedRequests() {
+      return authenticatedRequests;
+    },
     get responsesMetered() {
       return responsesMetered;
     },

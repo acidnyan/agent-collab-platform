@@ -461,6 +461,8 @@ export class CodexCliAdapter extends ProviderCliAdapter {
     return super.executeTask(context);
   }
   protected override decode(stdout: string, context: AgentTaskContext): Json {
+    if (this.activeProxy && this.activeProxy.authenticatedRequests === 0)
+      throw new Error('ADAPTER_PROXY_NOT_USED: Codex must use the task proxy before returning a deliverable');
     let direct: Json;
     try {
       direct = JSON.parse(stdout) as Json;
