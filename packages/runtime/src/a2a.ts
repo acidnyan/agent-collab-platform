@@ -8,7 +8,7 @@ export function agentCard(name: string, url: string): AgentCard {
     name,
     description: 'Sealbridge owner gateway',
     url,
-    version: '0.2.1',
+    version: '0.2.2',
     protocolVersion: '0.3.0',
     capabilities: { streaming: false },
     defaultInputModes: ['application/json'],
