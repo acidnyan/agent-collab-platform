@@ -64,6 +64,18 @@ function Format-SealbridgeRuntime {
     return "node $node; npm: $($Runtime.NpmState)"
 }
 
+function Get-SealbridgeFileHash {
+    param([string]$Path)
+    # Use .NET directly so hashing does not depend on module autoloading when
+    # Windows PowerShell inherits a module search path from PowerShell 7.
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '') }
+        finally { $sha256.Dispose() }
+    } finally { $stream.Dispose() }
+}
+
 # Set native-command handling explicitly for consistent exit-code checks in
 # Windows PowerShell 5.1 and PowerShell 7, including nonzero npm probes.
 $PSNativeCommandUseErrorActionPreference = $false
@@ -103,8 +115,10 @@ try {
         Invoke-WebRequest "https://nodejs.org/dist/v$nodeVersion/$file" -OutFile $archive -UseBasicParsing
         $checksums = (Invoke-WebRequest "https://nodejs.org/dist/v$nodeVersion/SHASUMS256.txt" -UseBasicParsing).Content
         $expectedHash = ($checksums -split "`n" | Where-Object { $_.Trim().EndsWith("  $file") }) -replace '\s+.*$', ''
-        if (!$expectedHash -or $expectedHash.Length -ne 64 -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expectedHash) { throw 'Node checksum mismatch; installation stopped.' }
-        Expand-Archive -LiteralPath $archive -DestinationPath $download
+        if (!$expectedHash -or $expectedHash.Length -ne 64 -or (Get-SealbridgeFileHash -Path $archive) -ine $expectedHash) { throw 'Node checksum mismatch; installation stopped.' }
+        # ZipFile is available in both runtimes without loading the Archive module.
+        [void][Reflection.Assembly]::Load('System.IO.Compression.FileSystem')
+        [IO.Compression.ZipFile]::ExtractToDirectory($archive, $download)
         New-Item -ItemType Directory -Force -Path $nodeDir | Out-Null
         Copy-Item -Path (Join-Path $download "node-v$nodeVersion-win-$arch/*") -Destination $nodeDir -Recurse -Force
         $resolvedDownload = [IO.Path]::GetFullPath($download)
@@ -142,5 +156,14 @@ try {
     if ($LASTEXITCODE -ne 0) { Write-Warning 'Installed, but doctor found an issue. Follow its fixes and rerun sealbridge doctor.' }
     Write-Host 'Installed. Run sealbridge demo. Uninstall: & ./install.ps1 -Uninstall'
 } catch {
-    throw "Sealbridge installation failed: $_. Initial runtime: $initialRuntime. Current runtime: $(Format-SealbridgeRuntime $selection). Install Node 22 or newer with its bundled npm, put that installation first on PATH, and rerun. For automatic installation, check internet access to nodejs.org and write access to $root."
+    # Error-record formatting can wrap or truncate long exceptions. Emit the
+    # details separately so both shells preserve them in redirected stderr.
+    [Console]::Error.WriteLine("Sealbridge installation failed: $($_.Exception.Message)")
+    [Console]::Error.WriteLine("Initial runtime: $initialRuntime")
+    [Console]::Error.WriteLine("Current runtime: $(Format-SealbridgeRuntime $selection)")
+    [Console]::Error.WriteLine('Install Node 22 or newer with its bundled npm,')
+    [Console]::Error.WriteLine('put that installation first on PATH, and rerun.')
+    [Console]::Error.WriteLine('For automatic installation, check internet access to nodejs.org')
+    [Console]::Error.WriteLine("and write access to $root.")
+    throw 'Sealbridge installation failed. See runtime details and remediation above.'
 }

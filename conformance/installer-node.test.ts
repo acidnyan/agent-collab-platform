@@ -1,13 +1,24 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { existsSync, symlinkSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const windows = process.platform === 'win32';
 const installerPs = resolve('sites/install.ps1');
 const installerSh = resolve('sites/install.sh');
 const quoteSh = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+
+function environmentForShell(shell: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const childEnv = { ...env };
+  if (shell === 'powershell.exe') {
+    // Let Windows PowerShell rebuild its own module paths instead of inheriting
+    // PowerShell 7's paths through the Node process running these tests.
+    for (const key of Object.keys(childEnv)) if (key.toLowerCase() === 'psmodulepath') delete childEnv[key];
+  }
+  return childEnv;
+}
 
 describe.skipIf(!windows)('Windows installer Node check', () => {
   let dir: string;
@@ -71,7 +82,7 @@ $runtime = Get-SealbridgeNode -Prefix $env:SEALBRIDGE_TEST_PREFIX
     delete env.NODE_OPTIONS;
     if (useFakeVersion) env.NODE_OPTIONS = `--require "${preload.replaceAll('\\', '/')}"`;
     const result = spawnSync(shells.get(shell)!, ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver], {
-      env, encoding: 'utf8', timeout: 15000,
+      env: environmentForShell(shell, env), encoding: 'utf8', timeout: 15000,
     });
     expect(result.error).toBeUndefined();
     expect(result.status, result.stderr).toBe(0);
@@ -160,12 +171,14 @@ esac
 
 });
 
-// Exercise the complete installer with local replacements for downloading and
-// extracting the official archive. Node itself is real; only the package and
-// archive payloads are fixtures. No test opens a network connection.
+// Exercise the complete installer with local replacements for downloads. Windows
+// extracts a real ZIP; POSIX uses a local extraction stub. Node itself is real,
+// while the package and archive payloads are fixtures. No test opens a connection.
 describe('installer runtime selection', () => {
   let dir: string;
   let fixture: string;
+  let fixtureArchive: string;
+  let fixtureHash: string;
   let preload: string;
   const shells = windows ? ['powershell.exe', 'pwsh'] : ['/bin/sh'];
   const shellPaths = new Map<string, string>();
@@ -173,7 +186,7 @@ describe('installer runtime selection', () => {
 const fs = require('node:fs');
 const path = require('node:path');
 if (process.argv[2] === '--version') {
-  const mode = fs.readFileSync(path.join(__dirname, 'mode.txt'), 'utf8');
+  const mode = process.env.SEALBRIDGE_TEST_FAILURE === 'installed-npm' ? 'garbage' : fs.readFileSync(path.join(__dirname, 'mode.txt'), 'utf8');
   if (mode === 'nonzero') process.exit(7);
   console.log(mode === 'garbage' ? 'not npm' : '10.9.4');
 } else {
@@ -209,7 +222,8 @@ if (process.argv[2] === '--version') {
 
   beforeAll(() => {
     dir = realpathSync(mkdtempSync(join(tmpdir(), 'sealbridge-runtime-')));
-    fixture = join(dir, 'archive fixture');
+    const arch = process.env.PROCESSOR_ARCHITECTURE === 'ARM64' ? 'arm64' : 'x64';
+    fixture = join(dir, windows ? `node-v22.22.0-win-${arch}` : 'archive fixture');
     stageRuntime(fixture, '22.22.0', 'valid');
     preload = join(dir, 'version.cjs');
     writeFileSync(preload, `
@@ -223,7 +237,21 @@ if (fs.existsSync(file)) Object.defineProperty(process.versions, 'node', { value
       if (found) expect(found.status, found.stderr).toBe(0);
       shellPaths.set(shell, found ? found.stdout.trim().split(/\r?\n/)[0] : shell);
     }
-  });
+    if (windows) {
+      fixtureArchive = join(dir, 'node fixture.zip');
+      const result = spawnSync(shellPaths.get('pwsh')!, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', `
+$ErrorActionPreference = 'Stop'
+[void][Reflection.Assembly]::Load('System.IO.Compression.FileSystem')
+[IO.Compression.ZipFile]::CreateFromDirectory($env:SEALBRIDGE_TEST_FIXTURE, $env:SEALBRIDGE_TEST_ARCHIVE, [IO.Compression.CompressionLevel]::Fastest, $true)
+`], {
+        env: { ...process.env, SEALBRIDGE_TEST_FIXTURE: fixture, SEALBRIDGE_TEST_ARCHIVE: fixtureArchive },
+        encoding: 'utf8', timeout: 30000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      // Node's lowercase digest also exercises comparison with the uppercase .NET digest.
+      fixtureHash = createHash('sha256').update(readFileSync(fixtureArchive)).digest('hex');
+    }
+  }, 40000);
   afterAll(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 
   function install(shell: string, scenario: string, npmMode?: string, failure?: string) {
@@ -263,20 +291,10 @@ $ErrorActionPreference = 'Stop'
 function Invoke-WebRequest {
     param($Uri, $OutFile, [switch]$UseBasicParsing)
     if ($env:SEALBRIDGE_TEST_FAILURE -eq 'download') { throw 'fixture download failed' }
-    if ($OutFile) { Set-Content -LiteralPath $OutFile -Value 'archive fixture' -NoNewline; return }
-    $archive = Get-ChildItem -Path '${root.replaceAll("'", "''")}/download-*/*.zip' | Select-Object -First 1
-    $hash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash
+    if ($OutFile) { Copy-Item -LiteralPath '${fixtureArchive.replaceAll("'", "''")}' -Destination $OutFile; return }
+    $hash = '${fixtureHash}'
     if ($env:SEALBRIDGE_TEST_FAILURE -eq 'checksum') { $hash = '0' * 64 }
-    return @{ Content = "$hash  $($archive.Name)" }
-}
-function Expand-Archive {
-    param($LiteralPath, $DestinationPath)
-    $target = Join-Path $DestinationPath ([IO.Path]::GetFileNameWithoutExtension($LiteralPath))
-    New-Item -ItemType Directory -Path $target | Out-Null
-    Copy-Item -Path "$env:SEALBRIDGE_TEST_FIXTURE/*" -Destination $target -Recurse
-    if ($env:SEALBRIDGE_TEST_FAILURE -eq 'installed-npm') {
-        Set-Content -LiteralPath (Join-Path $target 'node_modules/npm/bin/mode.txt') -Value 'garbage' -NoNewline
-    }
+    return @{ Content = "$hash  ${basename(fixture)}.zip" }
 }
 & '${installerPs.replaceAll("'", "''")}' -NoProfile
 & '${prefix.replaceAll("'", "''")}/sealbridge.ps1' --version
@@ -304,7 +322,7 @@ if [ "$SEALBRIDGE_TEST_FAILURE" = installed-npm ]; then printf garbage > "$4/lib
     }
     const run = () => spawnSync(shellPaths.get(shell)!, windows
       ? ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', driver] : [driver],
-    { env, encoding: 'utf8', timeout: 30000 });
+    { env: environmentForShell(shell, env), encoding: 'utf8', timeout: 30000 });
     return { run, node, prefix, initial, first, home, root, tarball };
   }
 
@@ -352,8 +370,20 @@ if [ "$SEALBRIDGE_TEST_FAILURE" = installed-npm ]; then printf garbage > "$4/lib
       expect(output).toContain(fixture.first);
       expect(output).toContain('24.21.0');
       expect(output).toContain('npm');
-      expect(output).toContain('Install Node 22 or newer with its bundled npm');
-      expect(output).toContain('nodejs.org');
+      const instructions = output.replace(/\s+/g, ' ');
+      expect(instructions).toContain('Install Node 22 or newer with its bundled npm');
+      expect(instructions).toContain('put that installation first on PATH, and rerun.');
+      expect(instructions).toContain('nodejs.org');
+      if (windows) {
+        expect(result.stderr).toContain('Initial runtime:');
+        expect(result.stderr).toContain('Current runtime:');
+        expect(result.stderr).toContain('Install Node 22 or newer with its bundled npm');
+        const reasons: Record<string, string> = {
+          download: 'fixture download failed', checksum: 'Node checksum mismatch',
+          'installed-npm': 'Downloaded Node or its bundled npm is not usable', architecture: 'Windows x64 or arm64 is required',
+        };
+        expect(result.stderr).toContain(reasons[failure]);
+      }
       expect(existsSync(join(fixture.prefix, 'npm-selection.json'))).toBe(false);
     });
   });
