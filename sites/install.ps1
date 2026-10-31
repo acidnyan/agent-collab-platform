@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = Join-Path $env:LOCALAPPDATA 'Sealbridge'
 $nodeVersion = '22.22.0'
-$package = 'sealbridge@0.1.0'
+$package = 'sealbridge@0.2.0'
 $nodeDir = Join-Path $root 'node'
 $npmDir = Join-Path $root 'npm'
 try {
