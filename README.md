@@ -18,6 +18,8 @@ The installers pin the current release, sealbridge 0.2.0, which is published on 
 
 The installer uses a user-local directory, verifies the official Node 22.22.0 archive checksum when Node is needed, and asks for no secrets. No telemetry, sudo, Git or pnpm is required. On macOS/Linux open a new terminal or run `. "$HOME/.profile"` after installing; a piped shell cannot change its parent shell's PATH. Windows updates the current session and user PATH. Run `sealbridge doctor`, then `sealbridge demo`. Doctor makes one relay health request; offline warnings do not undo installation.
 
+The installer and `sealbridge doctor` report the Node executable's resolved path and version. On Windows, the installer checks the Node used by the npm shim in its install prefix: a `node.exe` beside the shim takes precedence over PATH. On macOS/Linux, the launcher uses Node from PATH. Doctor reports its own running Node, so changing PATH later can change the reported runtime. Successful checks use short `(OK)` lines; only `(WARN)` lines include fix hints. A missing worker key is optional; before receiving tasks, create the `.acp` directory and run `sealbridge keygen "$HOME/.acp/worker.private.json"`, or select an existing key with `--key`.
+
 To uninstall, download the same script and run `sh install.sh --uninstall` or `& ./install.ps1 -Uninstall` (PowerShell spelling of --uninstall). Keys are retained. Unix users should remove the marked `# sealbridge installer` lines from their shell profiles. npm-only installs use `npm uninstall -g sealbridge`. Installer locations: `~/.local/share/sealbridge` and `%LOCALAPPDATA%\Sealbridge`.
 
 

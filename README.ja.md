@@ -18,6 +18,8 @@ irm https://sealbridge.dev/install.ps1 | iex
 
 ユーザー専用ディレクトリに導入し、Nodeが必要な場合は公式Node 22.22.0のチェックサムを検証します。秘密情報の入力・テレメトリー・管理者権限・Git・pnpmは不要です。macOS/Linuxでは新しいターミナルを開くか `. "$HOME/.profile"` を実行してください（パイプ実行では親シェルのPATHを変更できません）。Windowsでは現在と次回のPATHを設定します。`sealbridge doctor`、`sealbridge demo` で確認できます。doctorは中継器のヘルスチェックを1回行います。オフライン警告があってもインストールは保持します。
 
+インストーラーと `sealbridge doctor` は、Node 実行ファイルの解決済みパスとバージョンを表示します。Windows では、インストール先の npm ランチャーが使う Node を確認します。ランチャーと同じディレクトリにある `node.exe` が PATH より優先されます。macOS/Linux では PATH 上の Node を使います。doctor は自身を実行している Node を表示するため、後から PATH を変更すると結果が変わる場合があります。正常な項目は短い `(OK)` 行で表示し、対処方法は `(WARN)` 行だけに表示します。ワーカー鍵がなくても正常です。タスクを受け取る前に `.acp` ディレクトリを作成して `sealbridge keygen "$HOME/.acp/worker.private.json"` を実行するか、`--key` で既存の鍵を指定してください。
+
 削除はスクリプトを保存して `sh install.sh --uninstall` または `& ./install.ps1 -Uninstall`（PowerShellでの --uninstall 表記）を実行します。鍵は保持します。Unixではシェル設定の `# sealbridge installer` 行も削除してください。npmのみの導入は `npm uninstall -g sealbridge` で削除できます。保存先は `~/.local/share/sealbridge` と `%LOCALAPPDATA%\Sealbridge` です。
 
 
