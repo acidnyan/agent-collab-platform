@@ -116,8 +116,12 @@ try {
         $checksums = (Invoke-WebRequest "https://nodejs.org/dist/v$nodeVersion/SHASUMS256.txt" -UseBasicParsing).Content
         $expectedHash = ($checksums -split "`n" | Where-Object { $_.Trim().EndsWith("  $file") }) -replace '\s+.*$', ''
         if (!$expectedHash -or $expectedHash.Length -ne 64 -or (Get-SealbridgeFileHash -Path $archive) -ine $expectedHash) { throw 'Node checksum mismatch; installation stopped.' }
-        # ZipFile is available in both runtimes without loading the Archive module.
-        [void][Reflection.Assembly]::Load('System.IO.Compression.FileSystem')
+        # PowerShell 7 already exposes ZipFile. On .NET Framework, use full
+        # assembly names so the GAC resolves them without module autoloading.
+        if (!('System.IO.Compression.ZipFile' -as [type])) {
+            [void][Reflection.Assembly]::Load('System.IO.Compression, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089')
+            [void][Reflection.Assembly]::Load('System.IO.Compression.FileSystem, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089')
+        }
         [IO.Compression.ZipFile]::ExtractToDirectory($archive, $download)
         New-Item -ItemType Directory -Force -Path $nodeDir | Out-Null
         Copy-Item -Path (Join-Path $download "node-v$nodeVersion-win-$arch/*") -Destination $nodeDir -Recurse -Force
