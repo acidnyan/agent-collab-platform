@@ -3,7 +3,7 @@ set -eu
 # Dedicated user-local installation; never changes system Node or user keys.
 ROOT="$HOME/.local/share/sealbridge"
 NODE_VERSION=22.22.0
-PACKAGE=sealbridge@0.2.0
+PACKAGE=sealbridge@0.2.1
 fail() { printf 'Sealbridge: %s\n' "$*" >&2; exit 1; }
 check_node() {
   # Unix npm launchers use the node found on PATH via /usr/bin/env.
