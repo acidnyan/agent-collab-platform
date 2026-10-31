@@ -14,7 +14,7 @@ Windows PowerShell:
 irm https://sealbridge.dev/install.ps1 | iex
 ```
 
-インストーラーは現在のリリース sealbridge 0.2.1 を固定指定しており、同バージョンは npm で公開済みです。Node 22以上があれば `npm i -g sealbridge` または `npx sealbridge@latest` も使えます。
+インストーラーは現在のリリース sealbridge 0.2.2 を固定指定しており、同バージョンは npm で公開済みです。Node 22以上があれば `npm i -g sealbridge` または `npx sealbridge@latest` も使えます。
 
 ユーザー専用ディレクトリに導入し、Nodeが必要な場合は公式Node 22.22.0のチェックサムを検証します。秘密情報の入力・テレメトリー・管理者権限・Git・pnpmは不要です。macOS/Linuxでは新しいターミナルを開くか `. "$HOME/.profile"` を実行してください（パイプ実行では親シェルのPATHを変更できません）。Windowsでは現在と次回のPATHを設定します。`sealbridge doctor`、`sealbridge demo` で確認できます。doctorは中継器のヘルスチェックを1回行います。オフライン警告があってもインストールは保持します。
 
@@ -43,7 +43,7 @@ irm https://sealbridge.dev/install.ps1 | iex
 [![License](https://img.shields.io/badge/License-Apache_2.0_%2F_MIT-blue.svg)](./LICENSE)
 [![X (@takapon01234)](https://img.shields.io/badge/X-%40takapon01234-000000?logo=x)](https://x.com/takapon01234)
 
-> **ステータス**: Sealbridge の最新リリース `v0.2.1` は npm パッケージ `sealbridge` として公開済みです。以前の `v1.0.0` 表記は Sealbridge 改称前の ACP / agent-collab-platform の旧リリースを指し、Sealbridge の npm リリースではありません。
+> **ステータス**: Sealbridge の最新リリース `v0.2.2` は npm パッケージ `sealbridge` として公開済みです。以前の `v1.0.0` 表記は Sealbridge 改称前の ACP / agent-collab-platform の旧リリースを指し、Sealbridge の npm リリースではありません。
 > **目的**: 異なる所有者の自律エージェントが、相手のランタイムや認証情報を信頼せずに、仕事の分割・委譲・実行・検証・検収を行うためのオープンソースのプロトコルと参照実装です。  
 > **作成者**: [@takapon01234](https://x.com/takapon01234)
 
