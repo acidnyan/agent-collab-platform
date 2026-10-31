@@ -21,12 +21,19 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec vitest run conformance/doctor.test.ts
+      - name: Check installer Node resolution (Unix)
+        if: runner.os != 'Windows'
+        run: pnpm exec vitest run conformance/installer-node.test.ts
+      - name: Check installer Node resolution (Windows PowerShell 5.1 and PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pnpm exec vitest run conformance/installer-node.test.ts
       - run: npm pack
       - name: Install in a clean user directory (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          export SEALBRIDGE_INSTALL_TARBALL="$PWD/sealbridge-0.2.0.tgz"
+          export SEALBRIDGE_INSTALL_TARBALL="$PWD/sealbridge-0.2.1.tgz"
           export HOME="$(mktemp -d)"
           mkdir -p "$HOME/fake-node"
           printf '#!/bin/sh\nexit 1\n' > "$HOME/fake-node/node"
@@ -45,7 +52,7 @@ jobs:
         shell: pwsh
         run: |
           $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'sealbridge-clean-user'
-          $env:SEALBRIDGE_INSTALL_TARBALL = Join-Path $PWD 'sealbridge-0.2.0.tgz'
+          $env:SEALBRIDGE_INSTALL_TARBALL = Join-Path $PWD 'sealbridge-0.2.1.tgz'
           $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
           & ./sites/install.ps1 -NoProfile
           & ./sites/install.ps1 -NoProfile
