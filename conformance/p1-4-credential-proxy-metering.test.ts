@@ -905,17 +905,18 @@ describe('issue 59: SSE mid-stream errors still count received usage', () => {
 function providerScript(kind: 'claude' | 'codex', requests: number): string {
   const claude = kind === 'claude';
   return (
+    'if(process.argv.includes("--version")){console.log("codex-cli 0.163.0");process.exit(0);}' +
     'let input="";process.stdin.on("data",b=>input+=b);process.stdin.on("end",async()=>{' +
     'const statuses=[];try{' +
     `for(let i=0;i<${requests};i++){` +
     'const response=await fetch(' +
     (claude
       ? 'process.env.ANTHROPIC_BASE_URL+"/v1/messages"'
-      : 'process.env.OPENAI_BASE_URL+(i===0?"/chat/completions":"/responses")') +
+      : '(require("node:fs").readFileSync(require("node:path").join(process.env.CODEX_HOME,"config.toml"),"utf8").match(/base_url = "([^"]+)"/)[1])+(i===0?"/chat/completions":"/responses")') +
     ',{method:"POST",headers:{' +
     (claude
       ? '"x-api-key":process.env.ANTHROPIC_API_KEY'
-      : 'authorization:"Bearer "+process.env.OPENAI_API_KEY') +
+      : 'authorization:"Bearer "+process.env.SEALBRIDGE_CODEX_PROXY_TOKEN') +
     ',"content-type":"application/json"},body:JSON.stringify({n:i})});' +
     'statuses.push(response.status);await response.text();}' +
     (claude
