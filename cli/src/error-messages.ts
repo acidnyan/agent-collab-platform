@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 const reasons: [RegExp, string][] = [
+  [/CODEX_PROXY_/, 'Codex のプロキシ設定を確認できません。@openai/codex@0.163.0 をインストールし、プロバイダー設定を変更する追加オプションを外して再実行してください。'],
   [/AGENT_AUTH_REQUIRED|AUTH|CREDENTIAL|UNAUTHORIZED|FORBIDDEN/, '認証を利用できません。ホスト側の API キー設定とログイン状態を確認して再実行してください。'],
   [/INVITE_LINK_TOKEN_REQUIRED/, '招待リンクにトークンがありません。# 以降を含む完全なリンクを相手に依頼してください。'],
   [/INVITE_EXPIRED|TOKEN_REVOKED/, '招待の期限が切れたか失効しています。相手に新しい招待を依頼してください。'],

@@ -7,6 +7,7 @@ import type { ChildProcess } from 'node:child_process';
 import type { Json } from '@acp/core';
 import { resolveNodePermissionArgs } from './permission.js';
 import type { NodePermissionProbe } from './permission.js';
+export { sanitizedCommandEnvironment } from './command-environment.js';
 export type {
   NodePermissionFlag,
   NodePermissionProbe,

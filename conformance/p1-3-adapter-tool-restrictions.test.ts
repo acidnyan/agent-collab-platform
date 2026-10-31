@@ -11,6 +11,7 @@ import {
   CodexCliAdapter,
   resolveClaudeCodeCliCommand,
   resolveCodexCliCommand,
+  runCommand,
 } from '../packages/adapters/src/index.js';
 import type { AgentTaskContext } from '../packages/adapters/src/index.js';
 
@@ -220,7 +221,7 @@ describe('P1-3 adapter tool restrictions', () => {
         'dontAsk',
       ]);
 
-      const codex = new CodexCliAdapter(quiet);
+      const codex = new CodexCliAdapter({ ...quiet, runner: runCommand });
       const codexOut = (await codex.executeTask(context)) as { argv: string[] };
       expect(codexOut.argv).toEqual(codex.resolvedInvocation().args);
       expect(codexOut.argv).toContain('--sandbox');
@@ -242,6 +243,7 @@ describe('P1-3 adapter tool restrictions', () => {
 
       const relaxedCodex = new CodexCliAdapter({
         ...quiet,
+        runner: runCommand,
         extraArgs: ['-s', 'workspace-write'],
       });
       const relaxedCodexOut = (await relaxedCodex.executeTask(context)) as { argv: string[] };

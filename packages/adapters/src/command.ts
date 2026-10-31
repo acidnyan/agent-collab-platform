@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import { spawn } from 'node:child_process';
-import { access, writeFile } from 'node:fs/promises';
+import { access, realpath, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
-import { delimiter, isAbsolute, join } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import { startCredentialProxy, type CredentialProxyHandle } from './credential-proxy.js';
-import { sanitizedEnvironment } from '@acp/sandbox';
+import { sanitizedCommandEnvironment } from '@acp/sandbox';
+import { npmShimEntry, quoteWindowsBatchArgument, windowsCommandCandidates } from './windows-command.js';
+import { prepareCodexProxy } from './codex-config.js';
 import type { Json, AgentSkill } from '@acp/core';
 import type { AgentAdapter, AgentTaskContext } from '@acp/runtime';
 export interface CommandRequest {
@@ -23,32 +25,54 @@ export interface CommandResult {
 }
 export type CommandRunner = (request: CommandRequest) => Promise<CommandResult>;
 export async function resolveCommand(command: string): Promise<string> {
-  if (isAbsolute(command)) return command;
-  if (command.includes('/')) throw new Error('COMMAND_MUST_BE_ABSOLUTE_OR_ON_PATH');
-  for (const dir of (process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin').split(delimiter)) {
+  const windows = process.platform === 'win32';
+  if (isAbsolute(command) && (!windows || /\.[^\\/]+$/.test(command))) return command;
+  if (!isAbsolute(command) && /[\\/]/.test(command))
+    throw new Error('COMMAND_MUST_BE_ABSOLUTE_OR_ON_PATH');
+  const candidates = windows ? windowsCommandCandidates(command, process.env.PATHEXT) : [command];
+  const directories = isAbsolute(command) ? [dirname(command)] :
+    (process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin').split(delimiter);
+  for (const dir of directories) {
     if (!isAbsolute(dir)) continue;
-    const path = join(dir, command);
-    try {
-      await access(path, constants.X_OK);
-      return path;
-    } catch {
-      /* next executable directory */
+    for (const candidate of candidates) {
+      const path = isAbsolute(candidate) ? candidate : join(dir, candidate);
+      try {
+        await access(path, windows ? constants.F_OK : constants.X_OK);
+        return path;
+      } catch {
+        /* next executable candidate */
+      }
     }
   }
   throw new Error('COMMAND_NOT_FOUND: ' + command);
 }
 export const runCommand: CommandRunner = async (request) => {
   const command = await resolveCommand(request.command);
+  const windows = process.platform === 'win32';
+  const batch = windows && /\.(cmd|bat)$/i.test(command);
+  const entry = batch ? await npmShimEntry(command) : undefined;
   // Windows refuses to spawn a .js/.cjs/.mjs path directly (EFTYPE). Run it with this Node.
-  const script = /\.(?:cjs|mjs|js)$/i.test(command);
-  const binary = script ? process.execPath : command;
-  const args = script ? [command, ...request.args] : request.args;
+  const target = await realpath(command);
+  const script = entry ?? (/\.(?:cjs|mjs|js)$/i.test(target) ? target : undefined);
+  const defaults = sanitizedCommandEnvironment(request.env.HOME ?? request.cwd, [dirname(command)]);
+  const env = windows ? { ...defaults, ...request.env } : { ...request.env };
+  if (windows) {
+    // Node treats Windows environment names without case distinctions.
+    for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key];
+    env.PATH = defaults.PATH;
+  }
+  const binary = script ? process.execPath : batch ? defaults.ComSpec! : command;
+  const args = script ? [script, ...request.args] : batch ?
+    ['/d', '/s', '/v:off', '/c', '"' + [command, ...request.args].map(quoteWindowsBatchArgument).join(' ') + '"'] : request.args;
+  const windowsVerbatimArguments = windows && (batch && !script ||
+    basename(binary).toLowerCase() === 'cmd.exe' && args.includes('/c'));
   return new Promise<CommandResult>((resolve, reject) => {
     const child = spawn(binary, args, {
       cwd: request.cwd,
-      env: request.env,
+      env,
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: false,
+      windowsVerbatimArguments,
       detached: process.platform !== 'win32',
     });
     let stdout = '',
@@ -127,6 +151,12 @@ export class CommandAgentAdapter implements AgentAdapter {
       return { command, args: [...args, ...(this.options.args ?? [])] };
     }
     // String commands are explicitly owner-configured shell scripts.
+    if (process.platform === 'win32') {
+      const shell = sanitizedCommandEnvironment('').ComSpec!;
+      const extra = (this.options.args ?? []).map(quoteWindowsBatchArgument);
+      return { command: shell, args: ['/d', '/s', '/v:off', '/c',
+        '"' + [this.options.command, ...extra].join(' ') + '"'] };
+    }
     return {
       command: '/bin/sh',
       args: ['-c', this.options.command, 'acp-task', ...(this.options.args ?? [])],
@@ -148,20 +178,19 @@ export class CommandAgentAdapter implements AgentAdapter {
   protected async executeCommand(
     context: AgentTaskContext,
     environment: NodeJS.ProcessEnv = {},
+    invocation = this.invocation(),
   ): Promise<Json> {
     context.signal.throwIfAborted();
     const started = Date.now();
     const input = JSON.stringify(context.input),
       inputFile = join(context.workspaceDir, 'input.json');
     await writeFile(inputFile, input, { mode: 0o600 });
-    const invocation = this.invocation();
     try {
       const result = await (this.options.runner ?? runCommand)({
         ...invocation,
         cwd: context.workspaceDir,
         env: {
-          ...sanitizedEnvironment(context.workspaceDir),
-          PATH: '/usr/local/bin:/usr/bin:/bin',
+          ...sanitizedCommandEnvironment(context.workspaceDir),
           TASK_INPUT_FILE: inputFile,
           ...environment,
         },
@@ -345,7 +374,7 @@ abstract class ProviderCliAdapter extends CommandAgentAdapter {
       process.env[
         this.cliOptions.apiKeyEnv ?? (anthropic ? 'ANTHROPIC_API_KEY' : 'OPENAI_API_KEY')
       ];
-    if (!key || this.cliOptions.runner || this.cliOptions.command)
+    if (!key || this.cliOptions.command || anthropic && this.cliOptions.runner)
       return super.executeTask(context);
     const proxy = await startCredentialProxy({
       apiKey: key,
@@ -360,7 +389,16 @@ abstract class ProviderCliAdapter extends CommandAgentAdapter {
       maxRequests: this.cliOptions.maxRequests,
     });
     this.activeProxy = proxy;
+    let codex: Awaited<ReturnType<typeof prepareCodexProxy>> | undefined;
     try {
+      if (!anthropic) codex = await prepareCodexProxy({
+        proxy,
+        invocation: this.invocation(),
+        extraArgs: this.cliOptions.extraArgs ?? [],
+        request: { cwd: context.workspaceDir, signal: context.signal,
+          timeoutMs: context.manifest.budget.maxWallClockSeconds * 1000 },
+        runner: this.options.runner ?? runCommand,
+      });
       return await this.executeCommand(
         context,
         anthropic
@@ -369,11 +407,13 @@ abstract class ProviderCliAdapter extends CommandAgentAdapter {
               ANTHROPIC_API_KEY: proxy.token,
               CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
             }
-          : { OPENAI_BASE_URL: proxy.url + '/v1', OPENAI_API_KEY: proxy.token },
+          : codex!.env,
+        codex?.invocation,
       );
     } finally {
       this.activeProxy = undefined;
-      await proxy.close();
+      try { await codex?.close(); }
+      finally { await proxy.close(); }
     }
   }
 }
@@ -415,6 +455,10 @@ export class CodexCliAdapter extends ProviderCliAdapter {
       name: 'Codex CLI',
     });
     this.cliOptions = options;
+  }
+  override async executeTask(context: AgentTaskContext): Promise<Json> {
+    assertCliAuthentication('codex', this.cliOptions);
+    return super.executeTask(context);
   }
   protected override decode(stdout: string, context: AgentTaskContext): Json {
     let direct: Json;

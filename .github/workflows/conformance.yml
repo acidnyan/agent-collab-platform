@@ -25,7 +25,12 @@ jobs:
       - run: pnpm build
       - run: pnpm run typecheck
       - run: pnpm validate:schemas
-      - run: pnpm test
+      - run: pnpm test --exclude conformance/codex-proxy-real.test.ts
+      - name: Install Codex CLI 0.163.0
+        run: npm install -g @openai/codex@0.163.0
+      - name: Verify Codex proxy routing
+        shell: bash
+        run: SEALBRIDGE_CODEX_BIN=codex pnpm exec vitest run conformance/codex-proxy-real.test.ts
       - name: Install browser for static site checks
         run: pnpm --filter @sealbridge/sites exec playwright install --with-deps chromium
       - name: Verify static sites and invite privacy

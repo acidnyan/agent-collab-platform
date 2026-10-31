@@ -14,6 +14,7 @@ import { doctorCommand } from './doctor.js';
 import { boardCommand } from './board.js';
 import { formatCliError } from './error-messages.js';
 const read = (path: string) => JSON.parse(readFileSync(path, 'utf8')) as unknown;
+const USAGE = 'Usage: sealbridge <doctor|keygen|validate|approve|audit-verify|receipt|contacts|board|demo|relay|worker|delegate|discover|invite|mcp-server>';
 const AUDIT_VERIFY_USAGE =
   'Usage: sealbridge audit-verify <audit.jsonl|bundle.json> [trust-anchor.json] ' +
   '[--expect-final-state <state>] [--expect-last-hash <hash>] [--expect-entry-count <n>]';
@@ -78,6 +79,15 @@ function save(path: string, value: unknown, privateFile = false) {
 async function main(args: string[]) {
   const [command, ...rest] = args;
   switch (command) {
+    case undefined:
+      console.error(USAGE);
+      process.exitCode = 1;
+      break;
+    case '--help':
+    case '-h':
+    case 'help':
+      console.log(USAGE);
+      break;
     case '--version':
     case '-v':
       console.log(JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version);
@@ -191,9 +201,7 @@ async function main(args: string[]) {
       break;
     }
     default:
-      throw new Error(
-        'Usage: sealbridge <doctor|keygen|validate|approve|audit-verify|receipt|contacts|board|demo|relay|worker|delegate|discover|invite|mcp-server>',
-      );
+      throw new Error('Unknown command: ' + command + '\n' + USAGE);
   }
 }
 main(process.argv.slice(2)).catch((error) => {
