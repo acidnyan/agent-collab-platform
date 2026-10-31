@@ -5,6 +5,15 @@ ROOT="$HOME/.local/share/sealbridge"
 NODE_VERSION=22.22.0
 PACKAGE=sealbridge@0.2.0
 fail() { printf 'Sealbridge: %s\n' "$*" >&2; exit 1; }
+check_node() {
+  # Unix npm launchers use the node found on PATH via /usr/bin/env.
+  NODE_EXECUTABLE=$(command -v node) || return 1
+  NODE_ACTUAL_VERSION=$("$NODE_EXECUTABLE" -p process.versions.node) || return 1
+  NODE_EXECUTABLE=$("$NODE_EXECUTABLE" -p process.execPath) || return 1
+  NODE_MAJOR=${NODE_ACTUAL_VERSION%%.*}
+  case "$NODE_MAJOR" in ''|*[!0-9]*) return 1;; esac
+  [ "$NODE_MAJOR" -ge 22 ]
+}
 case "${1:-}" in
   --uninstall)
     if [ -f "$ROOT/.installer-owned" ]; then
@@ -21,7 +30,7 @@ mkdir -p "$ROOT"
 : > "$ROOT/.installer-owned"
 PATH="$ROOT/node/bin:$ROOT/npm/bin:$PATH"
 export PATH
-if ! command -v node >/dev/null 2>&1 || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'; then
+if ! check_node; then
   case "$(uname -s)" in Linux) OS=linux;; Darwin) OS=darwin;; *) fail 'Supported systems: Linux and macOS.';; esac
   case "$(uname -m)" in x86_64) ARCH=x64;; arm64|aarch64) ARCH=arm64;; *) fail 'Supported architectures: x64 and arm64.';; esac
   command -v curl >/dev/null 2>&1 || fail 'Install curl first.'
@@ -37,6 +46,7 @@ if ! command -v node >/dev/null 2>&1 || ! node -e 'process.exit(Number(process.v
   mkdir -p "$ROOT/node"
   tar -xzf "$TMP/$FILE" -C "$ROOT/node" --strip-components=1
   rm -rf "$TMP"
+  hash -r
 fi
 command -v npm >/dev/null 2>&1 || fail 'Node is present but npm is missing. Install Node with npm and rerun.'
 # Explicit local tarball override for release CI; never defaults to an unpublished package.
@@ -45,6 +55,8 @@ if [ -n "${SEALBRIDGE_INSTALL_TARBALL:-}" ]; then
   PACKAGE=$SEALBRIDGE_INSTALL_TARBALL
 fi
 npm install --global --prefix "$ROOT/npm" --ignore-scripts --no-audit --no-fund "$PACKAGE"
+check_node || fail 'The installed CLI requires Node 22 or newer. Check PATH, then rerun the installer.'
+printf 'Node.js: %s (%s)\n' "$NODE_ACTUAL_VERSION" "$NODE_EXECUTABLE"
 LINE='export PATH="$HOME/.local/share/sealbridge/node/bin:$HOME/.local/share/sealbridge/npm/bin:$PATH" # sealbridge installer'
 for PROFILE in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
   if ! grep -Fq '# sealbridge installer' "$PROFILE" 2>/dev/null; then printf '\n%s\n' "$LINE" >> "$PROFILE"; fi

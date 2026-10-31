@@ -6,6 +6,28 @@ $nodeVersion = '22.22.0'
 $package = 'sealbridge@0.2.0'
 $nodeDir = Join-Path $root 'node'
 $npmDir = Join-Path $root 'npm'
+
+function Get-SealbridgeNode {
+    param([string]$Prefix)
+    # npm's Windows shims prefer node.exe beside the shim, then search PATH.
+    $node = Join-Path $Prefix 'node.exe'
+    if (!(Test-Path -LiteralPath $node -PathType Leaf)) {
+        $command = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (!$command) { return $null }
+        $node = $command.Source
+    }
+    try {
+        $version = & $node -p process.versions.node
+        if ($LASTEXITCODE -ne 0) { return $null }
+        $version = "$version".Trim()
+        $major = 0
+        if ($version -notmatch '^(\d+)\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$' -or ![int]::TryParse($Matches[1], [ref]$major)) { return $null }
+        $resolvedPath = & $node -p process.execPath
+        if ($LASTEXITCODE -ne 0 -or !$resolvedPath) { return $null }
+        return [PSCustomObject]@{ Path = "$resolvedPath".Trim(); Version = $version; Supported = $major -ge 22 }
+    } catch { return $null }
+}
+
 try {
     if ($Uninstall) {
         if (!(Test-Path -LiteralPath (Join-Path $root '.installer-owned'))) { throw 'No installer-owned installation found; nothing removed.' }
@@ -23,12 +45,8 @@ try {
     New-Item -ItemType Directory -Force -Path $root | Out-Null
     Set-Content -LiteralPath (Join-Path $root '.installer-owned') -Value 'Sealbridge installer'
     $env:Path = "$nodeDir;$npmDir;$env:Path"
-    $hasNode = $false
-    if (Get-Command node -ErrorAction SilentlyContinue) {
-        & node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'
-        $hasNode = $LASTEXITCODE -eq 0
-    }
-    if (!$hasNode) {
+    $runtime = Get-SealbridgeNode -Prefix $npmDir
+    if (!$runtime -or !$runtime.Supported) {
         $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } elseif ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') { 'x64' } else { throw 'Windows x64 or arm64 is required.' }
         $file = "node-v$nodeVersion-win-$arch.zip"
         $download = Join-Path $root ('download-' + [guid]::NewGuid())
@@ -41,6 +59,10 @@ try {
         Expand-Archive -LiteralPath $archive -DestinationPath $download
         New-Item -ItemType Directory -Force -Path $nodeDir | Out-Null
         Copy-Item -Path (Join-Path $download "node-v$nodeVersion-win-$arch/*") -Destination $nodeDir -Recurse -Force
+        # A prefix-local runtime would otherwise keep overriding the downloaded Node.
+        if (Test-Path -LiteralPath (Join-Path $npmDir 'node.exe') -PathType Leaf) {
+            Copy-Item -LiteralPath (Join-Path $nodeDir 'node.exe') -Destination (Join-Path $npmDir 'node.exe') -Force
+        }
         $resolvedDownload = [IO.Path]::GetFullPath($download)
         if (!$resolvedDownload.StartsWith([IO.Path]::GetFullPath($root) + [IO.Path]::DirectorySeparatorChar)) { throw 'Unsafe temporary path.' }
         Remove-Item -LiteralPath $resolvedDownload -Recurse -Force
@@ -52,6 +74,9 @@ try {
     }
     & npm.cmd install --global --prefix $npmDir --ignore-scripts --no-audit --no-fund $package
     if ($LASTEXITCODE -ne 0) { throw 'npm installation failed.' }
+    $runtime = Get-SealbridgeNode -Prefix $npmDir
+    if (!$runtime -or !$runtime.Supported) { throw 'The installed CLI requires Node 22 or newer. Check the npm prefix and PATH, then rerun the installer.' }
+    Write-Host "Node.js: $($runtime.Version) ($($runtime.Path))"
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $parts = @($userPath -split ';' | Where-Object { $_ -and $_ -ne $nodeDir -and $_ -ne $npmDir })
     if (!$NoProfile) { [Environment]::SetEnvironmentVariable('Path', ((@($nodeDir, $npmDir) + $parts) -join ';'), 'User') }
