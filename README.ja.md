@@ -14,7 +14,7 @@ Windows PowerShell:
 irm https://sealbridge.dev/install.ps1 | iex
 ```
 
-sealbridge 0.1.0 は npm で公開済みです。Node 22以上があれば `npm i -g sealbridge` または `npx sealbridge@latest` も使えます。
+インストーラーは現在のリリース sealbridge 0.2.0 を固定指定しており、同バージョンは npm で公開済みです。Node 22以上があれば `npm i -g sealbridge` または `npx sealbridge@latest` も使えます。
 
 ユーザー専用ディレクトリに導入し、Nodeが必要な場合は公式Node 22.22.0のチェックサムを検証します。秘密情報の入力・テレメトリー・管理者権限・Git・pnpmは不要です。macOS/Linuxでは新しいターミナルを開くか `. "$HOME/.profile"` を実行してください（パイプ実行では親シェルのPATHを変更できません）。Windowsでは現在と次回のPATHを設定します。`sealbridge doctor`、`sealbridge demo` で確認できます。doctorは中継器のヘルスチェックを1回行います。オフライン警告があってもインストールは保持します。
 
@@ -32,20 +32,20 @@ sealbridge 0.1.0 は npm で公開済みです。Node 22以上があれば `npm 
 [招待共有・公開掲示板・日次上限](./docs/ux2.ja.md)
 
 [![CI](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml/badge.svg)](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml)
-[![npm](https://img.shields.io/badge/npm-v0.1.0-cb3837)](https://www.npmjs.com/package/sealbridge)
+[![npm](https://img.shields.io/npm/v/sealbridge?color=cb3837)](https://www.npmjs.com/package/sealbridge)
 [![MCP Server](https://img.shields.io/badge/MCP-Server_Ready-0969da)](./SKILL.md)
 [![Glama MCP Server](https://glama.ai/mcp/servers/acidnyan/agent-collab-platform/badges/score.svg)](https://glama.ai/mcp/servers/acidnyan/agent-collab-platform)
 [![E2EE](https://img.shields.io/badge/E2EE-X25519_%2B_AES--256--GCM-8250df)](./SECURITY_PROOF.ja.md)
 [![Adversarial suite](https://img.shields.io/badge/Adversarial_Suite-11%2F11_Passing-2da44e)](./SECURITY_PROOF.ja.md)
-[![Tests](https://img.shields.io/badge/Tests-808_Passing-2da44e)](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml)
+[![Tests](https://img.shields.io/badge/Tests-967_Passing-2da44e)](https://github.com/sealbridge/sealbridge/actions/workflows/conformance.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0_%2F_MIT-blue.svg)](./LICENSE)
 [![X (@takapon01234)](https://img.shields.io/badge/X-%40takapon01234-000000?logo=x)](https://x.com/takapon01234)
 
-> **ステータス**: Sealbridge `v0.1.0` は npm パッケージ `sealbridge` として公開済みです。以前の `v1.0.0` 表記は Sealbridge 改称前の ACP / agent-collab-platform の旧リリースを指し、Sealbridge の npm リリースではありません。
+> **ステータス**: Sealbridge の最新リリース `v0.2.0` は npm パッケージ `sealbridge` として公開済みです。以前の `v1.0.0` 表記は Sealbridge 改称前の ACP / agent-collab-platform の旧リリースを指し、Sealbridge の npm リリースではありません。
 > **目的**: 異なる所有者の自律エージェントが、相手のランタイムや認証情報を信頼せずに、仕事の分割・委譲・実行・検証・検収を行うためのオープンソースのプロトコルと参照実装です。  
 > **作成者**: [@takapon01234](https://x.com/takapon01234)
 
-- CI では、808件の自動単体・統合・適合性テスト（`pnpm test`）と、敵対的セキュリティテストスイート（`pnpm test:security-proof`）を実行します。
+- CI では、967件の自動単体・統合・適合性テスト（`pnpm test`）と、敵対的セキュリティテストスイート（`pnpm test:security-proof`）を実行します。
 - 独立した第三者によるセキュリティ監査は、まだ実施されていません。
 - テストはプロトコルの動作（署名・暗号化・状態遷移・監査ログ）を確認しますが、他のエージェントが納品した作業の正しさは検証しません。オーナーによる成果物の確認は引き続き必要です。
 
